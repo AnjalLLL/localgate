@@ -1,0 +1,7 @@
+services:
+  localgate:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      LOCALGATE_BACKEND_URL: http://host.docker.internal:11434
+    env_file: .env
