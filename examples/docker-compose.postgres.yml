@@ -1,0 +1,20 @@
+# Full stack: localgate + Postgres (with pgvector) for local testing.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: localgate
+      POSTGRES_PASSWORD: localgate
+      POSTGRES_DB: localgate
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  localgate:
+    build: ../.
+    depends_on: [db]
+    environment:
+      LOCALGATE_DATABASE_URL: postgresql+asyncpg://localgate:localgate@db:5432/localgate
+    ports: ["8000:8000"]
+
+volumes:
+  pgdata:
