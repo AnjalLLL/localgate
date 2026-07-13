@@ -7,11 +7,29 @@ produces embeddings via a simple deterministic hash, so retrieval tests can
 assert on exact similarity behavior instead of guessing at a real model's
 output.
 """
+
 import hashlib
 from collections.abc import AsyncIterator
 from typing import Any
 
 from localgate.backends.base import InferenceBackend
+
+
+def _text(message: dict[str, Any]) -> str:
+    """Flatten a message's content the way a real backend would.
+
+    Content is a list of parts for multimodal messages. A double that only handled
+    plain strings would pass tests a real backend fails, which is worse than no
+    double at all.
+    """
+    content = message.get("content")
+    if isinstance(content, list):
+        return " ".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return content or ""
 
 
 def _deterministic_embedding(text: str, dims: int = 16) -> list[float]:
@@ -24,23 +42,31 @@ def _deterministic_embedding(text: str, dims: int = 16) -> list[float]:
 
 
 class FakeBackend(InferenceBackend):
-    def __init__(self, base_url: str = ""):
-        self.base_url = base_url
+    name = "fake"
+
+    def __init__(self, base_url: str | None = "") -> None:
+        self.base_url = base_url or ""
         self.calls: list[dict[str, Any]] = []  # inspectable in tests
 
     async def chat(self, request: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(request)
         last_user_msg = next(
-            (m["content"] for m in reversed(request["messages"]) if m["role"] == "user"), ""
+            (_text(m) for m in reversed(request["messages"]) if m["role"] == "user"), ""
         )
         reply = f"Echo: {last_user_msg}"
-        prompt_tokens = sum(len(m.get("content", "").split()) for m in request["messages"])
+        prompt_tokens = sum(len(_text(m).split()) for m in request["messages"])
         completion_tokens = len(reply.split())
         return {
             "id": "fake-chatcmpl-1",
             "object": "chat.completion",
             "model": request.get("model", "fake-model"),
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": reply},
+                    "finish_reason": "stop",
+                }
+            ],
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,

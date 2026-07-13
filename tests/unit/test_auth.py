@@ -1,4 +1,5 @@
 """Unit tests for core.auth — key generation and hashing."""
+
 from localgate.core.auth import generate_key, hash_key
 
 

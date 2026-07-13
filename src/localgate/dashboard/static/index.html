@@ -204,14 +204,21 @@ function toast(msg) {
   toast._t = setTimeout(() => t.style.display = 'none', 3000);
 }
 
+// Every localgate error comes back in the OpenAI envelope: {"error": {"message", ...}}.
+// The messages are written to be actionable, so surfacing them verbatim is the whole point.
+function errorMessage(payload, resp) {
+  return (payload && payload.error && payload.error.message)
+    || (payload && payload.detail)
+    || `${resp.status} ${resp.statusText}`;
+}
+
 async function api(path, { admin = false, method = 'GET', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (admin) headers['X-Admin-Key'] = store.adminKey;
   else headers['Authorization'] = `Bearer ${store.apiKey}`;
   const resp = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!resp.ok) {
-    const detail = await resp.json().catch(() => ({}));
-    throw new Error(detail.detail || `${resp.status} ${resp.statusText}`);
+    throw new Error(errorMessage(await resp.json().catch(() => null), resp));
   }
   return resp.json();
 }
@@ -229,10 +236,16 @@ $$('.tabs button').forEach(btn => btn.addEventListener('click', () => {
 // ---------- Health ----------
 async function pollHealth() {
   try {
-    const r = await fetch('/health');
-    const data = await r.json();
-    $('#health-dot').classList.toggle('on', !!data.backend_reachable);
-    $('#health-text').textContent = data.backend_reachable ? 'gate open' : 'backend unreachable';
+    // /health answers 503 when a dependency is down, so don't gate on resp.ok —
+    // the body is exactly what we want to read in that case.
+    const data = await (await fetch('/health')).json();
+    const backendUp = !!(data.backend && data.backend.reachable);
+    const dbUp = !!(data.database && data.database.connected);
+
+    $('#health-dot').classList.toggle('on', backendUp && dbUp);
+    $('#health-text').textContent = !backendUp
+      ? `backend unreachable (${data.backend ? data.backend.type : '?'})`
+      : !dbUp ? 'database unreachable' : 'gate open';
   } catch {
     $('#health-dot').classList.remove('on');
     $('#health-text').textContent = 'server unreachable';
@@ -286,13 +299,23 @@ async function selectSession(id) {
     return;
   }
   try {
-    const history = await api(`/v1/conversations/${id}`);
-    if (!history.length) {
+    // The response carries the session's rolling summary and memory-chunk count
+    // alongside the messages — the parts that are otherwise invisible from outside.
+    const { messages = [], summary, memory_chunks } = await api(`/v1/conversations/${id}`);
+    if (!messages.length) {
       $('#chat-scroll').innerHTML = '<div class="empty-hint">No messages in this session yet.</div>';
       return;
     }
-    history.forEach(m => addMessageToUI(m.role, m.content));
+    if (summary) {
+      const el = document.createElement('div');
+      el.className = 'empty-hint';
+      el.textContent = `Recalled summary (${memory_chunks} memory chunks): ${summary}`;
+      $('#chat-scroll').appendChild(el);
+    }
+    messages.forEach(m => addMessageToUI(m.role, m.content));
   } catch (e) {
+    // A session belonging to another key is a 404, indistinguishable from one that
+    // never existed — that is intentional, not a bug (see docs/api-reference.md).
     addMessageToUI('assistant', `Could not load history: ${e.message}`);
   }
 }
@@ -327,8 +350,7 @@ async function sendMessage() {
       body: JSON.stringify({ model: $('#model-input').value || 'llama3', messages }),
     });
     if (!resp.ok) {
-      const detail = await resp.json().catch(() => ({}));
-      throw new Error(detail.detail || `${resp.status} ${resp.statusText}`);
+      throw new Error(errorMessage(await resp.json().catch(() => null), resp));
     }
     const data = await resp.json();
     const reply = data.choices?.[0]?.message?.content || '(empty response)';
@@ -370,11 +392,21 @@ $('#create-key-btn').addEventListener('click', async () => {
   } catch (e) { toast(`Error: ${e.message}`); }
 });
 
+// /admin/config is grouped (backend / database / memory / cache / security), so render it
+// depth-first — a flat Object.entries would print "[object Object]" for every group.
+function flatten(obj, prefix = '') {
+  return Object.entries(obj).flatMap(([k, v]) => {
+    const label = prefix ? `${prefix}.${k}` : k;
+    if (v && typeof v === 'object' && !Array.isArray(v)) return flatten(v, label);
+    return [[label, Array.isArray(v) ? (v.join(', ') || '—') : String(v)]];
+  });
+}
+
 async function loadConfig() {
   if (!store.adminKey) return;
   try {
     const cfg = await api('/admin/config', { admin: true });
-    $('#config-box').innerHTML = Object.entries(cfg).map(([k, v]) =>
+    $('#config-box').innerHTML = flatten(cfg).map(([k, v]) =>
       `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('');
   } catch (e) {
     $('#config-box').innerHTML = `<div class="kv"><span>error</span><span>${e.message}</span></div>`;
@@ -385,9 +417,11 @@ async function loadKeys() {
   if (!store.adminKey) return;
   try {
     const keys = await api('/admin/keys', { admin: true });
+    // The prefix is the only way to tell which row is the key in your hand — the rest of
+    // it is hashed and unrecoverable.
     $('#keys-table-body').innerHTML = keys.map(k => `
       <tr>
-        <td>${k.name}</td>
+        <td>${k.name}<div class="mono" style="font-size:11px;opacity:.6">${k.key_prefix || '—'}…</div></td>
         <td><span class="pill ${k.revoked ? 'revoked' : 'active'}">${k.revoked ? 'revoked' : 'active'}</span></td>
         <td class="mono">${k.rate_limit_per_min}</td>
         <td>${k.revoked ? '' : `<button class="danger" data-revoke="${k.id}">Revoke</button>`}</td>

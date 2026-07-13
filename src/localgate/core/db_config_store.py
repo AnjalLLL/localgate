@@ -11,6 +11,7 @@ We only ever write to this file after actually testing the connection
 imply "this database was reachable at the time it was saved," not just
 "someone typed a string into a form."
 """
+
 import json
 from pathlib import Path
 from typing import TypedDict

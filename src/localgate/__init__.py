@@ -5,4 +5,4 @@ and token accounting on top of any local inference backend
 (Ollama, llama.cpp, vLLM).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.6.0"

@@ -1,7 +1,16 @@
-"""vLLM adapter — vLLM already speaks OpenAI's API, so this is a thin pass-through."""
-from localgate.backends.base import InferenceBackend
+"""vLLM adapter.
+
+vLLM's OpenAI server is the reference implementation of the API the generic
+backend targets, so this is a pass-through with vLLM's default port. Embeddings
+only work if vLLM was started with an embedding model (``--task embed``);
+otherwise ``/v1/embeddings`` returns 400 and the memory layer surfaces that.
+"""
+
+from __future__ import annotations
+
+from localgate.backends.openai_compat import OpenAICompatBackend
 
 
-class VLLMBackend(InferenceBackend):
-    def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = base_url
+class VLLMBackend(OpenAICompatBackend):
+    name = "vllm"
+    default_base_url = "http://localhost:8000"

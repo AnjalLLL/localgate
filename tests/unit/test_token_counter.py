@@ -1,4 +1,5 @@
 """Unit tests for core.token_counter."""
+
 from localgate.core.token_counter import count_message_tokens, count_tokens
 
 

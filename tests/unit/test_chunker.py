@@ -1,4 +1,5 @@
 """Unit tests for memory.chunker."""
+
 from localgate.memory.chunker import chunk_text
 
 

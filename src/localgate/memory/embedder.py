@@ -1,4 +1,5 @@
 """Embedding generation — delegates to whatever inference backend is configured."""
+
 from localgate.backends.base import InferenceBackend
 
 
