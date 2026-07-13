@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .env
 *.db
+localgate.config.json
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
