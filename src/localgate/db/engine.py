@@ -15,7 +15,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, inspect
+from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -95,6 +95,14 @@ def _upgrade_to_head(connection: Connection) -> None:
     * tables, no stamp      -> stamp 0001, then run the rest (this branch)
     * tables and a stamp    -> run whatever is pending; a no-op when current
     """
+    # Never wait indefinitely for a lock. A migration blocked behind another connection
+    # (a previous instance during a rolling deploy, an open psql session) would otherwise
+    # hang the whole startup with no log line and no timeout — the server sits at
+    # "Waiting for application startup" forever, and the only symptom the operator sees is
+    # that nothing responds. Failing after 15s with a real error is strictly better.
+    if connection.dialect.name == "postgresql":
+        connection.execute(text("SET lock_timeout = '15s'"))
+
     inspector = inspect(connection)
     tables = set(inspector.get_table_names())
     config = alembic_config(connection)

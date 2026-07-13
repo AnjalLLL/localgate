@@ -110,6 +110,65 @@ async def test_pre_migrations_database_is_adopted_without_losing_data(tmp_path):
     await engine.dispose()
 
 
+async def test_a_partially_migrated_database_converges_instead_of_failing(tmp_path):
+    """Regression: adopting a drifted database used to abort startup.
+
+    A pre-migrations database is *not* guaranteed to match revision 0001 exactly. A run
+    that half-applied, a hand-edited column, or a create_all from an intermediate commit
+    all leave a schema that is nearly-0001 but not quite. Migration 0002 then tried to
+    CREATE an already-existing table, the transaction aborted, and the server hung at
+    "Waiting for application startup" — no error, no timeout, just a gateway that never
+    came up and a dashboard that never loaded.
+
+    This reproduces exactly that shape: the legacy schema, plus conversation_summaries
+    already present. The migration must fill in what is missing and leave what is there.
+    """
+    url = f"sqlite+aiosqlite:///{tmp_path}/drifted.db"
+
+    setup = create_async_engine(url)
+    async with setup.begin() as conn:
+        for ddl in LEGACY_DDL:
+            await conn.execute(text(ddl))
+        # The table 0002 wants to create already exists — the half-applied state.
+        await conn.execute(
+            text(
+                "CREATE TABLE conversation_summaries (id VARCHAR NOT NULL, "
+                "session_id VARCHAR, api_key_id VARCHAR, content TEXT, "
+                "covers_until TIMESTAMP, message_count INTEGER, created_at TIMESTAMP, "
+                "PRIMARY KEY (id))"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO api_keys (id, name, key_hash, rate_limit_per_min, revoked) "
+                "VALUES ('k1', 'survivor', 'hash', 60, 0)"
+            )
+        )
+    await setup.dispose()
+
+    engine = make_engine(url)
+    await init_models(engine)  # must converge, not abort
+
+    assert await current_revision(engine) == "0002"
+    assert "key_prefix" in await _columns(engine, "api_keys")  # the missing bits were added
+    assert "kind" in await _columns(engine, "memory_chunks")
+
+    async with engine.connect() as conn:
+        name = (await conn.execute(text("SELECT name FROM api_keys WHERE id='k1'"))).scalar_one()
+    assert name == "survivor"
+    await engine.dispose()
+
+
+async def test_migrating_a_drifted_database_twice_is_still_a_no_op(tmp_path):
+    """The idempotent guards must not themselves break the ordinary re-run path."""
+    url = f"sqlite+aiosqlite:///{tmp_path}/twice_drifted.db"
+    engine = make_engine(url)
+    await init_models(engine)
+    await init_models(engine)
+    assert await current_revision(engine) == "0002"
+    await engine.dispose()
+
+
 async def test_columns_added_to_existing_rows_are_backfilled_not_left_null(tmp_path):
     """Regression: `key_prefix` was added as nullable with no backfill, so every key that
     predated the migration held NULL — and `GET /admin/keys` (whose response model types it
