@@ -5,15 +5,46 @@ on:
     tags: ["v*"]
 
 jobs:
-  publish:
+  # Never publish something that doesn't pass. A tag is not a promise that CI ran — the
+  # tag can be pushed from a branch that was never tested, and PyPI releases cannot be
+  # unpublished, only yanked.
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
     steps:
       - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run ruff check src/ tests/
+      - run: uv run mypy src/
+      - run: uv run pytest -q
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # Trusted publishing: no API token to store, rotate, or leak.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      # __version__ and pyproject's version are two places that can disagree, and the one
+      # users see at runtime is __version__. A release whose version lies about itself is
+      # worse than no release, so the tag must match both.
+      - name: Check the tag matches the declared version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          INIT=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/localgate/__init__.py)
+          TOML=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          echo "tag=$TAG  __init__=$INIT  pyproject=$TOML"
+          test "$TAG" = "$INIT" && test "$TAG" = "$TOML"
+
       - name: Build
         run: uv build
-      - name: Publish to PyPI
+
+      - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,7 +1,26 @@
+# localgate against an Ollama running on the host.
+#
+#   docker compose up
+#
+# For a full stack with Postgres, see examples/docker-compose.postgres.yml.
 services:
   localgate:
     build: .
     ports: ["8000:8000"]
-    environment:
-      LOCALGATE_BACKEND_URL: http://host.docker.internal:11434
     env_file: .env
+    environment:
+      # The container's "localhost" is the container, not your machine — so Ollama has to
+      # be reached through the host gateway. On Linux, run with `--add-host` or use
+      # network_mode: host instead.
+      LOCALGATE_BACKEND_URL: http://host.docker.internal:11434
+      LOCALGATE_DATABASE_URL: sqlite+aiosqlite:////data/localgate.db
+    volumes:
+      # Without this the database is a file inside the container, and every restart throws
+      # away your keys, usage and memory.
+      - localgate-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  localgate-data:

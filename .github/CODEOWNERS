@@ -1,1 +1,11 @@
-* @your-github-username
+# Default reviewer for everything.
+* @AnjalLLL
+
+# Changes here alter the security posture — auth, key handling, the rules that decide who
+# can call what. They always want a second pair of eyes, even on a one-line diff.
+/src/localgate/core/auth.py      @AnjalLLL
+/src/localgate/api/deps.py       @AnjalLLL
+/SECURITY.md                     @AnjalLLL
+
+# Migrations are the one thing a user cannot roll back by reverting a commit.
+/src/localgate/db/migrations/    @AnjalLLL

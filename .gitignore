@@ -1,14 +1,37 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+dist/
+build/
+
+# Environments
 .venv/
 venv/
+env/
+
+# Secrets and local state. .env holds the admin key; localgate.config.json holds the
+# established database URL, credentials included.
 .env
-*.db
+!.env.example
 localgate.config.json
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Tooling caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-dist/
-build/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
 .DS_Store
+Thumbs.db

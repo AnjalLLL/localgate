@@ -1,6 +1,14 @@
-# Full stack: localgate + Postgres (with pgvector) for local testing.
+# The full stack: localgate + Postgres, talking to an Ollama on the host.
+#
+#   docker compose -f examples/docker-compose.postgres.yml up
+#
+# Then create a key:
+#   docker compose -f examples/docker-compose.postgres.yml exec localgate localgate keys create --name my-app
 services:
   db:
+    # pgvector isn't required — localgate stores embeddings as JSON so the schema is
+    # identical on SQLite and Postgres (see docs/decisions/0002). This image is used
+    # anyway so the pgvector upgrade path is available without swapping images later.
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: localgate
@@ -8,13 +16,29 @@ services:
       POSTGRES_DB: localgate
     ports: ["5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U localgate"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   localgate:
     build: ../.
-    depends_on: [db]
-    environment:
-      LOCALGATE_DATABASE_URL: postgresql+asyncpg://localgate:localgate@db:5432/localgate
+    depends_on:
+      db:
+        # Not just "started": localgate migrates on boot, and a Postgres that is up but
+        # not yet accepting connections would fail that migration and kill the container.
+        condition: service_healthy
     ports: ["8000:8000"]
+    environment:
+      # Note `+asyncpg`. A bare postgresql:// URL selects a sync driver that isn't installed.
+      LOCALGATE_DATABASE_URL: postgresql+asyncpg://localgate:localgate@db:5432/localgate
+      LOCALGATE_BACKEND_URL: http://host.docker.internal:11434
+      LOCALGATE_ADMIN_KEY: ${LOCALGATE_ADMIN_KEY:-change-me-in-production}
+      LOCALGATE_LOG_FORMAT: json
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
 volumes:
   pgdata:

@@ -6,25 +6,105 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
+
       - name: Sync dependencies
         run: uv sync --all-extras --python ${{ matrix.python-version }}
+
       - name: Lint
         run: uv run ruff check src/ tests/
+
       - name: Format check
         run: uv run ruff format --check src/ tests/
+
+      - name: Type check
+        run: uv run mypy src/
+
       - name: Test
-        run: uv run pytest -v
+        run: uv run pytest -q --cov --cov-report=term-missing
+
+  postgres:
+    # The SQLite suite proves the logic. This proves the migrations and queries actually
+    # run on Postgres, which is what production uses — skipping it is how you ship a
+    # migration that only works on SQLite.
+    runs-on: ubuntu-latest
+    env:
+      LOCALGATE_DATABASE_URL: postgresql+asyncpg://localgate:localgate@localhost:5432/localgate
+      LOCALGATE_BACKEND_TYPE: fake
+      LOCALGATE_ADMIN_KEY: ci-admin-key
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: localgate
+          POSTGRES_PASSWORD: localgate
+          POSTGRES_DB: localgate
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+
+      - name: Migrate a real Postgres database
+        run: |
+          uv run localgate db upgrade
+          uv run localgate db current
+
+      - name: Migrations are idempotent (startup re-runs them on every boot)
+        run: uv run localgate db upgrade
+
+      - name: Create and list a key against Postgres
+        run: |
+          uv run localgate keys create --name ci-key
+          uv run localgate keys list
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t localgate:ci .
+
+      - name: The image starts and serves
+        run: |
+          docker run -d --name lg -p 8000:8000 \
+            -e LOCALGATE_BACKEND_TYPE=fake \
+            -e LOCALGATE_ADMIN_KEY=ci-admin-key \
+            localgate:ci
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:8000/health/live > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:8000/health/live || (docker logs lg && exit 1)
+          docker rm -f lg
