@@ -16,6 +16,13 @@ env/
 !.env.example
 localgate.config.json
 
+# Private planning notes — kept locally, never published.
+ROADMAP.md
+
+# Local codegen / patch scratch scripts
+apply_*.sh
+reapply_*.sh
+
 # Databases
 *.db
 *.sqlite

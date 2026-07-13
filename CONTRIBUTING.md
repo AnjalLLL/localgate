@@ -107,7 +107,7 @@ Look for the `good-first-issue` label. Reliably useful things that are always op
 - Better error messages — if something confused you, it will confuse the next person, and
   the fix is a sentence
 - Documentation gaps, especially in [getting-started](docs/getting-started.md)
-- Anything in [ROADMAP.md](ROADMAP.md) under "Later"
+- Anything in the [open issues](https://github.com/AnjalLLL/localgate/issues)
 
 ## Code of Conduct
 

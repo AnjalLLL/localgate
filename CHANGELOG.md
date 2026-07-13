@@ -6,7 +6,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.6.0] — 2026-07-14
 
-The release that makes everything the roadmap promised actually work.
+The release where the advertised features actually work.
 
 ### Fixed
 
