@@ -7,6 +7,11 @@ that makes a small model remember far more than its context window holds.**
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
+![The localgate dashboard: request and token totals, tokens per day, and a per-model breakdown](docs/images/dashboard-overview.png)
+
+<sub>The built-in dashboard at <code>/dashboard/</code> — token spend, latency, and per-model
+usage across every key. Shown with sample data.</sub>
+
 ---
 
 ## Why
@@ -97,6 +102,17 @@ part of it. See **[RAG Memory](docs/rag-memory.md)**.
 - **Production-ready** — structured JSON logs with correlation IDs, Prometheus metrics,
   liveness/readiness split, graceful shutdown, fail-fast config validation.
 - **Dashboard** — keys, usage and conversations in the browser, at `/dashboard/`.
+
+## Dashboard
+
+Served at `/dashboard/` — no build step, no separate deploy. It talks to the same `/admin`
+API the CLI does, so anything it can do is equally scriptable.
+
+![Key management: prefixes, per-key rate limits, last use, and revocation](docs/images/dashboard-keys.png)
+
+Create and revoke keys, watch token spend per model, browse stored conversations with their
+rolling summaries, and point the gateway at a new database — with the connection tested
+before it is saved.
 
 ## CLI
 

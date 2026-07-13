@@ -5,32 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>localgate</title>
 <style>
-  /* A conventional admin interface: system fonts, neutral surfaces, one accent colour
-     used only for primary actions and focus rings. Nothing here is decorative. */
+  /* Surfaces and text are neutral; colour is reserved for state and for the two data
+     series. The series hues are the validated categorical slots 1 and 2, stepped
+     separately for the light and dark surfaces rather than flipped. */
   :root {
-    --bg: #f6f7f8;
+    --bg: #f4f6f8;
     --surface: #ffffff;
-    --border: #d8dce0;
-    --border-strong: #c2c8ce;
-    --text: #1c1f23;
-    --muted: #62696f;
-    --accent: #2563a8;
-    --accent-hover: #1e5290;
-    --ok: #1e7a4c;
-    --ok-bg: #e6f4ec;
+    --surface-2: #f9fafb;
+    --border: #e2e6ea;
+    --border-strong: #cbd2d9;
+    --text: #14181c;
+    --text-2: #5b646d;
+    --text-3: #8a939c;
+    --accent: #2a78d6;
+    --accent-hover: #1f63b8;
+    --accent-soft: #eaf2fc;
+    --ok: #1a7f4b;
+    --ok-soft: #e7f4ec;
     --danger: #b3261e;
-    --danger-bg: #fce8e6;
+    --danger-soft: #fceceb;
     --warn: #8a5a00;
-    --warn-bg: #fdf3e0;
+    --warn-soft: #fdf4e3;
+    --series-1: #2a78d6;   /* prompt tokens */
+    --series-2: #1baf7a;   /* completion tokens */
+    --shadow: 0 1px 2px rgba(16,24,32,.06), 0 1px 3px rgba(16,24,32,.04);
+    --shadow-lg: 0 4px 12px rgba(16,24,32,.10);
+    --radius: 8px;
     --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #17191c; --surface: #1f2226; --border: #32373d; --border-strong: #454b52;
-      --text: #e6e8ea; --muted: #99a1a8; --accent: #4d8fd6; --accent-hover: #66a2e3;
-      --ok: #5cc08a; --ok-bg: #17301f; --danger: #e08a80; --danger-bg: #30201e;
-      --warn: #d6a44d; --warn-bg: #302819;
+      --bg: #14171a; --surface: #1f2226; --surface-2: #24282d;
+      --border: #30353b; --border-strong: #434a52;
+      --text: #eceef0; --text-2: #a3abb3; --text-3: #79828b;
+      --accent: #3987e5; --accent-hover: #5599ea; --accent-soft: #1b2833;
+      --ok: #5cc08a; --ok-soft: #16281d;
+      --danger: #e08a80; --danger-soft: #2b1d1c;
+      --warn: #d6a44d; --warn-soft: #2a2417;
+      --series-1: #3987e5; --series-2: #199e70;
+      --shadow: 0 1px 2px rgba(0,0,0,.3); --shadow-lg: 0 4px 14px rgba(0,0,0,.4);
     }
   }
 
@@ -38,132 +52,179 @@
   body {
     margin: 0; height: 100vh; overflow: hidden;
     background: var(--bg); color: var(--text);
-    font-family: var(--sans); font-size: 14px; line-height: 1.45;
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
   }
-  h1, h2, h3 { margin: 0; font-weight: 600; }
-  code, .mono { font-family: var(--mono); }
+  h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
+  .mono, code { font-family: var(--mono); }
 
-  /* Controls */
-  button, input, select, textarea {
-    font-family: inherit; font-size: 14px; color: var(--text);
+  button, input, select {
+    font: inherit; font-size: 14px; color: var(--text);
     background: var(--surface); border: 1px solid var(--border-strong);
-    border-radius: 4px; padding: 7px 10px;
+    border-radius: 6px; padding: 8px 11px;
   }
   input, select { width: 100%; }
-  input::placeholder { color: var(--muted); }
-  button { cursor: pointer; white-space: nowrap; }
-  button:hover { background: var(--bg); }
+  input::placeholder { color: var(--text-3); }
+  button { cursor: pointer; white-space: nowrap; font-weight: 500; }
+  button:hover { background: var(--surface-2); }
   button:focus-visible, input:focus-visible, select:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent);
   }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-  button.link { background: none; border: none; padding: 4px 6px; color: var(--accent); text-decoration: underline; }
+  button.link { background: none; border: none; padding: 4px 6px; color: var(--accent); font-weight: 500; }
+  button.link:hover { background: var(--accent-soft); }
   button.link.danger { color: var(--danger); }
-  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.link.danger:hover { background: var(--danger-soft); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
 
-  /* Layout */
-  .app { display: grid; grid-template-columns: 240px 1fr; grid-template-rows: 52px 1fr; height: 100%; }
+  /* ---- Shell ---- */
+  .app { display: grid; grid-template-columns: 232px 1fr; grid-template-rows: 56px 1fr; height: 100%; }
+  .app.no-aside { grid-template-columns: 0 1fr; }
+  .app.no-aside aside { display: none; }
+  /* The columns are assigned explicitly. Without this, hiding the aside takes it out of
+     the grid entirely and `main` auto-places into column 1 — which is 0 wide, so the
+     whole page renders blank. */
+  aside { grid-column: 1; }
+  main { grid-column: 2; }
 
   header {
-    grid-column: 1 / -1; display: flex; align-items: center; gap: 24px;
-    padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 28px;
+    padding: 0 20px; background: var(--surface); border-bottom: 1px solid var(--border);
   }
-  header .name { font-weight: 600; font-size: 15px; }
+  .brand { display: flex; align-items: baseline; gap: 8px; }
+  .brand .name { font-weight: 650; font-size: 16px; letter-spacing: -.02em; }
+  .brand .ver { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
   nav { display: flex; gap: 2px; }
   nav button {
-    background: none; border: none; border-bottom: 2px solid transparent;
-    border-radius: 0; padding: 8px 12px; color: var(--muted);
+    background: none; border: none; border-radius: 6px; padding: 7px 12px;
+    color: var(--text-2); font-weight: 500;
   }
-  nav button:hover { background: var(--bg); color: var(--text); }
-  nav button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
+  nav button:hover { background: var(--surface-2); color: var(--text); }
+  nav button.active { background: var(--accent-soft); color: var(--accent); }
 
-  .status { margin-left: auto; display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .health {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border-radius: 100px; background: var(--surface-2);
+    border: 1px solid var(--border); font-size: 12px; color: var(--text-2);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }
   .dot.ok { background: var(--ok); }
   .dot.bad { background: var(--danger); }
 
   aside {
     background: var(--surface); border-right: 1px solid var(--border);
-    padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+    padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
   }
-  aside h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 8px 0 2px; }
+  aside h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); margin: 12px 0 4px; }
   .session {
-    padding: 7px 9px; border-radius: 4px; cursor: pointer; color: var(--muted);
+    padding: 8px 10px; border-radius: 6px; cursor: pointer; color: var(--text-2);
     font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .session:hover { background: var(--bg); }
-  .session.active { background: var(--bg); color: var(--text); font-weight: 500; }
+  .session:hover { background: var(--surface-2); color: var(--text); }
+  .session.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 
   main { overflow-y: auto; }
   .view { display: none; }
   .view.active { display: block; }
+  .page { padding: 24px; max-width: 1180px; margin: 0 auto; }
+  .page > h1 { font-size: 20px; margin-bottom: 2px; }
+  .page > .lede { color: var(--text-2); font-size: 13px; margin: 0 0 20px; }
 
-  /* Chat */
-  #chat.active { display: flex; flex-direction: column; height: 100%; }
-  .transcript { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; }
-  .msg { max-width: 68ch; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border); white-space: pre-wrap; word-wrap: break-word; }
-  .msg.user { align-self: flex-end; background: var(--surface); border-color: var(--border-strong); }
-  .msg.assistant { align-self: flex-start; background: var(--surface); }
-  .msg .meta { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
-  .composer { display: flex; gap: 8px; padding: 12px 24px; border-top: 1px solid var(--border); background: var(--surface); }
-  .composer input[type=text] { flex: 1; }
-  .note { color: var(--muted); font-size: 13px; padding: 16px 24px; }
-  .summary-note {
-    margin: 0 24px; padding: 10px 12px; border-radius: 4px;
-    background: var(--warn-bg); color: var(--warn); font-size: 13px; border: 1px solid var(--border);
-  }
-
-  /* Admin */
-  .admin { padding: 20px 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-items: start; }
-  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
-  .panel > h2 { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .panel > h2 { padding: 14px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
   .panel > .body { padding: 16px; }
-  .panel .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .hint { color: var(--text-2); font-size: 12px; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
 
-  .field { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-  .field label { width: 120px; flex-shrink: 0; color: var(--muted); font-size: 13px; }
-  .actions { display: flex; gap: 8px; margin-top: 4px; }
+  /* ---- Stat tiles: a headline number is not a chart ---- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow); }
+  .stat .label { font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
+  .stat .value { font-size: 26px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .stat .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
 
+  /* ---- Chart ---- */
+  .legend { display: flex; gap: 16px; align-items: center; font-size: 12px; color: var(--text-2); }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .chart-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .chart-head h2 { font-size: 14px; }
+  #chart { display: block; width: 100%; height: 200px; }
+  .grid-line { stroke: var(--border); stroke-width: 1; }
+  .axis-text { fill: var(--text-3); font-size: 10px; font-family: var(--mono); }
+  .bar { cursor: pointer; }
+  .bar:hover { opacity: .82; }
+
+  .tooltip {
+    position: fixed; z-index: 20; pointer-events: none; display: none;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 6px; padding: 8px 10px; box-shadow: var(--shadow-lg);
+    font-size: 12px; min-width: 150px;
+  }
+  .tooltip .t-date { font-weight: 600; margin-bottom: 5px; }
+  .tooltip .t-row { display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+  .tooltip .t-row .k { display: flex; align-items: center; gap: 6px; color: var(--text-2); }
+  .tooltip .t-row .v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ---- Tables ---- */
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 9px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
-  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--text-2); font-weight: 500; font-size: 12px; background: var(--surface-2); }
   tbody tr:last-child td { border-bottom: none; }
-  td.num, th.num { text-align: right; font-family: var(--mono); }
-  .tag { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 12px; }
-  .tag.ok { background: var(--ok-bg); color: var(--ok); }
-  .tag.off { background: var(--danger-bg); color: var(--danger); }
-  .sub { display: block; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  tbody tr:hover { background: var(--surface-2); }
+  td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+  .tag.ok { background: var(--ok-soft); color: var(--ok); }
+  .tag.off { background: var(--danger-soft); color: var(--danger); }
+  .sub { display: block; font-family: var(--mono); font-size: 11px; color: var(--text-3); }
 
-  .kv { display: flex; justify-content: space-between; gap: 16px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  /* ---- Forms / misc ---- */
+  .field { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .field label { width: 118px; flex-shrink: 0; color: var(--text-2); font-size: 13px; }
+  .kv { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0; border-bottom: 1px solid var(--border); }
   .kv:last-child { border-bottom: none; }
-  .kv dt { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .kv dt { color: var(--text-2); font-family: var(--mono); font-size: 12px; }
   .kv dd { margin: 0; font-family: var(--mono); font-size: 12px; text-align: right; word-break: break-all; }
+  .callout { padding: 10px 12px; border-radius: 6px; font-size: 13px; margin-top: 12px; }
+  .callout.ok { background: var(--ok-soft); color: var(--ok); }
+  .callout.bad { background: var(--danger-soft); color: var(--danger); }
+  .callout.neutral { background: var(--surface-2); color: var(--text-2); }
+  .secret { margin-top: 14px; padding: 14px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-soft); }
+  .secret code { display: block; word-break: break-all; font-size: 13px; margin-bottom: 8px; color: var(--text); }
+  .empty { padding: 28px 16px; text-align: center; color: var(--text-2); font-size: 13px; }
 
-  .callout { padding: 10px 12px; border-radius: 4px; font-size: 13px; margin-top: 10px; border: 1px solid var(--border); }
-  .callout.ok { background: var(--ok-bg); color: var(--ok); }
-  .callout.bad { background: var(--danger-bg); color: var(--danger); }
-  .secret { margin-top: 12px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg); }
-  .secret code { display: block; word-break: break-all; font-size: 13px; margin-bottom: 8px; }
+  /* ---- Chat ---- */
+  #chat.active { display: flex; flex-direction: column; height: 100%; }
+  .transcript { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 68ch; padding: 11px 14px; border-radius: 10px; white-space: pre-wrap; word-wrap: break-word; box-shadow: var(--shadow); }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+  .msg .meta { margin-top: 6px; font-family: var(--mono); font-size: 11px; opacity: .75; }
+  .composer { display: flex; gap: 10px; padding: 14px 24px; border-top: 1px solid var(--border); background: var(--surface); }
+  .composer input[type=text] { flex: 1; }
+  .summary-note { margin: 0 24px; padding: 10px 12px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); font-size: 13px; }
 
   .toast {
-    position: fixed; bottom: 20px; right: 20px; z-index: 10; display: none;
+    position: fixed; bottom: 20px; right: 20px; z-index: 30; display: none;
     background: var(--surface); border: 1px solid var(--border-strong);
-    border-radius: 4px; padding: 10px 14px; font-size: 13px;
-    box-shadow: 0 2px 8px rgba(0,0,0,.12);
+    border-radius: 6px; padding: 11px 15px; font-size: 13px; box-shadow: var(--shadow-lg);
   }
 </style>
 </head>
 <body>
 
-<div class="app">
+<div class="app no-aside" id="app">
   <header>
-    <span class="name">localgate</span>
+    <div class="brand"><span class="name">localgate</span><span class="ver" id="version"></span></div>
     <nav>
-      <button data-view="chat" class="active">Chat</button>
-      <button data-view="admin">Admin</button>
+      <button data-view="overview" class="active">Overview</button>
+      <button data-view="chat">Chat</button>
+      <button data-view="keys">API keys</button>
+      <button data-view="settings">Settings</button>
     </nav>
-    <div class="status"><span class="dot" id="health-dot"></span><span id="health-text">checking…</span></div>
+    <div class="health"><span class="dot" id="health-dot"></span><span id="health-text">checking…</span></div>
   </header>
 
   <aside>
@@ -173,9 +234,44 @@
   </aside>
 
   <main>
-    <section class="view active" id="chat">
+
+    <!-- ---------------- Overview ---------------- -->
+    <section class="view active" id="overview">
+      <div class="page">
+        <h1>Overview</h1>
+        <p class="lede">Traffic and token spend across every key on this gateway.</p>
+
+        <div class="stats" id="stats"></div>
+
+        <div class="panel" style="margin-bottom:16px">
+          <div class="chart-head">
+            <h2>Tokens per day</h2>
+            <div class="legend">
+              <span class="item"><span class="swatch" style="background:var(--series-1)"></span>Prompt</span>
+              <span class="item"><span class="swatch" style="background:var(--series-2)"></span>Completion</span>
+            </div>
+          </div>
+          <div class="body">
+            <svg id="chart" role="img" aria-label="Prompt and completion tokens per day"></svg>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>By model</h2>
+          <table>
+            <thead>
+              <tr><th>Model</th><th class="num">Requests</th><th class="num">Tokens</th></tr>
+            </thead>
+            <tbody id="models-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------- Chat ---------------- -->
+    <section class="view" id="chat">
       <div class="transcript" id="transcript">
-        <p class="note">Set an API key on the Admin tab, then send a message.</p>
+        <p class="empty">Set an API key under Settings, then send a message.</p>
       </div>
       <form class="composer" id="composer">
         <input type="text" id="model" value="llama3" style="max-width:150px" aria-label="Model" />
@@ -184,101 +280,99 @@
       </form>
     </section>
 
-    <section class="view" id="admin">
-      <div class="admin">
+    <!-- ---------------- Keys ---------------- -->
+    <section class="view" id="keys">
+      <div class="page">
+        <h1>API keys</h1>
+        <p class="lede">A key is shown once, at creation. Only its hash is stored.</p>
 
-        <div class="panel">
-          <h2>Credentials</h2>
-          <div class="body">
-            <p class="hint" style="margin-top:0">
-              Stored in this browser only, and sent as the <code>X-Admin-Key</code> and
-              <code>Authorization</code> headers.
-            </p>
-            <div class="field">
-              <label for="admin-key">Admin key</label>
-              <input type="password" id="admin-key" placeholder="LOCALGATE_ADMIN_KEY" />
+        <div class="cols">
+          <div class="panel" style="grid-column: 1 / -1">
+            <h2>Existing keys</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th><th>Status</th><th class="num">Limit/min</th>
+                  <th>Last used</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="keys-body">
+                <tr><td colspan="5" class="empty">Enter an admin key under Settings.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="panel">
+            <h2>Create a key</h2>
+            <div class="body">
+              <div class="field"><label for="key-name">Name</label><input type="text" id="key-name" placeholder="my-app" /></div>
+              <div class="field"><label for="key-limit">Requests/min</label><input type="number" id="key-limit" value="60" min="1" /></div>
+              <button class="primary" id="create-key">Create key</button>
+              <div id="key-reveal"></div>
             </div>
-            <div class="field">
-              <label for="api-key">API key</label>
-              <input type="password" id="api-key" placeholder="lg_… (used for chat)" />
+          </div>
+
+          <div class="panel">
+            <h2>Usage for one key</h2>
+            <div class="body">
+              <div class="field"><label for="usage-key">Key</label><select id="usage-key"></select></div>
+              <dl id="usage-body" style="margin:14px 0 0"></dl>
             </div>
-            <div class="actions"><button class="primary" id="save-creds">Save</button></div>
           </div>
         </div>
-
-        <div class="panel">
-          <h2>Create API key</h2>
-          <div class="body">
-            <div class="field">
-              <label for="key-name">Name</label>
-              <input type="text" id="key-name" placeholder="my-app" />
-            </div>
-            <div class="field">
-              <label for="key-limit">Requests/min</label>
-              <input type="number" id="key-limit" value="60" min="1" />
-            </div>
-            <div class="actions"><button class="primary" id="create-key">Create</button></div>
-            <div id="key-reveal"></div>
-          </div>
-        </div>
-
-        <div class="panel" style="grid-column: 1 / -1">
-          <h2>API keys</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th><th>Status</th><th class="num">Limit/min</th>
-                <th>Last used</th><th></th>
-              </tr>
-            </thead>
-            <tbody id="keys-body">
-              <tr><td colspan="5" class="note" style="padding:16px">Enter an admin key to load.</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="panel">
-          <h2>Usage</h2>
-          <div class="body">
-            <div class="field">
-              <label for="usage-key">Key</label>
-              <select id="usage-key"></select>
-            </div>
-            <dl id="usage-body" style="margin:12px 0 0"></dl>
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2>Server configuration</h2>
-          <div class="body">
-            <dl id="config-body" style="margin:0"></dl>
-          </div>
-        </div>
-
-        <div class="panel" style="grid-column: 1 / -1">
-          <h2>Database</h2>
-          <div class="body">
-            <div class="field">
-              <label for="db-url">Connection URL</label>
-              <input type="text" id="db-url" placeholder="postgresql+asyncpg://user:pass@host/dbname" />
-            </div>
-            <div class="actions"><button id="save-db">Test and save</button></div>
-            <p class="hint">
-              The connection is tested before it is saved. On success it is written to
-              <code>localgate.config.json</code> and takes effect after a restart — the running
-              server keeps its current connection until then. Once restarted, every table (keys,
-              usage, history, memory) lives in the new database. The driver must be async:
-              <code>postgresql+asyncpg://</code>, not <code>postgresql://</code>.
-            </p>
-            <div id="db-result"></div>
-          </div>
-        </div>
-
       </div>
     </section>
+
+    <!-- ---------------- Settings ---------------- -->
+    <section class="view" id="settings">
+      <div class="page">
+        <h1>Settings</h1>
+        <p class="lede">Credentials live in this browser. Configuration is read from the server.</p>
+
+        <div class="cols">
+          <div class="panel">
+            <h2>Credentials</h2>
+            <div class="body">
+              <div class="field"><label for="admin-key">Admin key</label><input type="password" id="admin-key" placeholder="LOCALGATE_ADMIN_KEY" /></div>
+              <div class="field"><label for="api-key">API key</label><input type="password" id="api-key" placeholder="lg_… (used for chat)" /></div>
+              <button class="primary" id="save-creds">Save</button>
+              <p class="hint" style="margin-bottom:0">
+                Sent as the <code>X-Admin-Key</code> and <code>Authorization</code> headers.
+                Nothing is stored on the server.
+              </p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Server configuration</h2>
+            <div class="body"><dl id="config-body" style="margin:0"></dl></div>
+          </div>
+
+          <div class="panel" style="grid-column: 1 / -1">
+            <h2>Database</h2>
+            <div class="body">
+              <div class="field">
+                <label for="db-url">Connection URL</label>
+                <input type="text" id="db-url" placeholder="postgresql+asyncpg://user:pass@host/dbname" />
+              </div>
+              <button id="save-db">Test and save</button>
+              <p class="hint">
+                The connection is tested before it is saved. On success it is written to
+                <code>localgate.config.json</code> and takes effect after a restart — the running
+                server keeps its current connection until then. The driver must be async:
+                <code>postgresql+asyncpg://</code>, not <code>postgresql://</code>.
+              </p>
+              <div id="db-result"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
   </main>
 </div>
 
+<div class="tooltip" id="tooltip"></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -287,11 +381,14 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 
-// Everything the API returns is rendered as text, never as markup. A model reply, a key
-// name, or an error message could otherwise contain HTML and execute in this page.
+// Everything from the API is rendered as text, never as markup. A model reply, a key name
+// or an error message could otherwise contain HTML and execute in this page.
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
 ));
+
+const nf = new Intl.NumberFormat();
+const compact = (n) => (n >= 1000 ? new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n) : String(n));
 
 const store = {
   get adminKey() { return localStorage.getItem("lg_admin_key") || ""; },
@@ -312,8 +409,8 @@ function toast(message) {
   toast.timer = setTimeout(() => (el.style.display = "none"), 3200);
 }
 
-// localgate returns every error in the OpenAI envelope: {"error": {"message", ...}}.
-// Those messages are written to be actionable, so they are shown verbatim.
+// localgate returns every error in the OpenAI envelope: {"error": {"message", …}}. Those
+// messages are written to be actionable, so they are surfaced verbatim.
 function errorMessage(payload, resp) {
   return payload?.error?.message || payload?.detail || `${resp.status} ${resp.statusText}`;
 }
@@ -323,9 +420,7 @@ async function api(path, { admin = false, method = "GET", body } = {}) {
   if (admin) headers["X-Admin-Key"] = store.adminKey;
   else headers["Authorization"] = `Bearer ${store.apiKey}`;
 
-  const resp = await fetch(path, {
-    method, headers, body: body ? JSON.stringify(body) : undefined,
-  });
+  const resp = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!resp.ok) throw new Error(errorMessage(await resp.json().catch(() => null), resp));
   return resp.json();
 }
@@ -333,12 +428,15 @@ async function api(path, { admin = false, method = "GET", body } = {}) {
 // ---------- Navigation ----------
 
 $$("nav button").forEach((btn) => btn.addEventListener("click", () => {
-  $$("nav button").forEach((b) => b.classList.remove("active"));
-  btn.classList.add("active");
   const view = btn.dataset.view;
-  $("#chat").classList.toggle("active", view === "chat");
-  $("#admin").classList.toggle("active", view === "admin");
-  if (view === "admin") refreshAdmin();
+  $$("nav button").forEach((b) => b.classList.toggle("active", b === btn));
+  $$(".view").forEach((v) => v.classList.toggle("active", v.id === view));
+  // The session list is only meaningful for chat; it would be dead furniture elsewhere.
+  $("#app").classList.toggle("no-aside", view !== "chat");
+
+  if (view === "overview") loadOverview();
+  if (view === "keys") loadKeys();
+  if (view === "settings") loadConfig();
 }));
 
 // ---------- Health ----------
@@ -347,16 +445,17 @@ async function pollHealth() {
   const dot = $("#health-dot");
   const text = $("#health-text");
   try {
-    // /health answers 503 when a dependency is down, so the body is read regardless of
-    // the status code — that body is exactly what says which dependency failed.
+    // /health answers 503 when a dependency is down, so the body is read regardless of the
+    // status code — that body is exactly what names the dependency that failed.
     const h = await (await fetch("/health")).json();
     const backend = h.backend?.reachable;
     const db = h.database?.connected;
 
+    $("#version").textContent = h.version ? `v${h.version}` : "";
     dot.className = "dot " + (backend && db ? "ok" : "bad");
-    if (!backend) text.textContent = `backend unreachable (${h.backend?.type ?? "?"})`;
+    if (!backend) text.textContent = `${h.backend?.type ?? "backend"} unreachable`;
     else if (!db) text.textContent = "database unreachable";
-    else text.textContent = `ready · ${h.backend.type} · v${h.version}`;
+    else text.textContent = `${h.backend.type} · ${h.database.dialect.split("+")[0]}`;
   } catch {
     dot.className = "dot bad";
     text.textContent = "server unreachable";
@@ -364,6 +463,142 @@ async function pollHealth() {
 }
 pollHealth();
 setInterval(pollHealth, 10000);
+
+// ---------- Overview ----------
+
+async function loadOverview() {
+  if (!store.adminKey) {
+    $("#stats").innerHTML = '<div class="stat"><div class="label">Not connected</div><div class="sub">Add an admin key under Settings.</div></div>';
+    return;
+  }
+
+  try {
+    const usage = await api("/admin/usage", { admin: true });
+    const keys = await api("/admin/keys", { admin: true }).catch(() => []);
+    const active = keys.filter((k) => !k.revoked).length;
+    const t = usage.totals;
+
+    $("#stats").innerHTML = [
+      ["Requests", nf.format(t.request_count), "all time"],
+      ["Tokens", nf.format(t.total_tokens), "prompt + completion"],
+      ["Average latency", `${nf.format(Math.round(t.avg_latency_ms))} ms`, "per request"],
+      ["Active keys", String(active), `${keys.length} total`],
+    ].map(([label, value, sub]) => `
+      <div class="stat">
+        <div class="label">${esc(label)}</div>
+        <div class="value">${esc(value)}</div>
+        <div class="sub">${esc(sub)}</div>
+      </div>`).join("");
+
+    drawChart(usage.daily || []);
+
+    const models = usage.by_model || [];
+    $("#models-body").innerHTML = models.length
+      ? models.map((m) => `
+        <tr>
+          <td class="mono">${esc(m.model)}</td>
+          <td class="num">${esc(nf.format(m.request_count))}</td>
+          <td class="num">${esc(nf.format(m.total_tokens))}</td>
+        </tr>`).join("")
+      : '<tr><td colspan="3" class="empty">No requests yet.</td></tr>';
+  } catch (e) {
+    $("#stats").innerHTML = `<div class="stat"><div class="label">Error</div><div class="sub">${esc(e.message)}</div></div>`;
+  }
+}
+
+/* Stacked bars: prompt and completion are parts of one total, and the question the chart
+   answers is "how much did each day cost, and in what proportion". Two series get a legend
+   (identity is never colour alone) and a hover tooltip carrying the exact numbers — which
+   also discharges the contrast relief the palette validator flags for the aqua on white. */
+function drawChart(daily) {
+  const svg = $("#chart");
+  const tip = $("#tooltip");
+  svg.textContent = "";
+
+  if (!daily.length) {
+    svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="axis-text">No usage in this period yet</text>`;
+    return;
+  }
+
+  const W = svg.clientWidth || 800;
+  const H = 200;
+  const pad = { top: 12, right: 8, bottom: 22, left: 44 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  const max = Math.max(...daily.map((d) => d.prompt_tokens + d.completion_tokens), 1);
+  // A "nice" ceiling, so the gridline labels are round numbers rather than 3847.
+  const step = Math.pow(10, Math.floor(Math.log10(max)));
+  const top = Math.ceil(max / step) * step;
+  const y = (v) => pad.top + plotH - (v / top) * plotH;
+
+  const parts = [];
+
+  // Recessive gridlines, drawn behind the marks.
+  for (let i = 0; i <= 2; i++) {
+    const value = (top / 2) * i;
+    const yy = y(value);
+    parts.push(`<line class="grid-line" x1="${pad.left}" x2="${W - pad.right}" y1="${yy}" y2="${yy}" />`);
+    parts.push(`<text class="axis-text" x="${pad.left - 8}" y="${yy + 3}" text-anchor="end">${esc(compact(value))}</text>`);
+  }
+
+  const slot = plotW / daily.length;
+  const barW = Math.max(4, Math.min(30, slot - 6));
+
+  daily.forEach((d, i) => {
+    const x = pad.left + slot * i + (slot - barW) / 2;
+    const total = d.prompt_tokens + d.completion_tokens;
+    const topY = y(total);
+    const midY = y(d.completion_tokens); // completion sits on the baseline
+    const baseY = y(0);
+
+    // A 2px surface gap separates the two stacked segments, so the boundary reads even
+    // when the two hues are hard to tell apart.
+    const completionH = Math.max(0, baseY - midY);
+    const promptH = Math.max(0, midY - topY - 2);
+
+    const label = new Date(d.date + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const meta = `data-date="${esc(label)}" data-p="${esc(nf.format(d.prompt_tokens))}" data-c="${esc(nf.format(d.completion_tokens))}" data-t="${esc(nf.format(total))}"`;
+
+    if (completionH > 0) {
+      parts.push(`<rect class="bar" ${meta} x="${x}" y="${midY}" width="${barW}" height="${completionH}" rx="2" fill="var(--series-2)" />`);
+    }
+    if (promptH > 0) {
+      // 4px rounded top on the topmost segment; the stack's data-end.
+      parts.push(`<rect class="bar" ${meta} x="${x}" y="${topY}" width="${barW}" height="${promptH}" rx="3" fill="var(--series-1)" />`);
+    }
+
+    // Label only the first, middle and last day: a tick per bar would collide.
+    if (i === 0 || i === daily.length - 1 || i === Math.floor(daily.length / 2)) {
+      const anchor = i === 0 ? "start" : i === daily.length - 1 ? "end" : "middle";
+      parts.push(`<text class="axis-text" x="${x + barW / 2}" y="${H - 6}" text-anchor="${anchor}">${esc(label)}</text>`);
+    }
+  });
+
+  svg.innerHTML = parts.join("");
+
+  svg.querySelectorAll(".bar").forEach((bar) => {
+    bar.addEventListener("mousemove", (e) => {
+      tip.innerHTML = `
+        <div class="t-date">${esc(bar.dataset.date)}</div>
+        <div class="t-row"><span class="k"><span class="swatch" style="background:var(--series-1)"></span>Prompt</span><span class="v">${esc(bar.dataset.p)}</span></div>
+        <div class="t-row"><span class="k"><span class="swatch" style="background:var(--series-2)"></span>Completion</span><span class="v">${esc(bar.dataset.c)}</span></div>
+        <div class="t-row" style="margin-top:4px"><span class="k">Total</span><span class="v">${esc(bar.dataset.t)}</span></div>`;
+      tip.style.display = "block";
+      // Keep the tooltip inside the viewport rather than letting it run off the right edge.
+      const w = tip.offsetWidth;
+      tip.style.left = Math.min(e.clientX + 14, window.innerWidth - w - 12) + "px";
+      tip.style.top = (e.clientY - 12) + "px";
+    });
+    bar.addEventListener("mouseleave", () => (tip.style.display = "none"));
+  });
+}
+
+window.addEventListener("resize", () => {
+  if ($("#overview").classList.contains("active") && store.adminKey) loadOverview();
+});
 
 // ---------- Chat ----------
 
@@ -382,7 +617,7 @@ function renderSessions() {
 
 function addMessage(role, content, meta) {
   const box = $("#transcript");
-  box.querySelector(".note")?.remove();
+  box.querySelector(".empty")?.remove();
 
   const el = document.createElement("div");
   el.className = `msg ${role}`;
@@ -401,7 +636,7 @@ function newSession() {
   const id = crypto.randomUUID();
   store.sessions = [{ id, label: new Date().toLocaleString() }, ...store.sessions].slice(0, 50);
   store.active = id;
-  $("#transcript").innerHTML = '<p class="note">New session. Messages here are remembered across requests.</p>';
+  $("#transcript").innerHTML = '<p class="empty">New session. What you say here is remembered across later requests.</p>';
   renderSessions();
 }
 
@@ -412,14 +647,14 @@ async function openSession(id) {
   box.textContent = "";
 
   if (!store.apiKey) {
-    box.innerHTML = '<p class="note">Set an API key on the Admin tab to load history.</p>';
+    box.innerHTML = '<p class="empty">Set an API key under Settings to load history.</p>';
     return;
   }
 
   try {
     const { messages = [], summary, memory_chunks } = await api(`/v1/conversations/${id}`);
     if (!messages.length) {
-      box.innerHTML = '<p class="note">No messages in this session yet.</p>';
+      box.innerHTML = '<p class="empty">No messages in this session yet.</p>';
       return;
     }
     if (summary) {
@@ -432,7 +667,7 @@ async function openSession(id) {
   } catch (e) {
     // A session owned by another key returns 404, deliberately indistinguishable from one
     // that never existed — see docs/api-reference.md.
-    box.innerHTML = `<p class="note">${esc(e.message)}</p>`;
+    box.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
   }
 }
 
@@ -444,7 +679,7 @@ $("#composer").addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text) return;
 
-  if (!store.apiKey) { toast("Set an API key on the Admin tab first."); return; }
+  if (!store.apiKey) { toast("Set an API key under Settings first."); return; }
   if (!store.active) newSession();
 
   addMessage("user", text);
@@ -453,8 +688,7 @@ $("#composer").addEventListener("submit", async (event) => {
   send.disabled = true;
 
   // Only the newest turn is sent. The gateway retrieves the rest of this session from
-  // memory — which is the whole point, and what lets a small context window hold a long
-  // conversation.
+  // memory — which is the point, and what lets a small context window hold a long thread.
   try {
     const resp = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -473,7 +707,7 @@ $("#composer").addEventListener("submit", async (event) => {
     const data = await resp.json();
     const reply = data.choices?.[0]?.message?.content || "(empty response)";
     const u = data.usage;
-    addMessage("assistant", reply, u ? `${u.prompt_tokens} in / ${u.completion_tokens} out` : "");
+    addMessage("assistant", reply, u ? `${u.prompt_tokens} in · ${u.completion_tokens} out` : "");
   } catch (e) {
     addMessage("assistant", e.message);
   } finally {
@@ -482,17 +716,7 @@ $("#composer").addEventListener("submit", async (event) => {
   }
 });
 
-// ---------- Admin ----------
-
-$("#admin-key").value = store.adminKey;
-$("#api-key").value = store.apiKey;
-
-$("#save-creds").addEventListener("click", () => {
-  store.adminKey = $("#admin-key").value.trim();
-  store.apiKey = $("#api-key").value.trim();
-  toast("Saved.");
-  refreshAdmin();
-});
+// ---------- Keys ----------
 
 $("#create-key").addEventListener("click", async () => {
   const name = $("#key-name").value.trim();
@@ -500,19 +724,16 @@ $("#create-key").addEventListener("click", async () => {
 
   try {
     const key = await api("/admin/keys", {
-      admin: true,
-      method: "POST",
+      admin: true, method: "POST",
       body: { name, rate_limit_per_min: Number($("#key-limit").value) || 60 },
     });
 
-    // The raw key exists in exactly one response and is never recoverable, so it is shown
-    // once, prominently, with a way to put it straight to use.
+    // This is the only response that ever carries the raw key, so it is shown once,
+    // prominently, with a way to put it straight to use.
     $("#key-reveal").innerHTML =
       `<div class="secret">
          <code>${esc(key.api_key)}</code>
-         <div class="hint" style="margin:0 0 8px">
-           Copy it now. Only a hash is stored, so it cannot be shown again.
-         </div>
+         <p class="hint" style="margin:0 0 10px">Copy it now — only a hash is stored, so it cannot be shown again.</p>
          <button id="use-key">Use for chat</button>
        </div>`;
     $("#use-key").addEventListener("click", () => {
@@ -533,12 +754,12 @@ async function loadKeys() {
   try {
     const keys = await api("/admin/keys", { admin: true });
     if (!keys.length) {
-      body.innerHTML = '<tr><td colspan="5" class="note" style="padding:16px">No keys yet.</td></tr>';
+      body.innerHTML = '<tr><td colspan="5" class="empty">No keys yet. Create one below.</td></tr>';
       return;
     }
 
-    // The prefix is the only way to tell which row is the key in your hand; keys issued
-    // before v0.6 predate the column and have none.
+    // The prefix is the only way to tell which row is the key in your hand. Keys issued
+    // before v0.6 predate the column, and the raw value is unrecoverable by design.
     body.innerHTML = keys.map((k) => `
       <tr>
         <td>${esc(k.name)}<span class="sub">${esc(k.key_prefix ? k.key_prefix + "…" : "created before v0.6")}</span></td>
@@ -549,7 +770,7 @@ async function loadKeys() {
       </tr>`).join("");
 
     $$("[data-revoke]").forEach((btn) => btn.addEventListener("click", async () => {
-      if (!confirm("Revoke this key? Applications using it will stop working immediately.")) return;
+      if (!confirm("Revoke this key? Anything using it stops working immediately.")) return;
       try {
         await api(`/admin/keys/${btn.dataset.revoke}`, { admin: true, method: "DELETE" });
         toast("Key revoked.");
@@ -563,7 +784,7 @@ async function loadKeys() {
     if (previous) select.value = previous;
     loadUsage();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="5" class="note" style="padding:16px">${esc(e.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="empty">${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -585,12 +806,25 @@ async function loadUsage() {
     const usage = await api(`/admin/usage/${id}`, { admin: true });
     $("#usage-body").innerHTML = Object.entries(usage)
       .filter(([k]) => k in LABELS)
-      .map(([k, v]) => `<div class="kv"><dt>${esc(LABELS[k])}</dt><dd>${esc(v)}</dd></div>`)
+      .map(([k, v]) => `<div class="kv"><dt>${esc(LABELS[k])}</dt><dd>${esc(nf.format(v))}</dd></div>`)
       .join("");
   } catch (e) {
     $("#usage-body").innerHTML = `<div class="kv"><dt>error</dt><dd>${esc(e.message)}</dd></div>`;
   }
 }
+
+// ---------- Settings ----------
+
+$("#admin-key").value = store.adminKey;
+$("#api-key").value = store.apiKey;
+
+$("#save-creds").addEventListener("click", () => {
+  store.adminKey = $("#admin-key").value.trim();
+  store.apiKey = $("#api-key").value.trim();
+  toast("Saved.");
+  loadConfig();
+  loadKeys();
+});
 
 // /admin/config is grouped (backend / database / memory / cache / security), so it is
 // flattened depth-first — a flat Object.entries would render "[object Object]" per group.
@@ -620,7 +854,7 @@ $("#save-db").addEventListener("click", async () => {
 
   const button = $("#save-db");
   button.disabled = true;
-  $("#db-result").innerHTML = '<div class="callout">Testing the connection…</div>';
+  $("#db-result").innerHTML = '<div class="callout neutral">Testing the connection…</div>';
 
   try {
     const result = await api("/admin/config/database-url", {
@@ -629,22 +863,16 @@ $("#save-db").addEventListener("click", async () => {
     $("#db-result").innerHTML = `<div class="callout ok">${esc(result.message)}</div>`;
     loadConfig();
   } catch (e) {
-    // These messages name the actual fix (a missing +asyncpg, sslmode vs ssl), so they
-    // are shown as-is rather than replaced with something generic.
+    // These messages name the actual fix (a missing +asyncpg, sslmode vs ssl), so they are
+    // shown as-is rather than replaced by something generic.
     $("#db-result").innerHTML = `<div class="callout bad">${esc(e.message)}</div>`;
   } finally {
     button.disabled = false;
   }
 });
 
-function refreshAdmin() {
-  if (!store.adminKey) return;
-  loadKeys();
-  loadConfig();
-}
-
 renderSessions();
-if (store.active) openSession(store.active);
+loadOverview();
 </script>
 </body>
 </html>
