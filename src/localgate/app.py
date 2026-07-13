@@ -16,12 +16,14 @@ DASHBOARD_DIR = Path(__file__).parent / "dashboard" / "static"
 logger = logging.getLogger("localgate")
 
 
-def _resolve_database_url(settings: Settings) -> str:
+def _resolve_database_url(settings: Settings, config_path: Path | None = None) -> str:
     """A database saved through the admin UI (and connection-tested at save time)
     always wins over LOCALGATE_DATABASE_URL from .env — that's what makes it
     "established" rather than just configured.
     """
-    stored_url = load_database_url()
+    from localgate.core.db_config_store import DEFAULT_CONFIG_PATH
+
+    stored_url = load_database_url(config_path or DEFAULT_CONFIG_PATH)
     if stored_url:
         logger.info("Using established database from localgate.config.json")
         return stored_url
@@ -29,9 +31,12 @@ def _resolve_database_url(settings: Settings) -> str:
     return settings.database_url
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, database_config_path: Path | None = None) -> FastAPI:
+    """`database_config_path` lets tests point at an isolated (or nonexistent) config
+    file so they never silently pick up a real established database from the
+    developer's working directory."""
     settings = settings or Settings()
-    active_database_url = _resolve_database_url(settings)
+    active_database_url = _resolve_database_url(settings, database_config_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

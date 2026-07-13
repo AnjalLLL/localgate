@@ -6,6 +6,9 @@ from localgate.backends.ollama import OllamaBackend
 def get_backend(backend_type: str, base_url: str) -> InferenceBackend:
     if backend_type == "ollama":
         return OllamaBackend(base_url=base_url)
+    if backend_type == "fake":
+        from localgate.backends.fake import FakeBackend
+        return FakeBackend(base_url=base_url)
     if backend_type == "vllm":
         from localgate.backends.vllm import VLLMBackend
         return VLLMBackend(base_url=base_url)
