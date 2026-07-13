@@ -1,5 +1,453 @@
 <!doctype html>
-<html>
-  <head><title>localgate dashboard</title></head>
-  <body><h1>localgate</h1><p>Usage dashboard placeholder.</p></body>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>localgate</title>
+<style>
+  :root {
+    --bg: #0c0f12;
+    --panel: #14181d;
+    --panel-2: #1a1f26;
+    --border: #262c34;
+    --text: #e7ebee;
+    --muted: #838f9b;
+    --accent: #c98a4b;      /* copper — the "gate signal" color */
+    --accent-dim: #7a5a3a;
+    --ok: #5fb890;
+    --danger: #c9604b;
+    --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px; height: 100vh; overflow: hidden;
+  }
+  button, input, select {
+    font-family: inherit; font-size: 13px; color: var(--text);
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 10px; outline: none;
+  }
+  button { cursor: pointer; transition: border-color .15s ease; }
+  button:hover { border-color: var(--accent-dim); }
+  button:focus-visible, input:focus-visible, select:focus-visible { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #1a1108; border-color: var(--accent); font-weight: 600; }
+  button.primary:hover { background: #d69a5c; }
+  button.danger { color: var(--danger); }
+  input, select { width: 100%; }
+  code, .mono { font-family: var(--mono); }
+
+  .app { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: 48px 1fr; height: 100%; }
+
+  .topbar {
+    grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-weight: 600; letter-spacing: .02em; }
+  .brand .bracket { color: var(--accent); }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button { background: transparent; border-color: transparent; padding: 6px 12px; color: var(--muted); }
+  .tabs button.active { color: var(--text); border-color: var(--border); background: var(--panel-2); }
+  .status { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(95,184,144,.15); }
+
+  .sidebar { border-right: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; padding: 12px; gap: 10px; overflow-y: auto; }
+  .sidebar h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 10px 0 4px; }
+  .session-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--muted); border: 1px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-item:hover { background: var(--panel-2); }
+  .session-item.active { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+
+  .main { overflow-y: auto; padding: 20px 24px; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* Chat view */
+  #chat-view { display: none; flex-direction: column; height: 100%; padding: 0; }
+  #chat-view.active { display: flex; }
+  .chat-scroll { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 70%; padding: 10px 13px; border-radius: 10px; line-height: 1.5; }
+  .msg.user { align-self: flex-end; background: var(--accent-dim); color: #fff2e2; }
+  .msg.assistant { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--border); }
+  .msg .meta { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 6px; }
+  .chat-input-row { display: flex; gap: 8px; padding: 14px 24px; border-top: 1px solid var(--border); background: var(--panel); }
+  .chat-input-row input { flex: 1; }
+  .empty-hint { color: var(--muted); font-size: 13px; margin: auto; text-align: center; max-width: 320px; }
+
+  /* Admin view */
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .row label { width: 130px; color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 100px; font-size: 11px; font-family: var(--mono); }
+  .pill.active { background: rgba(95,184,144,.15); color: var(--ok); }
+  .pill.revoked { background: rgba(201,96,75,.15); color: var(--danger); }
+  .reveal-box { background: #0d0f11; border: 1px dashed var(--accent); border-radius: 6px; padding: 10px 12px; margin-top: 10px; word-break: break-all; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .kv { font-family: var(--mono); font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dotted var(--border); }
+  .kv span:last-child { color: var(--text); }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel-2); border: 1px solid var(--accent); padding: 10px 16px; border-radius: 6px; font-size: 13px; display: none; z-index: 10; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><span class="bracket">[</span>localgate<span class="bracket">]</span></div>
+    <div class="tabs">
+      <button data-tab="chat" class="active">Chat</button>
+      <button data-tab="admin">Admin</button>
+    </div>
+    <div class="status"><span class="dot" id="health-dot"></span><span id="health-text">checking…</span></div>
+  </div>
+
+  <div class="sidebar" id="sidebar">
+    <button class="primary" id="new-chat-btn">+ New chat</button>
+    <h3>Sessions</h3>
+    <div id="session-list"></div>
+  </div>
+
+  <div class="main">
+    <div class="view" id="chat-view">
+      <div class="chat-scroll" id="chat-scroll">
+        <div class="empty-hint">No messages yet. Set your API key in the Admin tab, then send a message.</div>
+      </div>
+      <div class="chat-input-row">
+        <input id="model-input" style="max-width:140px" value="llama3" title="model" />
+        <input id="chat-input" placeholder="Message…" />
+        <button class="primary" id="send-btn">Send</button>
+      </div>
+    </div>
+
+    <div class="view" id="admin-view">
+      <div class="grid-2">
+        <div>
+          <div class="card">
+            <h2>Connection</h2>
+            <div class="row"><label>Admin key</label><input id="admin-key-input" type="password" placeholder="X-Admin-Key" /></div>
+            <div class="row"><label>Active API key</label><input id="api-key-input" type="password" placeholder="Bearer key used for chat" /></div>
+            <button id="save-keys-btn">Save</button>
+          </div>
+
+          <div class="card">
+            <h2>Create API key</h2>
+            <div class="row"><label>Name</label><input id="new-key-name" placeholder="e.g. my-app" /></div>
+            <div class="row"><label>Rate limit /min</label><input id="new-key-limit" value="60" /></div>
+            <button class="primary" id="create-key-btn">Create key</button>
+            <div class="reveal-box" id="new-key-reveal" style="display:none"></div>
+          </div>
+
+          <div class="card">
+            <h2>Server config</h2>
+            <div id="config-box"><div class="kv"><span>—</span><span>enter admin key and open this tab</span></div></div>
+            <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border)">
+              <div class="row"><label>New database URL</label><input id="db-url-input" placeholder="postgresql+asyncpg://user:pass@host/db" /></div>
+              <button id="save-db-url-btn">Test &amp; establish</button>
+              <div style="font-size:11px;color:var(--muted);margin-top:6px">
+                Tests the connection first. If it succeeds, saves it to
+                <code>localgate.config.json</code> as the established database —
+                every table (keys, usage, chat history, memory) will live there
+                after you restart the server. The running server keeps using its
+                current connection until then; nothing is touched live.
+              </div>
+              <div id="db-url-result" style="margin-top:8px"></div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="card">
+            <h2>API keys</h2>
+            <table>
+              <thead><tr><th>Name</th><th>Status</th><th>Limit/min</th><th></th></tr></thead>
+              <tbody id="keys-table-body"></tbody>
+            </table>
+          </div>
+
+          <div class="card">
+            <h2>Usage</h2>
+            <div class="row"><label>Key</label><select id="usage-key-select"></select></div>
+            <div id="usage-box"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+const store = {
+  get adminKey() { return localStorage.getItem('lg_admin_key') || ''; },
+  set adminKey(v) { localStorage.setItem('lg_admin_key', v); },
+  get apiKey() { return localStorage.getItem('lg_api_key') || ''; },
+  set apiKey(v) { localStorage.setItem('lg_api_key', v); },
+  get sessions() { return JSON.parse(localStorage.getItem('lg_sessions') || '[]'); },
+  set sessions(v) { localStorage.setItem('lg_sessions', JSON.stringify(v)); },
+  get activeSession() { return localStorage.getItem('lg_active_session') || ''; },
+  set activeSession(v) { localStorage.setItem('lg_active_session', v); },
+};
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.style.display = 'none', 3000);
+}
+
+async function api(path, { admin = false, method = 'GET', body } = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (admin) headers['X-Admin-Key'] = store.adminKey;
+  else headers['Authorization'] = `Bearer ${store.apiKey}`;
+  const resp = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => ({}));
+    throw new Error(detail.detail || `${resp.status} ${resp.statusText}`);
+  }
+  return resp.json();
+}
+
+// ---------- Tabs ----------
+$$('.tabs button').forEach(btn => btn.addEventListener('click', () => {
+  $$('.tabs button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const tab = btn.dataset.tab;
+  $('#chat-view').classList.toggle('active', tab === 'chat');
+  $('#admin-view').classList.toggle('active', tab === 'admin');
+  if (tab === 'admin') refreshAdmin();
+}));
+
+// ---------- Health ----------
+async function pollHealth() {
+  try {
+    const r = await fetch('/health');
+    const data = await r.json();
+    $('#health-dot').classList.toggle('on', !!data.backend_reachable);
+    $('#health-text').textContent = data.backend_reachable ? 'gate open' : 'backend unreachable';
+  } catch {
+    $('#health-dot').classList.remove('on');
+    $('#health-text').textContent = 'server unreachable';
+  }
+}
+pollHealth();
+setInterval(pollHealth, 10000);
+
+// ---------- Chat ----------
+function renderSessions() {
+  const list = $('#session-list');
+  list.innerHTML = '';
+  store.sessions.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'session-item' + (s.id === store.activeSession ? ' active' : '');
+    el.textContent = s.label;
+    el.title = s.id;
+    el.addEventListener('click', () => selectSession(s.id));
+    list.appendChild(el);
+  });
+}
+
+function addMessageToUI(role, content, meta) {
+  const scroll = $('#chat-scroll');
+  const hint = scroll.querySelector('.empty-hint');
+  if (hint) hint.remove();
+  const el = document.createElement('div');
+  el.className = `msg ${role}`;
+  el.innerHTML = `<div>${content.replace(/</g, '&lt;')}</div>` + (meta ? `<div class="meta">${meta}</div>` : '');
+  scroll.appendChild(el);
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
+function newSession() {
+  const id = crypto.randomUUID();
+  const label = 'chat ' + new Date().toLocaleTimeString();
+  const sessions = store.sessions;
+  sessions.unshift({ id, label });
+  store.sessions = sessions;
+  store.activeSession = id;
+  $('#chat-scroll').innerHTML = '<div class="empty-hint">New chat. Say something.</div>';
+  renderSessions();
+}
+
+async function selectSession(id) {
+  store.activeSession = id;
+  renderSessions();
+  $('#chat-scroll').innerHTML = '';
+  if (!store.apiKey) {
+    addMessageToUI('assistant', 'Set an API key in the Admin tab to load history.');
+    return;
+  }
+  try {
+    const history = await api(`/v1/conversations/${id}`);
+    if (!history.length) {
+      $('#chat-scroll').innerHTML = '<div class="empty-hint">No messages in this session yet.</div>';
+      return;
+    }
+    history.forEach(m => addMessageToUI(m.role, m.content));
+  } catch (e) {
+    addMessageToUI('assistant', `Could not load history: ${e.message}`);
+  }
+}
+
+$('#new-chat-btn').addEventListener('click', newSession);
+
+async function sendMessage() {
+  const input = $('#chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  if (!store.apiKey) { toast('Set an API key in the Admin tab first.'); return; }
+  if (!store.activeSession) newSession();
+
+  addMessageToUI('user', text);
+  input.value = '';
+
+  // Rebuild message history from the visible transcript so the model has full context
+  // (the server additionally injects retrieved memory on top of this, per session).
+  const messages = [...$$('#chat-scroll .msg')].map(el => ({
+    role: el.classList.contains('user') ? 'user' : 'assistant',
+    content: el.querySelector('div').textContent,
+  }));
+
+  try {
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${store.apiKey}`,
+        'X-Session-Id': store.activeSession,
+      },
+      body: JSON.stringify({ model: $('#model-input').value || 'llama3', messages }),
+    });
+    if (!resp.ok) {
+      const detail = await resp.json().catch(() => ({}));
+      throw new Error(detail.detail || `${resp.status} ${resp.statusText}`);
+    }
+    const data = await resp.json();
+    const reply = data.choices?.[0]?.message?.content || '(empty response)';
+    const usage = data.usage ? `${data.usage.prompt_tokens}→${data.usage.completion_tokens} tokens` : '';
+    addMessageToUI('assistant', reply, usage);
+  } catch (e) {
+    addMessageToUI('assistant', `Error: ${e.message}`);
+  }
+}
+
+$('#send-btn').addEventListener('click', sendMessage);
+$('#chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+// ---------- Admin ----------
+$('#admin-key-input').value = store.adminKey;
+$('#api-key-input').value = store.apiKey;
+
+$('#save-keys-btn').addEventListener('click', () => {
+  store.adminKey = $('#admin-key-input').value.trim();
+  store.apiKey = $('#api-key-input').value.trim();
+  toast('Saved.');
+  refreshAdmin();
+});
+
+$('#create-key-btn').addEventListener('click', async () => {
+  const name = $('#new-key-name').value.trim() || 'unnamed-key';
+  const limit = parseInt($('#new-key-limit').value, 10) || 60;
+  try {
+    const data = await api('/admin/keys', { admin: true, method: 'POST', body: { name, rate_limit_per_min: limit } });
+    const box = $('#new-key-reveal');
+    box.style.display = 'block';
+    box.innerHTML = `<div class="mono">${data.api_key}</div><div style="margin-top:8px"><button id="use-this-key">Use for chat</button></div>`;
+    $('#use-this-key').addEventListener('click', () => {
+      store.apiKey = data.api_key;
+      $('#api-key-input').value = data.api_key;
+      toast('Now using this key for chat.');
+    });
+    loadKeys();
+  } catch (e) { toast(`Error: ${e.message}`); }
+});
+
+async function loadConfig() {
+  if (!store.adminKey) return;
+  try {
+    const cfg = await api('/admin/config', { admin: true });
+    $('#config-box').innerHTML = Object.entries(cfg).map(([k, v]) =>
+      `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('');
+  } catch (e) {
+    $('#config-box').innerHTML = `<div class="kv"><span>error</span><span>${e.message}</span></div>`;
+  }
+}
+
+async function loadKeys() {
+  if (!store.adminKey) return;
+  try {
+    const keys = await api('/admin/keys', { admin: true });
+    $('#keys-table-body').innerHTML = keys.map(k => `
+      <tr>
+        <td>${k.name}</td>
+        <td><span class="pill ${k.revoked ? 'revoked' : 'active'}">${k.revoked ? 'revoked' : 'active'}</span></td>
+        <td class="mono">${k.rate_limit_per_min}</td>
+        <td>${k.revoked ? '' : `<button class="danger" data-revoke="${k.id}">Revoke</button>`}</td>
+      </tr>`).join('');
+    $$('[data-revoke]').forEach(btn => btn.addEventListener('click', async () => {
+      await api(`/admin/keys/${btn.dataset.revoke}`, { admin: true, method: 'DELETE' });
+      toast('Key revoked.');
+      loadKeys();
+    }));
+
+    const select = $('#usage-key-select');
+    select.innerHTML = keys.map(k => `<option value="${k.id}">${k.name}</option>`).join('');
+  } catch (e) { toast(`Error loading keys: ${e.message}`); }
+}
+
+$('#usage-key-select').addEventListener('change', loadUsage);
+async function loadUsage() {
+  const id = $('#usage-key-select').value;
+  if (!id) return;
+  try {
+    const usage = await api(`/admin/usage/${id}`, { admin: true });
+    $('#usage-box').innerHTML = Object.entries(usage).map(([k, v]) =>
+      `<div class="kv"><span>${k.replace(/_/g, ' ')}</span><span>${v}</span></div>`).join('');
+  } catch (e) {
+    $('#usage-box').innerHTML = `<div class="kv"><span>error</span><span>${e.message}</span></div>`;
+  }
+}
+
+$('#save-db-url-btn').addEventListener('click', async () => {
+  const url = $('#db-url-input').value.trim();
+  if (!url) { toast('Enter a database URL first.'); return; }
+  const btn = $('#save-db-url-btn');
+  btn.disabled = true;
+  btn.textContent = 'Testing connection…';
+  try {
+    const data = await api('/admin/config/database-url', { admin: true, method: 'PUT', body: { database_url: url } });
+    $('#db-url-result').innerHTML = `<div class="reveal-box" style="border-color: var(--ok)">
+      Connection verified. Established as <span class="mono">${data.database_url}</span><br>
+      <strong>Restart the server</strong> — all data will then be stored there.
+    </div>`;
+    $('#db-url-input').value = '';
+    toast('Established — restart required.');
+    loadConfig();
+  } catch (e) {
+    $('#db-url-result').innerHTML = `<div class="reveal-box" style="border-color: var(--danger)">${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Test & establish';
+  }
+});
+
+async function refreshAdmin() {
+  await loadConfig();
+  await loadKeys();
+  if ($('#usage-key-select').value) loadUsage();
+}
+
+// ---------- Init ----------
+renderSessions();
+if (store.activeSession) selectSession(store.activeSession);
+</script>
+</body>
 </html>

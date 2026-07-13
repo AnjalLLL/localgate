@@ -16,6 +16,10 @@ class InferenceBackend(ABC):
         """Streaming chat completion (yields SSE chunks)."""
 
     @abstractmethod
+    async def embed(self, text: str, model: str) -> list[float]:
+        """Returns an embedding vector for the given text."""
+
+    @abstractmethod
     async def list_models(self) -> list[str]:
         """Return available model names."""
 
