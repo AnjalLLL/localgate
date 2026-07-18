@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localgate"
-version = "0.7.0"
+version = "0.7.1"
 description = "A local-first API gateway for open-source LLMs: auth, RAG memory extension, DB connectors, token accounting, and a built-in coding agent."
 readme = "README.md"
 license = { text = "MIT" }

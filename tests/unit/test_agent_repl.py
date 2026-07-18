@@ -9,12 +9,13 @@ import subprocess
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 import pytest
 from rich.console import Console
 
 from localgate.agent.gitutil import AGENT_COMMIT_PREFIX
 from localgate.agent.loop import AgentSession
-from localgate.agent.repl import WriteGate, run_repl, run_turn
+from localgate.agent.repl import WriteGate, describe_backend_error, run_repl, run_turn
 from localgate.backends.base import InferenceBackend
 
 
@@ -257,3 +258,80 @@ async def test_run_turn_streams_and_auto_commits(repo):
     from localgate.agent import gitutil
 
     assert gitutil.is_dirty(repo) is False
+
+
+# ---------------------------------------------------------------- backend errors
+
+
+def _http_status_error(status_code: int, body: dict | str) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://localhost:11434/v1/chat/completions")
+    content = json.dumps(body).encode() if isinstance(body, dict) else body.encode()
+    response = httpx.Response(status_code, request=request, content=content)
+    return httpx.HTTPStatusError(f"{status_code} error", request=request, response=response)
+
+
+def test_describe_backend_error_extracts_openai_shaped_message():
+    exc = _http_status_error(400, {"error": {"message": "llama3:latest does not support tools"}})
+    assert describe_backend_error(exc) == "400: llama3:latest does not support tools"
+
+
+def test_describe_backend_error_falls_back_to_raw_text():
+    exc = _http_status_error(500, "internal server error")
+    assert describe_backend_error(exc) == "500: internal server error"
+
+
+def test_describe_backend_error_handles_a_body_with_no_error_key():
+    exc = _http_status_error(400, {"something": "unexpected"})
+    assert '"something": "unexpected"' in describe_backend_error(exc)
+
+
+class FailingThenScriptedBackend(InferenceBackend):
+    """Raises the given error on the first `chat_stream` call, then behaves like
+    the normal scripted backend — models a mid-session backend rejection (e.g.
+    the default model doesn't support tools) that shouldn't kill the whole REPL.
+    """
+
+    name = "failing-then-scripted"
+
+    def __init__(self, error: Exception, responses: list[dict[str, Any]]) -> None:
+        self._error = error
+        self._responses = list(responses)
+        self._failed_once = False
+
+    async def chat(self, request: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def chat_stream(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        if not self._failed_once:
+            self._failed_once = True
+            raise self._error
+        message = self._responses.pop(0)
+        yield {"choices": [{"delta": {"content": message.get("content") or ""}}]}
+
+    async def embed(self, text: str, model: str) -> list[float]:
+        raise NotImplementedError
+
+    async def list_models(self) -> list[str]:
+        return ["scripted-model"]
+
+    async def health(self) -> bool:
+        return True
+
+
+async def test_repl_survives_a_400_and_keeps_the_session_open(repo, monkeypatch):
+    inputs = iter(["write something", "/exit"])
+    monkeypatch.setattr(Console, "input", lambda self, *a, **k: next(inputs))
+    error = _http_status_error(400, {"error": {"message": "does not support tools"}})
+    backend = FailingThenScriptedBackend(error, [final_text("ok")])
+    # should not raise — the bad turn is reported and the REPL keeps running
+    await run_repl(backend, "scripted-model", repo, auto_approve=True)
+
+
+async def test_repl_survives_a_connection_error(repo, monkeypatch):
+    inputs = iter(["hello", "/exit"])
+    monkeypatch.setattr(Console, "input", lambda self, *a, **k: next(inputs))
+    request = httpx.Request("POST", "http://localhost:11434/v1/chat/completions")
+    backend = FailingThenScriptedBackend(
+        httpx.ConnectError("connection refused", request=request), [final_text("ok")]
+    )
+    await run_repl(backend, "scripted-model", repo, auto_approve=True)

@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from rich.console import Console
 
@@ -21,6 +22,27 @@ from localgate.agent.render import print_diff
 from localgate.agent.tools import ToolCallResult, execute_tool_call
 
 HELP_TEXT = "[dim]/exit  /clear  /model <name>  /undo[/dim]"
+
+
+def describe_backend_error(exc: httpx.HTTPStatusError) -> str:
+    """A readable message for a failed backend request — the inference server's
+    own error body (e.g. Ollama's "does not support tools") is far more useful
+    than the raw status line, when it's there to read.
+    """
+    detail: str | None = None
+    try:
+        body = exc.response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            detail = error.get("message")
+        elif isinstance(error, str):
+            detail = error
+    if detail is None:
+        detail = exc.response.text.strip() or str(exc)
+    return f"{exc.response.status_code}: {detail}"
 
 
 class WriteGate:
@@ -214,6 +236,17 @@ async def run_repl(
             await run_turn(console, session, gate, line, memory=memory)
         except AgentTurnLimitExceeded as exc:
             console.print(f"[red]{exc}[/red]")
+        except httpx.HTTPStatusError as exc:
+            detail = describe_backend_error(exc)
+            console.print(f"[red]Backend rejected the request — {detail}[/red]")
+            if exc.response.status_code == 400:
+                console.print(
+                    "[yellow]This usually means the current model doesn't support tool "
+                    "calling — try /model <tool-capable-model>, e.g. "
+                    "/model qwen2.5-coder:7b.[/yellow]"
+                )
+        except httpx.HTTPError as exc:
+            console.print(f"[red]Couldn't reach the backend: {exc}[/red]")
         except KeyboardInterrupt:
             console.print("\n[yellow]cancelled — session still open[/yellow]")
 

@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] — 2026-07-19
+
+### Fixed
+
+- **`localgate code`/`localgate code "task"` crashed with a raw traceback** whenever the
+  backend rejected a request — most commonly a 400 from Ollama when the configured model
+  doesn't support tool calling (e.g. the default `llama3`). It now shows the backend's own
+  error message and, on a 400, a hint to switch models (`/model qwen2.5-coder:7b` in the
+  REPL, `--model` for a single-shot run). In the REPL, a rejected turn no longer ends the
+  session — it stays open so you can just switch models and continue.
+
 ## [0.7.0] — 2026-07-19
 
 A coding agent, backed by whatever model localgate is already pointed at.

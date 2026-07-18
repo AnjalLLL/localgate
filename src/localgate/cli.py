@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any, TypeVar
 
+import httpx
 import typer
 import uvicorn
 from sqlalchemy.exc import OperationalError
@@ -22,7 +23,7 @@ from sqlalchemy.exc import OperationalError
 from localgate import __version__
 from localgate.agent.loop import AgentTurnLimitExceeded
 from localgate.agent.memory import AgentMemory, get_or_create_local_agent_key_id, project_session_id
-from localgate.agent.repl import run_repl, run_single_shot
+from localgate.agent.repl import describe_backend_error, run_repl, run_single_shot
 from localgate.app import resolve_database_url
 from localgate.backends import available_backends, get_backend
 from localgate.config import Settings
@@ -295,6 +296,23 @@ def code(
         _run(go())
     except AgentTurnLimitExceeded as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    except httpx.HTTPStatusError as exc:
+        typer.secho(
+            f"Backend rejected the request — {describe_backend_error(exc)}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        if exc.response.status_code == 400:
+            typer.secho(
+                "This usually means the current model doesn't support tool calling — "
+                "try --model <tool-capable-model>, e.g. --model qwen2.5-coder:7b.",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+        raise typer.Exit(code=1) from exc
+    except httpx.HTTPError as exc:
+        typer.secho(f"Couldn't reach the backend: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     except KeyboardInterrupt:
         typer.secho("\nCancelled.", fg=typer.colors.YELLOW, err=True)
