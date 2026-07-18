@@ -4,13 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localgate"
-version = "0.6.0"
-description = "A local-first API gateway for open-source LLMs: auth, RAG memory extension, DB connectors, and token accounting."
+version = "0.7.0"
+description = "A local-first API gateway for open-source LLMs: auth, RAG memory extension, DB connectors, token accounting, and a built-in coding agent."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [{ name = "Anjal Ghimire", email = "anjalghimire890@gmail.com" }]
-keywords = ["llm", "ollama", "rag", "api-gateway", "self-hosted", "local-first", "vllm", "llama-cpp"]
+keywords = [
+    "llm",
+    "ollama",
+    "rag",
+    "api-gateway",
+    "self-hosted",
+    "local-first",
+    "vllm",
+    "llama-cpp",
+    "coding-agent",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -37,6 +47,7 @@ dependencies = [
     "tiktoken>=0.7",
     "structlog>=24.1",
     "prometheus-client>=0.20",
+    "rich>=13.7",
 ]
 
 [project.optional-dependencies]

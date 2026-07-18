@@ -229,7 +229,7 @@ balancer can act on the status code alone.
 ```json
 {
   "status": "ok",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "backend": {"type": "ollama", "url": "http://localhost:11434", "reachable": true},
   "database": {"dialect": "sqlite+aiosqlite", "connected": true, "error": null},
   "memory": {"enabled": true, "embedding_model": "nomic-embed-text"},

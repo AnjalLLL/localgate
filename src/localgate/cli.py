@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Coroutine
+from pathlib import Path
 from typing import Any, TypeVar
 
 import typer
@@ -19,6 +20,9 @@ import uvicorn
 from sqlalchemy.exc import OperationalError
 
 from localgate import __version__
+from localgate.agent.loop import AgentTurnLimitExceeded
+from localgate.agent.memory import AgentMemory, get_or_create_local_agent_key_id, project_session_id
+from localgate.agent.repl import run_repl, run_single_shot
 from localgate.app import resolve_database_url
 from localgate.backends import available_backends, get_backend
 from localgate.config import Settings
@@ -29,7 +33,6 @@ from localgate.db.repositories.usage import UsageRepository
 app = typer.Typer(
     help="localgate — a local-first API gateway for open-source LLMs.",
     no_args_is_help=True,
-    add_completion=False,
 )
 keys_app = typer.Typer(help="Create, inspect and revoke API keys.", no_args_is_help=True)
 db_app = typer.Typer(help="Initialize and migrate the database.", no_args_is_help=True)
@@ -190,6 +193,112 @@ def backends() -> None:
 def version() -> None:
     """Print the installed version."""
     typer.echo(__version__)
+
+
+# ---------------------------------------------------------------------------- agent
+
+
+@app.command()
+def code(
+    task: str | None = typer.Argument(
+        None, help="What to do, e.g. 'add a health check to app.py'. Omit for a REPL."
+    ),
+    directory: Path = typer.Option(
+        Path.cwd(), "--dir", "-C", help="Project root the agent may read and write within."
+    ),
+    model: str | None = typer.Option(
+        None, "--model", "-m", help="Defaults to LOCALGATE_DEFAULT_MODEL."
+    ),
+    auto_approve: bool = typer.Option(
+        False,
+        "--auto-approve",
+        help="Write files without asking first. Use with a clean git tree.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Skip the dirty-working-tree warning and proceed anyway."
+    ),
+    auto_commit: bool = typer.Option(
+        False,
+        "--auto-commit",
+        help="Commit whatever the agent wrote after each turn, tagged 'localgate-agent:'.",
+    ),
+    no_memory: bool = typer.Option(
+        False,
+        "--no-memory",
+        help="Skip RAG memory for this run, even if LOCALGATE_MEMORY_ENABLED is on.",
+    ),
+) -> None:
+    """Run a coding agent against the backend, editing files under DIRECTORY.
+
+    With TASK, runs one task and exits. Without it, starts an interactive
+    session — keep talking about the same project without re-invoking the
+    command each time. Talks to the inference backend directly (like
+    `localgate health`), not to a running gateway — no API key needed for local use.
+
+    Conversation history and recalled context are stored per project (see
+    `.localgate/session_id`), the same memory layer the HTTP API uses — so
+    re-running this in a project you worked on before picks up where you left off.
+    """
+    settings = _settings()
+    root = directory.resolve()
+    if not root.is_dir():
+        typer.secho(f"Not a directory: {root}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    resolved_model = settings.resolve_model(model)
+    backend = get_backend(
+        settings.backend_type,
+        settings.backend_url,
+        timeout=settings.backend_timeout,
+        api_key=settings.backend_api_key,
+    )
+    engine = make_engine(resolve_database_url(settings))
+
+    async def go() -> str | None:
+        try:
+            memory = None
+            if settings.memory_enabled and not no_memory:
+                await init_models(engine)
+                session_factory = make_session_factory(engine)
+                async with session_factory() as db_session:
+                    api_key_id = await get_or_create_local_agent_key_id(db_session, settings)
+                memory = AgentMemory(
+                    session_factory, backend, settings, project_session_id(root), api_key_id
+                )
+
+            if task is None:
+                await run_repl(
+                    backend,
+                    resolved_model,
+                    root,
+                    auto_approve=auto_approve,
+                    force=force,
+                    auto_commit=auto_commit,
+                    memory=memory,
+                )
+                return None
+            return await run_single_shot(
+                backend,
+                resolved_model,
+                root,
+                task,
+                auto_approve=auto_approve,
+                force=force,
+                auto_commit=auto_commit,
+                memory=memory,
+            )
+        finally:
+            await backend.aclose()
+            await engine.dispose()
+
+    try:
+        _run(go())
+    except AgentTurnLimitExceeded as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    except KeyboardInterrupt:
+        typer.secho("\nCancelled.", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=130) from None
 
 
 # ----------------------------------------------------------------------------- keys

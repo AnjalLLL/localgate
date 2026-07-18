@@ -128,10 +128,42 @@ localgate keys usage <id>                # token usage for one key
 
 localgate db upgrade                     # apply migrations
 localgate db current                     # current schema revision
+
+localgate code                           # interactive coding session in the current directory
+localgate code "add a health check"      # one-off task, then exit
 ```
 
-The CLI talks to the database directly, not to a running server — because `keys create` has
-to work before you have a key, and `db upgrade` has to work when the server won't start.
+The CLI talks to the database (and, for `code`, the inference backend) directly, not to a
+running server — because `keys create` has to work before you have a key, and `db upgrade`
+has to work when the server won't start.
+
+Shell completion: `localgate --install-completion` (bash/zsh/fish/PowerShell, via Typer).
+
+## `localgate code`
+
+A minimal coding agent that reads and edits files in the current project, backed by whatever
+model `localgate` is already pointed at — no separate API key needed, since it talks to the
+backend directly rather than through the gateway.
+
+```bash
+localgate code                                    # REPL: /exit, /clear, /model <name>, /undo
+localgate code "fix the off-by-one in parser.py"   # one-shot
+localgate code "..." --auto-approve --auto-commit  # unattended, with every write committed
+```
+
+- Every write is shown as a colored diff and asks for confirmation, unless `--auto-approve`.
+- On a dirty working tree, it warns once before writing anything (`--force` to skip).
+- `--auto-commit` commits each turn's writes, tagged `localgate-agent:`; `/undo` in the REPL
+  reverts the last write (or the last agent commit, with `--auto-commit`) via git.
+- Tools: `read_file`, `write_file`, `list_directory`, `search_files` (grep-like), `git_status`,
+  `git_diff`. All confined to the project directory; `.gitignore` and `.localgateignore` keep
+  secrets and generated directories out of the model's reach. No shell/`run_command` tool.
+- Conversation history and recalled context persist per project (`.localgate/session_id`),
+  reusing the same RAG memory layer as the HTTP API — re-running it in a project you worked
+  on before picks up where you left off. Disable with `--no-memory` or `LOCALGATE_MEMORY_ENABLED=false`.
+
+Tool-calling quality depends entirely on the model — verify yours actually returns structured
+tool calls (not JSON printed as text) before relying on this day to day.
 
 ## Documentation
 

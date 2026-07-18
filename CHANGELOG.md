@@ -4,6 +4,33 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-07-19
+
+A coding agent, backed by whatever model localgate is already pointed at.
+
+### Added
+
+- **`localgate code`** — reads and edits files in a project directory, backed directly by
+  the configured inference backend (no API key needed, same pattern as `localgate health`).
+  Run it with no argument for an interactive REPL (`/exit`, `/clear`, `/model`, `/undo`), or
+  `localgate code "task"` for a single-shot run.
+- Tools: `read_file`, `write_file`, `list_directory`, `search_files` (grep-like), `git_status`,
+  `git_diff`. All confined to the project root; `.gitignore` and `.localgateignore` keep
+  secrets and generated directories out of the model's reach. No shell/`run_command` tool —
+  deliberately.
+- A git-aware safety net: a one-time warning before writing into a dirty tree (`--force` to
+  skip), optional `--auto-commit` (tagged `localgate-agent:`), and `/undo` to revert the last
+  write or the last agent commit.
+- Colored diffs before every write, streamed responses, and a spinner while waiting on the
+  model — via `rich`.
+- Session memory: conversation history and recalled context persist per project
+  (`.localgate/session_id`), reusing the same RAG memory tables the HTTP API uses.
+  `--no-memory` to opt out for a single run.
+- A fallback parser for models that print a tool call as plain-text JSON instead of using
+  structured `tool_calls` (observed with `qwen2.5-coder` via Ollama) — same execution path as
+  a real tool call, so confirmation/diff/memory logic isn't duplicated.
+- Shell completion: `localgate --install-completion`.
+
 ## [0.6.0] — 2026-07-14
 
 The release where the advertised features actually work.
