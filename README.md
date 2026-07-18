@@ -27,18 +27,46 @@ around it:
 localgate is the management layer. It sits between your app and your inference server and
 adds all four — without touching how you serve models.
 
+## Installation
+
+localgate is [on PyPI](https://pypi.org/project/localgate/). Pick whichever of these you
+already have — you don't need all three:
+
+```bash
+uv tool install localgate       # no Python/pip setup needed if you have uv
+# or
+pipx install localgate          # isolated install, doesn't need a venv
+# or
+pip install localgate           # into your current environment/venv
+```
+
+All three put a `localgate` command on your PATH. If `pip` or `pipx` say "command not
+found": macOS doesn't ship them by default — `pip3` (from `python3 -m ensurepip` or
+Homebrew's `python`) and `pipx` (`brew install pipx`) both need to be installed first. If
+you don't already have Python tooling set up, `uv tool install` is the path of least
+resistance: [install uv](https://docs.astral.sh/uv/getting-started/installation/) (one
+command, no Python required first), then `uv tool install localgate`.
+
+A container image is also published, at `ghcr.io/anjalllll/localgate`.
+
 ## Quick start
 
 ```bash
-git clone https://github.com/AnjalLLL/localgate.git && cd localgate
-uv sync --all-extras
-
 ollama serve                     # your inference backend
 ollama pull llama3
 ollama pull nomic-embed-text     # enables RAG memory
 
+localgate db upgrade
+localgate keys create --name my-app      # prints your key, once
+localgate serve
+```
+
+Developing localgate itself, instead of just using it:
+
+```bash
+git clone https://github.com/AnjalLLL/localgate.git && cd localgate
+uv sync --all-extras
 uv run localgate db upgrade
-uv run localgate keys create --name my-app      # prints your key, once
 uv run localgate serve
 ```
 
