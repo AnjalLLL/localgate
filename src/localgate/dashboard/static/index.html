@@ -336,6 +336,7 @@
               <div class="field"><label for="admin-key">Admin key</label><input type="password" id="admin-key" placeholder="LOCALGATE_ADMIN_KEY" /></div>
               <div class="field"><label for="api-key">API key</label><input type="password" id="api-key" placeholder="lg_… (used for chat)" /></div>
               <button class="primary" id="save-creds">Save</button>
+              <div id="creds-result"></div>
               <p class="hint" style="margin-bottom:0">
                 Sent as the <code>X-Admin-Key</code> and <code>Authorization</code> headers.
                 Nothing is stored on the server.
@@ -818,10 +819,25 @@ async function loadUsage() {
 $("#admin-key").value = store.adminKey;
 $("#api-key").value = store.apiKey;
 
-$("#save-creds").addEventListener("click", () => {
+$("#save-creds").addEventListener("click", async () => {
   store.adminKey = $("#admin-key").value.trim();
   store.apiKey = $("#api-key").value.trim();
   toast("Saved.");
+
+  const result = $("#creds-result");
+  if (!store.adminKey) {
+    result.innerHTML = "";
+  } else {
+    result.innerHTML = '<div class="callout neutral">Checking the admin key…</div>';
+    try {
+      await api("/admin/config", { admin: true });
+      result.innerHTML = '<div class="callout ok">Admin key accepted.</div>';
+    } catch (e) {
+      result.innerHTML = `<div class="callout bad">${esc(e.message)} If you just changed ` +
+        `LOCALGATE_ADMIN_KEY in .env, the running server won't see it until it is restarted.</div>`;
+    }
+  }
+
   loadConfig();
   loadKeys();
 });
