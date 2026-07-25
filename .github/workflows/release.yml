@@ -15,7 +15,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --all-extras
+      - run: uv sync --all-extras --dev
       - run: uv run ruff check src/ tests/
       - run: uv run mypy src/
       - run: uv run pytest -q
