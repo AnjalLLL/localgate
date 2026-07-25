@@ -26,6 +26,7 @@ from localgate import paths
 
 Theme = Literal["dark", "light", "none"]
 
+
 def config_path() -> Path:
     """Where these preferences live.
 

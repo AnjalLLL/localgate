@@ -375,9 +375,7 @@ async def test_delegate_task_is_not_offered_by_default(project):
 
 async def test_delegate_task_is_offered_when_allowed(project):
     backend = ScriptedBackend([final_text("done")])
-    await run_agent(
-        backend, "scripted-model", project, "do something", allow_delegation=True
-    )
+    await run_agent(backend, "scripted-model", project, "do something", allow_delegation=True)
     names = {t["function"]["name"] for t in backend.requests[0]["tools"]}
     assert "delegate_task" in names
 
@@ -417,9 +415,7 @@ async def test_delegate_task_defaults_to_read_only_tools(project):
             final_text("done"),
         ]
     )
-    await run_agent(
-        backend, "scripted-model", project, "delegate a write", allow_delegation=True
-    )
+    await run_agent(backend, "scripted-model", project, "delegate a write", allow_delegation=True)
     assert (project / "app.py").read_text() == "old content\n"  # untouched
 
 
@@ -463,9 +459,7 @@ async def test_delegate_task_sub_agent_cannot_itself_delegate(project):
             final_text("done"),
         ]
     )
-    await run_agent(
-        backend, "scripted-model", project, "delegate", allow_delegation=True
-    )
+    await run_agent(backend, "scripted-model", project, "delegate", allow_delegation=True)
     # the sub-agent's own request (index 1) is the one whose tools list to check
     sub_agent_request = backend.requests[1]
     names = {t["function"]["name"] for t in sub_agent_request["tools"]}
@@ -559,9 +553,7 @@ async def test_web_search_without_a_query_does_not_call_search_fn(project):
         calls.append(query)
         return "should not happen"
 
-    backend = ScriptedBackend(
-        [tool_call("c1", "web_search", {}), final_text("done")]
-    )
+    backend = ScriptedBackend([tool_call("c1", "web_search", {}), final_text("done")])
     await run_agent(backend, "scripted-model", project, "look it up", search_fn=fake_search)
     assert calls == []
 
@@ -576,9 +568,7 @@ def test_system_prompt_is_the_base_prompt_with_no_optional_tools(project):
 
 
 def test_system_prompt_adds_delegate_guidance_when_allowed(project):
-    session = AgentSession(
-        ScriptedBackend([]), "scripted-model", project, allow_delegation=True
-    )
+    session = AgentSession(ScriptedBackend([]), "scripted-model", project, allow_delegation=True)
     prompt = session.system_prompt()
     assert prompt.startswith(SYSTEM_PROMPT)
     assert "delegate_task" in prompt
@@ -589,9 +579,7 @@ async def test_system_prompt_adds_search_guidance_when_configured(project):
     async def fake_search(query: str) -> str:
         return "x"
 
-    session = AgentSession(
-        ScriptedBackend([]), "scripted-model", project, search_fn=fake_search
-    )
+    session = AgentSession(ScriptedBackend([]), "scripted-model", project, search_fn=fake_search)
     prompt = session.system_prompt()
     assert "web_search" in prompt
     assert "delegate_task" not in prompt
@@ -614,9 +602,7 @@ async def test_system_prompt_adds_both_when_both_are_configured(project):
 
 
 def test_reset_rebuilds_the_dynamic_system_prompt(project):
-    session = AgentSession(
-        ScriptedBackend([]), "scripted-model", project, allow_delegation=True
-    )
+    session = AgentSession(ScriptedBackend([]), "scripted-model", project, allow_delegation=True)
     session.messages.append({"role": "user", "content": "hi"})
     session.reset()
     assert session.messages == [{"role": "system", "content": session.system_prompt()}]
@@ -653,9 +639,7 @@ async def test_confirm_search_approving_runs_the_search(project):
     async def fake_search(query: str) -> str:
         return "results here"
 
-    backend = ScriptedBackend(
-        [tool_call("c1", "web_search", {"query": "x"}), final_text("done")]
-    )
+    backend = ScriptedBackend([tool_call("c1", "web_search", {"query": "x"}), final_text("done")])
     result = await run_agent(
         backend,
         "scripted-model",

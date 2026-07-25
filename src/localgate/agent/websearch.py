@@ -71,8 +71,12 @@ def _truncate(text: str) -> str:
 
 
 def _format_results(
-    results: list[dict[str, Any]], *, title_keys: tuple[str, ...], snippet_keys: tuple[str, ...],
-    url_keys: tuple[str, ...], max_results: int,
+    results: list[dict[str, Any]],
+    *,
+    title_keys: tuple[str, ...],
+    snippet_keys: tuple[str, ...],
+    url_keys: tuple[str, ...],
+    max_results: int,
 ) -> str:
     """Shared title + snippet + URL formatting, tolerant of the small key-naming
     differences between providers (`content` vs `snippet`/`description`, `url`

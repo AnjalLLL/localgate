@@ -138,9 +138,7 @@ async def test_make_search_fn_callable_returns_error_text_not_an_exception(monke
 
 async def test_make_search_fn_returns_a_working_openserp_callable(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"results": [{"title": "T", "snippet": "s", "url": "u"}]}
-        )
+        return httpx.Response(200, json={"results": [{"title": "T", "snippet": "s", "url": "u"}]})
 
     monkeypatch.setattr(httpx, "AsyncClient", _client_factory(handler))
     search = make_search_fn("openserp", base_url="http://localhost:9999")
