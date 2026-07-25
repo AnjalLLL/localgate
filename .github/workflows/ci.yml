@@ -33,16 +33,16 @@ jobs:
         run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
 
       - name: Lint
-        run: uv run ruff check src/ tests/
+        run: uv run --python ${{ matrix.python-version }} ruff check src/ tests/
 
       - name: Format check
-        run: uv run ruff format --check src/ tests/
+        run: uv run --python ${{ matrix.python-version }} ruff format --check src/ tests/
 
       - name: Type check
-        run: uv run mypy src/
+        run: uv run --python ${{ matrix.python-version }} mypy src/
 
       - name: Test
-        run: uv run pytest -q --cov --cov-report=term-missing
+        run: uv run --python ${{ matrix.python-version }} pytest -q --cov --cov-report=term-missing
 
   postgres:
     # The SQLite suite proves the logic. This proves the migrations and queries actually
