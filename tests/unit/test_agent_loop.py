@@ -563,8 +563,9 @@ async def test_web_search_without_a_query_does_not_call_search_fn(project):
 
 def test_system_prompt_is_the_base_prompt_with_no_optional_tools(project):
     session = AgentSession(ScriptedBackend([]), "scripted-model", project)
-    assert session.system_prompt() == SYSTEM_PROMPT
-    assert session.messages[0]["content"] == SYSTEM_PROMPT
+    assert session.system_prompt().startswith(SYSTEM_PROMPT)
+    assert f"Project directory: {project}" in session.system_prompt()
+    assert session.messages[0]["content"].startswith(SYSTEM_PROMPT)
 
 
 def test_system_prompt_adds_delegate_guidance_when_allowed(project):

@@ -494,6 +494,37 @@ def _print_config(console: Console, cfg: UserConfig) -> None:
         console.print(f"  {f.name} = {getattr(cfg, f.name)}")
 
 
+def _print_startup_info(
+    console: Console,
+    root: Path,
+    session: AgentSession,
+    search_fn: Any,
+    mcp_registry: Any,
+) -> None:
+    """Show project files and capabilities at startup so the user knows what's available."""
+    # Show top-level files (max 15)
+    try:
+        entries = sorted(root.iterdir())
+        visible = [
+            e.name + ("/" if e.is_dir() else "") for e in entries if not e.name.startswith(".")
+        ][:15]
+        if visible:
+            console.print(f"[dim]files: {', '.join(visible)}[/dim]")
+    except OSError:
+        pass
+
+    # Show capabilities summary
+    caps: list[str] = ["read", "write", "search", "git"]
+    if search_fn is not None:
+        caps.append("web_search")
+    if session.allow_delegation:
+        caps.append("delegate")
+    if mcp_registry is not None and mcp_registry.servers():
+        names = [name for name, _ in mcp_registry.servers()]
+        caps.extend(f"mcp:{n}" for n in names)
+    console.print(f"[dim]tools: {', '.join(caps)}[/dim]")
+
+
 def _print_tools(console: Console, session: AgentSession) -> None:
     """What the model can actually call this session, and — for the opt-in
     ones — why not, if they're off. The direct answer to "what decides when
@@ -709,15 +740,9 @@ async def run_repl(
     prompt_session = _make_prompt_session(gate)
 
     console.print(f"[bold]localgate code[/bold] — {root}  [dim]({mode_label(gate.mode())})[/dim]")
-    if search_fn is not None:
-        console.print(
-            "[yellow]web search enabled — leaves your machine only if the configured "
-            "provider is hosted elsewhere (e.g. tavily; a self-hosted openserp does not)"
-            "[/yellow]"
-        )
-    if mcp_registry is not None and mcp_registry.servers():
-        names = ", ".join(name for name, _ in mcp_registry.servers())
-        console.print(f"[dim]MCP servers connected: {names}[/dim]")
+    console.print(f"[dim]model: {model}[/dim]")
+    # Show a concise project overview
+    _print_startup_info(console, root, session, search_fn, mcp_registry)
     console.print(HELP_TEXT)
     console.print()
 
