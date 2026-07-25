@@ -13,34 +13,78 @@ imply "this database was reachable at the time it was saved," not just
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import TypedDict
 
-DEFAULT_CONFIG_PATH = Path("localgate.config.json")
+from localgate import paths
+
+_logger = logging.getLogger(__name__)
+
+#: The legacy CWD-relative path used before Stage A'.
+_LEGACY_CONFIG_PATH = Path("localgate.config.json")
+
+
+def _default_config_path() -> Path:
+    """The per-user database config file, resolved at call time."""
+    return paths.config_dir() / "database.json"
+
+
+# For backwards compat with callers that imported the old constant: resolve lazily
+# via a property-like function. Legacy CWD path is checked for migration in
+# load_database_config().
+DEFAULT_CONFIG_PATH = _LEGACY_CONFIG_PATH  # kept only for callers that haven't migrated yet
 
 
 class DatabaseConfig(TypedDict, total=False):
     database_url: str
 
 
-def load_database_config(path: Path = DEFAULT_CONFIG_PATH) -> DatabaseConfig:
-    if not path.exists():
+def redact_database_url(url: str) -> str:
+    """Hide credentials in a connection string before it is displayed or logged.
+
+    Lives here rather than in ``api/config.py`` because the CLI (``doctor``) and the
+    Alembic environment both need it, and neither should import the FastAPI layer
+    to get at a pure string function.
+    """
+    if "@" not in url:
+        return url
+    scheme_and_creds, rest = url.rsplit("@", 1)
+    scheme = scheme_and_creds.split("://", 1)[0]
+    return f"{scheme}://***:***@{rest}"
+
+
+def load_database_config(path: Path | None = None) -> DatabaseConfig:
+    resolved = path if path is not None else _default_config_path()
+    if not resolved.exists():
+        # Fall back to the legacy CWD-relative path once, with a warning.
+        if resolved != _LEGACY_CONFIG_PATH and _LEGACY_CONFIG_PATH.exists():
+            _logger.warning(
+                "Found legacy localgate.config.json in the current directory. "
+                "Run `localgate init` to migrate to %s",
+                resolved,
+            )
+            try:
+                return json.loads(_LEGACY_CONFIG_PATH.read_text())
+            except (json.JSONDecodeError, OSError):
+                return {}
         return {}
     try:
-        return json.loads(path.read_text())
+        return json.loads(resolved.read_text())
     except (json.JSONDecodeError, OSError):
         return {}
 
 
-def load_database_url(path: Path = DEFAULT_CONFIG_PATH) -> str | None:
+def load_database_url(path: Path | None = None) -> str | None:
     return load_database_config(path).get("database_url")
 
 
-def save_database_url(url: str, path: Path = DEFAULT_CONFIG_PATH) -> None:
-    config = load_database_config(path)
+def save_database_url(url: str, path: Path | None = None) -> None:
+    resolved = path if path is not None else _default_config_path()
+    config = load_database_config(resolved)
     config["database_url"] = url
-    path.write_text(json.dumps(config, indent=2) + "\n")
+    paths.write_secret_text(resolved, json.dumps(config, indent=2) + "\n")
 
 
-def is_database_established(path: Path = DEFAULT_CONFIG_PATH) -> bool:
+def is_database_established(path: Path | None = None) -> bool:
     return load_database_url(path) is not None

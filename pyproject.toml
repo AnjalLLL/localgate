@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localgate"
-version = "0.7.1"
+version = "0.8.0"
 description = "A local-first API gateway for open-source LLMs: auth, RAG memory extension, DB connectors, token accounting, and a built-in coding agent."
 readme = "README.md"
 license = { text = "MIT" }
@@ -48,6 +48,8 @@ dependencies = [
     "structlog>=24.1",
     "prometheus-client>=0.20",
     "rich>=13.7",
+    "prompt-toolkit>=3.0",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -85,6 +87,19 @@ fake = "localgate.backends.fake:FakeBackend"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/localgate"]
+# Non-Python files the installed package needs at *runtime*, declared explicitly
+# rather than relying on the default file selection. Both failure modes are silent
+# until a user hits them: without alembic.ini + versions/, `localgate serve` dies
+# on startup building the Alembic config; without index.html, `mount_dashboard()`
+# returns False and /dashboard 404s with nothing in the logs.
+# `tests/unit/test_packaging.py` asserts these actually land in a built wheel.
+artifacts = [
+  "src/localgate/py.typed",
+  "src/localgate/db/migrations/alembic.ini",
+  "src/localgate/db/migrations/script.py.mako",
+  "src/localgate/db/migrations/versions/*.py",
+  "src/localgate/dashboard/static/*",
+]
 
 [tool.ruff]
 line-length = 100
@@ -100,6 +115,9 @@ ignore = ["B008"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "slow: builds a wheel or otherwise shells out; deselect with -m 'not slow'",
+]
 
 [tool.coverage.run]
 source = ["src/localgate"]

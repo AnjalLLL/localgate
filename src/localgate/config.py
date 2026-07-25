@@ -5,18 +5,66 @@ version of that failure is the quiet one — a gateway that starts happily with 
 placeholder admin key and is reachable from the network. Validation here is
 therefore deliberately loud: anything that would be unsafe or non-functional in
 production raises at construction, before the server ever binds a port.
+
+**Construct settings with :func:`load_settings`, not ``Settings()``.** The env
+files to read are resolved at call time there; putting a computed path in
+``model_config`` below would freeze it at class-definition (import) time, which
+both hides the per-user config file from anything that adjusts the environment
+afterwards and makes the test suite unable to isolate itself. ``Settings()``
+remains available for tests that want an explicitly-constructed object.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from localgate import paths
+
 #: The documented placeholder. Its whole purpose is to be recognised and rejected.
 INSECURE_ADMIN_KEY = "change-me-in-production"  # noqa: S105
+
+#: The project-local dotenv, relative to the current directory.
+PROJECT_ENV_FILE = ".env"
+
+
+def env_file_chain() -> tuple[Path, ...]:
+    """The dotenv files to read, lowest precedence first.
+
+    pydantic-settings gives later files priority and still takes values the later
+    file omits from earlier ones, so this yields:
+    real ``LOCALGATE_*`` env vars > ``./.env`` > the per-user file > field defaults.
+
+    Putting ``./.env`` last is deliberate: someone working in a checkout with a
+    ``.env`` expects it to win over whatever they once ran ``localgate init`` with.
+    """
+    return (paths.user_env_file(), Path(PROJECT_ENV_FILE))
+
+
+def load_settings(**overrides: Any) -> Settings:
+    """Build :class:`Settings` from the env-file chain resolved *now*.
+
+    The default ``database_url`` is resolved here so that it points at
+    ``data_dir()/localgate.db`` rather than the CWD — a user who runs
+    ``localgate`` from different directories should always get the same database.
+    The per-user data directory is only used when no explicit
+    ``LOCALGATE_DATABASE_URL`` is set (env vars still win via pydantic-settings).
+    """
+    # Inject the data_dir default when no explicit URL override is given and the env
+    # doesn't override it. We do this before constructing Settings so there is only
+    # one parse pass — not two — and so the production validator on admin_key fires
+    # exactly once.
+    if "database_url" not in overrides and not os.environ.get("LOCALGATE_DATABASE_URL"):
+        default_db = paths.data_dir() / "localgate.db"
+        overrides = {**overrides, "database_url": f"sqlite+aiosqlite:///{default_db}"}
+    # `_env_file` is pydantic-settings' documented per-instantiation override; it
+    # isn't in the generated __init__ signature, hence the ignore.
+    return Settings(_env_file=env_file_chain(), **overrides)  # type: ignore[call-arg]
 
 
 class Settings(BaseSettings):
@@ -24,7 +72,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="LOCALGATE_",
-        env_file=".env",
+        # Intentionally NOT set here — see the module docstring and `load_settings`.
+        # A path computed at class-definition time can never be redirected later.
+        env_file=None,
         extra="ignore",
         # `model_aliases` is a legitimate field name here; without this, pydantic
         # reserves the whole `model_*` namespace for its own API.
@@ -35,7 +85,7 @@ class Settings(BaseSettings):
     environment: Literal["development", "production"] = "development"
 
     # --- Server ---
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     # NoDecode: pydantic-settings would otherwise JSON-decode this before any field
     # validator runs, so `LOCALGATE_CORS_ORIGINS=http://a,http://b` — the form people
@@ -54,7 +104,16 @@ class Settings(BaseSettings):
     #: Set as JSON: LOCALGATE_MODEL_ALIASES='{"fast": "phi4-mini"}'
     model_aliases: dict[str, str] = Field(default_factory=dict)
 
+    # --- Web search (opt-in; see agent/websearch.py) ---
+    # search_provider must be set for the `web_search` tool to exist at all — unset
+    # means the model never even sees it as an option, not a graceful no-op.
+    search_provider: str | None = None  # "openserp" (self-hosted, no key) or "tavily"
+    search_api_key: str | None = None  # required for "tavily" only
+    search_base_url: str | None = None  # self-hosted "openserp" URL; defaults to :7000
+
     # --- Database (SQLite by default; any SQLAlchemy async URL works) ---
+    # The default is resolved at load time via load_settings(); a bare Settings()
+    # call still gets this string, which tests override explicitly anyway.
     database_url: str = "sqlite+aiosqlite:///./localgate.db"
 
     # --- Memory / RAG (context extension) ---

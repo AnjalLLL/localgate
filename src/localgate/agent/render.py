@@ -45,13 +45,20 @@ def diff_lines(path: str, old_content: str, new_content: str) -> list[tuple[str,
     return lines
 
 
-def print_diff(console: Console, path: str, old_content: str, new_content: str) -> None:
+def print_diff(
+    console: Console,
+    path: str,
+    old_content: str,
+    new_content: str,
+    *,
+    syntax_theme: str = "ansi_dark",
+) -> None:
     """Render a colored unified diff for a pending write, or the new file's
     contents with syntax highlighting when there's nothing to diff against.
     """
     if not old_content:
         console.print(f"[dim]--- new file {path} ---[/dim]")
-        console.print(Syntax(new_content, _lexer_for(path), theme="ansi_dark", line_numbers=True))
+        console.print(Syntax(new_content, _lexer_for(path), theme=syntax_theme, line_numbers=True))
         return
     console.rule(f"[bold]{path}[/bold]")
     for line, style in diff_lines(path, old_content, new_content):

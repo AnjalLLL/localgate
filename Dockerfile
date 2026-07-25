@@ -41,7 +41,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     LOCALGATE_HOST=0.0.0.0 \
     LOCALGATE_PORT=8000 \
-    LOCALGATE_LOG_FORMAT=json
+    LOCALGATE_LOG_FORMAT=json \
+    LOCALGATE_DATABASE_URL=sqlite+aiosqlite:////data/localgate.db
 
 USER localgate
 EXPOSE 8000
