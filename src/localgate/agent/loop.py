@@ -34,20 +34,25 @@ from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
 
 SYSTEM_PROMPT = (
-    "You are a coding assistant working directly in the user's project directory.\n\n"
-    "## Rules\n"
-    "1. ALWAYS use tools to do work. Never just describe steps or show code snippets "
-    "— actually execute tool calls to read, write, and search files.\n"
-    "2. ALWAYS read a file (read_file) before overwriting it (write_file).\n"
-    "3. Start by listing the directory (list_directory) to understand the project structure.\n"
-    "4. Write complete, production-quality code — not placeholder comments like "
-    "'/* Add your styling here */'.\n"
-    "5. When done, reply with a brief plain-text summary of what you changed.\n"
-    "6. One tool call per response. Do NOT mix prose with a tool call.\n\n"
+    "You are a coding agent. You DIRECTLY modify files — you never show code to the user.\n\n"
+    "## CRITICAL RULES\n"
+    "- You MUST call tools. Never explain what you would do — DO IT.\n"
+    "- NEVER paste code in your response. Use write_file to create/modify files.\n"
+    "- NEVER say 'here is the code' or 'you can add this'. Just write it directly.\n"
+    "- NEVER ask the user to paste code or do steps manually.\n"
+    "- read_file BEFORE write_file — always read first.\n"
+    "- One tool call per response. No prose alongside a tool call.\n"
+    "- Write COMPLETE code, not placeholders like '/* add here */' or '...'.\n"
+    "- When ALL work is done, give a 1-2 sentence summary of changes made.\n\n"
+    "## Workflow\n"
+    "1. read_file to see current code\n"
+    "2. write_file to make changes (full file content, not snippets)\n"
+    "3. Repeat for each file\n"
+    "4. Final message: brief summary\n\n"
     "## Tool call format\n"
-    "If your model supports structured tool calls, use them. Otherwise respond with "
-    "ONLY a JSON object — no prose, no markdown fence:\n"
-    '{"name": "<tool>", "arguments": {...}}'
+    "Respond with ONLY a JSON object when calling a tool:\n"
+    '{"name": "<tool>", "arguments": {...}}\n'
+    "No markdown, no explanation, no code fences around the JSON."
 )
 
 #: Appended to `SYSTEM_PROMPT` only when the corresponding tool is actually on
@@ -77,6 +82,11 @@ _SEARCH_GUIDANCE = (
 #: otherwise-identical live requests, so a fixed tag name isn't reliable.
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 _TAG_RE = re.compile(r"^<(\w+)>\s*(.*?)\s*</\1>$", re.DOTALL)
+#: Matches a JSON object embedded anywhere in prose — used as a fallback when the
+#: whole-string parse fails but the model clearly emitted a tool call inside text.
+_EMBEDDED_JSON_RE = re.compile(
+    r'\{[^{}]*"name"\s*:\s*"[^"]+?"[^{}]*"arguments"\s*:\s*\{', re.DOTALL
+)
 
 
 def _strip_wrapper(text: str) -> str:
@@ -95,19 +105,42 @@ def _strip_wrapper(text: str) -> str:
     return text
 
 
-def _as_synthetic_tool_call(content: str, known_names: frozenset[str]) -> dict[str, Any] | None:
-    """If ``content`` is *only* a disguised tool call, return it in the same shape
-    a real ``tool_calls`` entry has. Otherwise return ``None`` — a final answer
-    that happens to contain JSON (e.g. showing the user a config file) must not
-    be misread as an action the model didn't actually request.
+def _extract_json_object(text: str, start: int) -> str | None:
+    """Extract a balanced JSON object starting at `start` (which must be '{')."""
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            if in_string:
+                escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
-    The whole-string parse is itself the main guard: JSON embedded partway
-    through prose fails ``json.loads`` on the full string and falls through here
-    to a real answer, rather than requiring separate prose-detection logic.
-    """
-    cleaned = _strip_wrapper(content)
+
+def _try_parse_tool_call(
+    text: str, known_names: frozenset[str]
+) -> dict[str, Any] | None:
+    """Try to parse a single JSON object as a tool call."""
     try:
-        parsed = json.loads(cleaned)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
@@ -140,6 +173,38 @@ def _as_synthetic_tool_call(content: str, known_names: frozenset[str]) -> dict[s
         "type": "function",
         "function": {"name": name, "arguments": arguments_json},
     }
+
+
+def _as_synthetic_tool_call(content: str, known_names: frozenset[str]) -> dict[str, Any] | None:
+    """Extract a tool call from model output — first tries the whole string
+    (wrapped or not), then scans for an embedded JSON tool call in prose.
+
+    Small models often mix prose with a JSON tool call. We extract the FIRST
+    valid tool call found anywhere in the output, so the agent can still act
+    even when the model won't shut up.
+    """
+    # First: try the whole string (original strict path)
+    cleaned = _strip_wrapper(content)
+    result = _try_parse_tool_call(cleaned, known_names)
+    if result is not None:
+        return result
+
+    # Second: try to find a code fence containing a tool call
+    for fence_match in re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", content, re.DOTALL):
+        inner = fence_match.group(1).strip()
+        result = _try_parse_tool_call(inner, known_names)
+        if result is not None:
+            return result
+
+    # Third: scan for embedded JSON objects that look like tool calls
+    for match in _EMBEDDED_JSON_RE.finditer(content):
+        obj_str = _extract_json_object(content, match.start())
+        if obj_str is not None:
+            result = _try_parse_tool_call(obj_str, known_names)
+            if result is not None:
+                return result
+
+    return None
 
 
 class AgentTurnLimitExceeded(RuntimeError):
@@ -332,6 +397,7 @@ class AgentSession:
                 user_input = f"{context}\n\nUser request: {user_input}"
         self.messages.append({"role": "user", "content": user_input})
 
+        nudge_count = 0
         for _ in range(self.max_turns):
             outgoing = await self.augment(self.messages) if self.augment else self.messages
             payload = {"model": self.model, "messages": outgoing, "tools": self.tool_schemas}
@@ -347,8 +413,7 @@ class AgentSession:
                 if synthetic is not None:
                     if self.on_event is not None:
                         self.on_event(
-                            f"(model isn't using structured tool calls — "
-                            f"parsed {synthetic['function']['name']} from plain text)"
+                            f"(parsed {synthetic['function']['name']} from model output)"
                         )
                     message = {"role": "assistant", "content": None, "tool_calls": [synthetic]}
                     tool_calls = [synthetic]
@@ -356,7 +421,21 @@ class AgentSession:
             self.messages.append(message)
 
             if not tool_calls:
-                return message.get("content") or ""
+                content = message.get("content") or ""
+                # If model outputs prose on its very first response without using
+                # any tools, nudge it once to actually call tools instead of explaining.
+                if nudge_count < 1 and not self._has_done_work() and len(content) > 80:
+                    nudge_count += 1
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "STOP. Do not explain. Call a tool NOW. "
+                            "Respond with only: "
+                            '{"name": "read_file", "arguments": {"path": "<filename>"}}'
+                        ),
+                    })
+                    continue
+                return content
 
             for call in tool_calls:
                 self.messages.append(await self._run_tool_call(call))
@@ -365,6 +444,10 @@ class AgentSession:
             f"Stopped after {self.max_turns} turns without a final answer — "
             "the model may be looping."
         )
+
+    def _has_done_work(self) -> bool:
+        """Check if any tool calls have been made in this conversation."""
+        return any(msg.get("role") == "tool" for msg in self.messages)
 
     async def _run_tool_call(self, call: dict[str, Any]) -> dict[str, Any]:
         fn = call["function"]
