@@ -34,25 +34,14 @@ from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
 
 SYSTEM_PROMPT = (
-    "You are a coding agent. You DIRECTLY modify files — you never show code to the user.\n\n"
-    "## CRITICAL RULES\n"
-    "- You MUST call tools. Never explain what you would do — DO IT.\n"
-    "- NEVER paste code in your response. Use write_file to create/modify files.\n"
-    "- NEVER say 'here is the code' or 'you can add this'. Just write it directly.\n"
-    "- NEVER ask the user to paste code or do steps manually.\n"
-    "- read_file BEFORE write_file — always read first.\n"
-    "- One tool call per response. No prose alongside a tool call.\n"
-    "- Write COMPLETE code, not placeholders like '/* add here */' or '...'.\n"
-    "- When ALL work is done, give a 1-2 sentence summary of changes made.\n\n"
-    "## Workflow\n"
-    "1. read_file to see current code\n"
-    "2. write_file to make changes (full file content, not snippets)\n"
-    "3. Repeat for each file\n"
-    "4. Final message: brief summary\n\n"
-    "## Tool call format\n"
-    "Respond with ONLY a JSON object when calling a tool:\n"
-    '{"name": "<tool>", "arguments": {...}}\n'
-    "No markdown, no explanation, no code fences around the JSON."
+    "You are a coding agent. Execute tasks by calling tools.\n"
+    "RULES:\n"
+    "- Call ONE tool per response. No explanation, no markdown, no code blocks.\n"
+    "- read_file BEFORE write_file. Always read first, then write the full file.\n"
+    "- Write COMPLETE code. No placeholders like '/* add here */' or '...'.\n"
+    "- When finished, say only: Done: <1 sentence summary>\n"
+    'FORMAT: {"name": "tool_name", "arguments": {...}}\n'
+    "Respond with ONLY the JSON above. Nothing else."
 )
 
 #: Appended to `SYSTEM_PROMPT` only when the corresponding tool is actually on
@@ -233,7 +222,10 @@ def _parse_arguments(raw: str) -> dict[str, Any]:
 
 
 async def _stream_completion(
-    backend: InferenceBackend, payload: dict[str, Any], on_token: OnToken
+    backend: InferenceBackend,
+    payload: dict[str, Any],
+    on_token: OnToken,
+    known_tool_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Consume a streamed chat completion and reassemble it into one message.
 
@@ -241,9 +233,15 @@ async def _stream_completion(
     the id and function name are usually whole in the first fragment, but
     `arguments` is typically streamed character by character and must be
     concatenated, not replaced.
+
+    Early-stops if the accumulated text content contains a complete tool call
+    JSON — prevents the model from generating thousands of tokens of prose
+    when it already emitted the one action we need.
     """
     content_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
+    content_len = 0
+    early_stopped = False
 
     async for chunk in backend.chat_stream(payload):
         choices = chunk.get("choices") or []
@@ -254,7 +252,16 @@ async def _stream_completion(
         text = delta.get("content")
         if text:
             content_parts.append(text)
+            content_len += len(text)
             on_token(text)
+
+            # Early stop: if content is getting long and contains a tool call,
+            # stop consuming the stream — we already have what we need.
+            if known_tool_names and not tool_calls and content_len > 500:
+                joined = "".join(content_parts)
+                if _EMBEDDED_JSON_RE.search(joined):
+                    early_stopped = True
+                    break
 
         for tc_delta in delta.get("tool_calls") or []:
             index = tc_delta.get("index", 0)
@@ -273,6 +280,8 @@ async def _stream_completion(
     message: dict[str, Any] = {"role": "assistant", "content": content or None}
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    if early_stopped:
+        message["_early_stopped"] = True
     return message
 
 
@@ -398,9 +407,16 @@ class AgentSession:
         nudge_count = 0
         for _ in range(self.max_turns):
             outgoing = await self.augment(self.messages) if self.augment else self.messages
-            payload = {"model": self.model, "messages": outgoing, "tools": self.tool_schemas}
+            payload = {
+                "model": self.model,
+                "messages": outgoing,
+                "tools": self.tool_schemas,
+                "max_tokens": 1024,
+            }
             if self.on_token is not None:
-                message = await _stream_completion(self.backend, payload, self.on_token)
+                message = await _stream_completion(
+                    self.backend, payload, self.on_token, self._known_tool_names
+                )
             else:
                 response = await self.backend.chat(payload)
                 message = response["choices"][0]["message"]
@@ -437,6 +453,13 @@ class AgentSession:
 
             for call in tool_calls:
                 self.messages.append(await self._run_tool_call(call))
+            # Force the model to do one step at a time
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": "Good. Next step. One tool call only, no explanation.",
+                }
+            )
 
         raise AgentTurnLimitExceeded(
             f"Stopped after {self.max_turns} turns without a final answer — "
