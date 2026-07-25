@@ -23,13 +23,6 @@ import uvicorn
 from sqlalchemy.exc import OperationalError
 
 from localgate import __version__, paths
-from localgate.agent.loop import AgentTurnLimitExceeded
-from localgate.agent.mcp import McpRegistry, load_mcp_servers
-from localgate.agent.memory import AgentMemory, get_or_create_local_agent_key_id, project_session_id
-from localgate.agent.repl import describe_backend_error, run_repl, run_single_shot
-from localgate.agent.theme import THEMES
-from localgate.agent.userconfig import UserConfig
-from localgate.agent.websearch import make_search_fn
 from localgate.app import resolve_database_url
 from localgate.backends import available_backends, get_backend
 from localgate.config import INSECURE_ADMIN_KEY, Settings, load_settings
@@ -614,7 +607,7 @@ def code(
     theme: str | None = typer.Option(
         None,
         "--theme",
-        help=f"One of {', '.join(THEMES)}. Persists to the config file when set.",
+        help="One of dark, light, none. Persists to the config file when set.",
     ),
     no_color: bool = typer.Option(
         False, "--no-color", help="Disable colored output. Also respects the NO_COLOR env var."
@@ -658,6 +651,22 @@ def code(
     (e.g. the model doesn't support tool calling), 6 the backend was
     unreachable, 130 interrupted (Ctrl+C).
     """
+    from localgate.agent.loop import AgentTurnLimitExceeded  # noqa: PLC0415
+    from localgate.agent.mcp import McpRegistry, load_mcp_servers  # noqa: PLC0415
+    from localgate.agent.memory import (  # noqa: PLC0415
+        AgentMemory,
+        get_or_create_local_agent_key_id,
+        project_session_id,
+    )
+    from localgate.agent.repl import (  # noqa: PLC0415
+        describe_backend_error,
+        run_repl,
+        run_single_shot,
+    )
+    from localgate.agent.theme import THEMES  # noqa: PLC0415
+    from localgate.agent.userconfig import UserConfig  # noqa: PLC0415
+    from localgate.agent.websearch import make_search_fn  # noqa: PLC0415
+
     settings = _settings()
     root = directory.resolve()
     if not root.is_dir():
