@@ -7,6 +7,7 @@ import pytest
 
 from localgate.agent.websearch import (
     WebSearchError,
+    duckduckgo_search,
     make_search_fn,
     openserp_search,
     tavily_search,
@@ -219,3 +220,60 @@ async def test_openserp_search_uses_the_requested_engine(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", _client_factory(handler))
     await openserp_search("query", "http://localhost:7000", engine="duckduckgo")
     assert seen_paths == ["/duckduckgo/search"]
+
+
+# ------------------------------------------------------------------- duckduckgo
+
+_DDG_HTML_RESPONSE = """\
+<html><body>
+<table>
+<tr><td><a class="result-link" href="https://example.com/page1">Example Page One</a></td></tr>
+<tr><td class="result-snippet">This is a snippet for the first result.</td></tr>
+<tr><td><a class="result-link" href="https://example.com/page2">Example Page Two</a></td></tr>
+<tr><td class="result-snippet">Second result snippet here.</td></tr>
+</table>
+</body></html>
+"""
+
+
+async def test_duckduckgo_search_parses_results(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "lite.duckduckgo.com"
+        return httpx.Response(200, text=_DDG_HTML_RESPONSE)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(handler))
+    result = await duckduckgo_search("test query")
+    assert "Example Page One" in result
+    assert "https://example.com/page1" in result
+    assert "snippet for the first result" in result
+
+
+async def test_duckduckgo_search_with_no_results(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>No results</body></html>")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(handler))
+    assert await duckduckgo_search("query") == "No results."
+
+
+async def test_duckduckgo_search_raises_on_http_failure(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(handler))
+    with pytest.raises(WebSearchError, match="DuckDuckGo"):
+        await duckduckgo_search("query")
+
+
+def test_make_search_fn_duckduckgo_requires_no_key():
+    make_search_fn("duckduckgo")  # should not raise
+
+
+async def test_make_search_fn_duckduckgo_returns_working_callable(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_DDG_HTML_RESPONSE)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(handler))
+    search = make_search_fn("duckduckgo")
+    result = await search("test")
+    assert "Example Page" in result

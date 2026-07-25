@@ -135,9 +135,7 @@ def _extract_json_object(text: str, start: int) -> str | None:
     return None
 
 
-def _try_parse_tool_call(
-    text: str, known_names: frozenset[str]
-) -> dict[str, Any] | None:
+def _try_parse_tool_call(text: str, known_names: frozenset[str]) -> dict[str, Any] | None:
     """Try to parse a single JSON object as a tool call."""
     try:
         parsed = json.loads(text)
@@ -412,9 +410,7 @@ class AgentSession:
                 synthetic = _as_synthetic_tool_call(message["content"], self._known_tool_names)
                 if synthetic is not None:
                     if self.on_event is not None:
-                        self.on_event(
-                            f"(parsed {synthetic['function']['name']} from model output)"
-                        )
+                        self.on_event(f"(parsed {synthetic['function']['name']} from model output)")
                     message = {"role": "assistant", "content": None, "tool_calls": [synthetic]}
                     tool_calls = [synthetic]
 
@@ -426,14 +422,16 @@ class AgentSession:
                 # any tools, nudge it once to actually call tools instead of explaining.
                 if nudge_count < 1 and not self._has_done_work() and len(content) > 80:
                     nudge_count += 1
-                    self.messages.append({
-                        "role": "user",
-                        "content": (
-                            "STOP. Do not explain. Call a tool NOW. "
-                            "Respond with only: "
-                            '{"name": "read_file", "arguments": {"path": "<filename>"}}'
-                        ),
-                    })
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "STOP. Do not explain. Call a tool NOW. "
+                                "Respond with only: "
+                                '{"name": "read_file", "arguments": {"path": "<filename>"}}'
+                            ),
+                        }
+                    )
                     continue
                 return content
 

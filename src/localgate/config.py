@@ -104,10 +104,10 @@ class Settings(BaseSettings):
     #: Set as JSON: LOCALGATE_MODEL_ALIASES='{"fast": "phi4-mini"}'
     model_aliases: dict[str, str] = Field(default_factory=dict)
 
-    # --- Web search (opt-in; see agent/websearch.py) ---
-    # search_provider must be set for the `web_search` tool to exist at all — unset
-    # means the model never even sees it as an option, not a graceful no-op.
-    search_provider: str | None = None  # "openserp" (self-hosted, no key) or "tavily"
+    # --- Web search (see agent/websearch.py) ---
+    # Defaults to "duckduckgo" (free, no key needed) when unset. Set explicitly to
+    # override: "openserp" (self-hosted) or "tavily" (paid, needs API key).
+    search_provider: str | None = None  # None = duckduckgo; or "openserp" / "tavily"
     search_api_key: str | None = None  # required for "tavily" only
     search_base_url: str | None = None  # self-hosted "openserp" URL; defaults to :7000
 
