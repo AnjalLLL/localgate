@@ -57,8 +57,11 @@ def redact_database_url(url: str) -> str:
 def load_database_config(path: Path | None = None) -> DatabaseConfig:
     resolved = path if path is not None else _default_config_path()
     if not resolved.exists():
-        # Fall back to the legacy CWD-relative path once, with a warning.
-        if resolved != _LEGACY_CONFIG_PATH and _LEGACY_CONFIG_PATH.exists():
+        # Only fall back to the legacy CWD file when the caller is using the
+        # default path (path is None). An explicit path that doesn't exist yet
+        # simply means "not configured" — falling back there would silently
+        # connect tests to a real database on disk.
+        if path is None and _LEGACY_CONFIG_PATH.exists():
             _logger.warning(
                 "Found legacy localgate.config.json in the current directory. "
                 "Run `localgate init` to migrate to %s",
