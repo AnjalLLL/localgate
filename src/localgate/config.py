@@ -60,7 +60,7 @@ def load_settings(**overrides: Any) -> Settings:
     # one parse pass — not two — and so the production validator on admin_key fires
     # exactly once.
     if "database_url" not in overrides and not os.environ.get("LOCALGATE_DATABASE_URL"):
-        default_db = paths.data_dir() / "localgate.db"
+        default_db = paths.ensure_data_dir() / "localgate.db"
         overrides = {**overrides, "database_url": f"sqlite+aiosqlite:///{default_db}"}
     # `_env_file` is pydantic-settings' documented per-instantiation override; it
     # isn't in the generated __init__ signature, hence the ignore.
