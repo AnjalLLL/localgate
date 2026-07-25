@@ -365,7 +365,7 @@ async def test_on_event_notes_when_falling_back_to_synthetic_parsing(project):
     )
     events: list[str] = []
     await run_agent(backend, "scripted-model", project, "read app.py", on_event=events.append)
-    assert any("parsed" in e and "read_file" in e for e in events)
+    assert any("read_file" in e for e in events)
 
 
 # --------------------------------------------------------------- delegate_task

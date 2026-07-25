@@ -257,7 +257,7 @@ async def _stream_completion(
 
             # Early stop: if content is getting long and contains a tool call,
             # stop consuming the stream — we already have what we need.
-            if known_tool_names and not tool_calls and content_len > 500:
+            if known_tool_names and not tool_calls and content_len > 200:
                 joined = "".join(content_parts)
                 if _EMBEDDED_JSON_RE.search(joined):
                     early_stopped = True
@@ -311,6 +311,7 @@ class AgentSession:
         allow_delegation: bool = False,
         search_fn: SearchFn | None = None,
         mcp_registry: McpRegistry | None = None,
+        auto_read: bool = False,
     ) -> None:
         self.backend = backend
         self.model = model
@@ -344,6 +345,7 @@ class AgentSession:
             self.tool_schemas.extend(mcp_registry.tool_schemas)
         self.tool_executor = tool_executor if tool_executor is not None else execute_tool_call
         self.augment = augment
+        self.auto_read = auto_read
         self._known_tool_names = frozenset(s["function"]["name"] for s in self.tool_schemas)
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt()}]
 
@@ -397,14 +399,22 @@ class AgentSession:
         return "\n".join(parts)
 
     async def send(self, user_input: str) -> str:
-        """Run one user turn to completion and return the model's final reply."""
+        """Run one user turn to completion and return the model's final reply.
+
+        Output is buffered silently during the tool loop — only tool events
+        (via on_event) are shown. The final answer is streamed at the end.
+        """
         if len(self.messages) == 1:
             context = self._build_project_context()
             if context:
                 user_input = f"{context}\n\nUser request: {user_input}"
+            if self.auto_read:
+                self._auto_read_first_file()
         self.messages.append({"role": "user", "content": user_input})
 
-        nudge_count = 0
+        def _noop(_text: str) -> None:
+            pass
+
         for _ in range(self.max_turns):
             outgoing = await self.augment(self.messages) if self.augment else self.messages
             payload = {
@@ -413,53 +423,50 @@ class AgentSession:
                 "tools": self.tool_schemas,
                 "max_tokens": 1024,
             }
+            # Buffer silently — don't stream model prose to user
             if self.on_token is not None:
                 message = await _stream_completion(
-                    self.backend, payload, self.on_token, self._known_tool_names
+                    self.backend, payload, _noop, self._known_tool_names
                 )
             else:
                 response = await self.backend.chat(payload)
                 message = response["choices"][0]["message"]
 
+            content = message.get("content") or ""
+            if len(content) > 2000:
+                message["content"] = content[:2000]
+                content = message["content"]
+
             tool_calls = message.get("tool_calls") or []
-            if not tool_calls and message.get("content"):
-                synthetic = _as_synthetic_tool_call(message["content"], self._known_tool_names)
+            if not tool_calls and content:
+                synthetic = _as_synthetic_tool_call(content, self._known_tool_names)
                 if synthetic is not None:
                     if self.on_event is not None:
-                        self.on_event(f"(parsed {synthetic['function']['name']} from model output)")
-                    message = {"role": "assistant", "content": None, "tool_calls": [synthetic]}
+                        fn = synthetic["function"]
+                        self.on_event(f"{fn['name']}(...)")
+                    message = {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [synthetic],
+                    }
                     tool_calls = [synthetic]
 
             self.messages.append(message)
 
             if not tool_calls:
-                content = message.get("content") or ""
-                # If model outputs prose on its very first response without using
-                # any tools, nudge it once to actually call tools instead of explaining.
-                if nudge_count < 1 and not self._has_done_work() and len(content) > 80:
-                    nudge_count += 1
-                    self.messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "STOP. Do not explain. Call a tool NOW. "
-                                "Respond with only: "
-                                '{"name": "read_file", "arguments": {"path": "<filename>"}}'
-                            ),
-                        }
-                    )
-                    continue
+                if self.auto_read and not self._has_done_work():
+                    first = self._pick_first_file()
+                    if first:
+                        await self._force_read(first)
+                        continue
+                # Final answer — show it to user
+                if self.on_token and content:
+                    self.on_token(content)
                 return content
 
             for call in tool_calls:
                 self.messages.append(await self._run_tool_call(call))
-            # Force the model to do one step at a time
-            self.messages.append(
-                {
-                    "role": "user",
-                    "content": "Good. Next step. One tool call only, no explanation.",
-                }
-            )
+            self.messages.append({"role": "user", "content": "Next step. One tool call only."})
 
         raise AgentTurnLimitExceeded(
             f"Stopped after {self.max_turns} turns without a final answer — "
@@ -469,6 +476,100 @@ class AgentSession:
     def _has_done_work(self) -> bool:
         """Check if any tool calls have been made in this conversation."""
         return any(msg.get("role") == "tool" for msg in self.messages)
+
+    def _pick_first_file(self) -> str | None:
+        """Pick the most relevant file to auto-read from the project root."""
+        _PRIORITY_EXTS = (".html", ".py", ".js", ".ts", ".jsx", ".tsx", ".css")
+        try:
+            entries = list_directory(self.root, ".")
+        except (OSError, ValueError):
+            return None
+        for entry in entries:
+            if "/" in entry:
+                continue
+            if Path(entry).suffix.lower() in _PRIORITY_EXTS:
+                return entry
+        return None
+
+    def _auto_read_first_file(self) -> None:
+        """Pre-read the first relevant file so the model has code context."""
+        first = self._pick_first_file()
+        if not first:
+            return
+        try:
+            content = read_file(self.root, first)
+        except (OSError, ValueError):
+            return
+        call_id = f"auto-{uuid.uuid4().hex[:8]}"
+        self.messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": first}),
+                        },
+                    }
+                ],
+            }
+        )
+        self.messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "read_file",
+                "content": content,
+            }
+        )
+        if self.on_event is not None:
+            self.on_event(f"read_file(path={first!r})")
+
+    async def _force_read(self, path: str) -> None:
+        """Force-inject a read_file when model refuses to use tools."""
+        try:
+            content = read_file(self.root, path)
+        except (OSError, ValueError):
+            return
+        call_id = f"force-{uuid.uuid4().hex[:8]}"
+        self.messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": path}),
+                        },
+                    }
+                ],
+            }
+        )
+        self.messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "read_file",
+                "content": content,
+            }
+        )
+        if self.on_event is not None:
+            self.on_event(f"read_file(path={path!r})")
+        self.messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"I read {path} for you. Now write_file to make changes. "
+                    "JSON only, no explanation."
+                ),
+            }
+        )
 
     async def _run_tool_call(self, call: dict[str, Any]) -> dict[str, Any]:
         fn = call["function"]
