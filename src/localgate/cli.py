@@ -13,7 +13,6 @@ import asyncio
 import json
 import os
 import secrets
-import stat
 from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any, TypeVar
@@ -153,11 +152,11 @@ def serve(
 ) -> None:
     """Start the gateway."""
     settings = _settings()
-    common: dict = dict(
-        host=host or settings.host,
-        port=port or settings.port,
-        log_config=None,  # localgate configures structlog itself; don't fight over it
-    )
+    common: dict = {
+        "host": host or settings.host,
+        "port": port or settings.port,
+        "log_config": None,  # localgate configures structlog itself
+    }
     if proxy_headers:
         common["proxy_headers"] = True
         if forwarded_allow_ips is not None:
@@ -264,8 +263,14 @@ def version() -> None:
 
 @app.command()
 def init(
-    force: bool = typer.Option(False, "--force", help="Regenerate the admin key even if one exists."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview what would be written without touching the filesystem."),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Regenerate the admin key even if one exists.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Preview what would be written without touching the filesystem.",
+    ),
 ) -> None:
     """Set up localgate for the first time: create config dirs, generate a secure admin key,
     and run database migrations.
@@ -323,7 +328,10 @@ def init(
             fg=typer.colors.YELLOW,
         )
     else:
-        typer.echo(f"  env file    {env_file}  (already exists — skipped; use --force to regenerate)")
+        typer.echo(
+            f"  env file    {env_file}"
+            "  (exists — use --force to regenerate)"
+        )
     typer.echo(f"  database    {redact_database_url(db_url)}  (revision {revision})")
 
 
@@ -350,8 +358,14 @@ def doctor() -> None:
     typer.secho("--- paths ---", bold=True)
     config_dir = paths.config_dir()
     data_dir = paths.data_dir()
-    typer.echo(f"  config dir   {config_dir}  ({paths.describe_mode(config_dir) if config_dir.exists() else 'missing'})")
-    typer.echo(f"  data dir     {data_dir}  ({paths.describe_mode(data_dir) if data_dir.exists() else 'missing'})")
+    cfg_mode = (
+        paths.describe_mode(config_dir) if config_dir.exists() else "missing"
+    )
+    dat_mode = (
+        paths.describe_mode(data_dir) if data_dir.exists() else "missing"
+    )
+    typer.echo(f"  config dir   {config_dir}  ({cfg_mode})")
+    typer.echo(f"  data dir     {data_dir}  ({dat_mode})")
 
     env_file = paths.user_env_file()
     env_mode = paths.describe_mode(env_file)
@@ -370,7 +384,12 @@ def doctor() -> None:
 
     legacy = Path("localgate.config.json")
     if legacy.exists():
-        _check("legacy config", f"{legacy} exists in CWD — run `localgate init` to migrate", warn=True)
+        _check(
+            "legacy config",
+            f"{legacy} exists in CWD"
+            " — run `localgate init` to migrate",
+            warn=True,
+        )
 
     typer.secho("\n--- settings ---", bold=True)
     try:
@@ -444,8 +463,14 @@ def _read_gateway_creds() -> tuple[str, str] | None:
 
 @app.command()
 def login(
-    url: str = typer.Option(..., "--url", help="Base URL of the localgate gateway, e.g. https://gw.example.com"),
-    api_key: str = typer.Option(..., "--api-key", help="An API key (not the admin key) minted on that gateway."),
+    url: str = typer.Option(
+        ..., "--url",
+        help="Base URL of the gateway, e.g. https://gw.example.com",
+    ),
+    api_key: str = typer.Option(
+        ..., "--api-key",
+        help="An API key (not the admin key) minted on that gateway.",
+    ),
 ) -> None:
     """Save credentials for a remote localgate gateway.
 
@@ -456,7 +481,10 @@ def login(
     base = url.rstrip("/")
 
     if api_key == INSECURE_ADMIN_KEY or api_key.startswith("X-Admin-Key"):
-        typer.secho("This looks like an admin key. Use a regular API key here.", fg=typer.colors.RED, err=True)
+        typer.secho(
+            "This looks like an admin key. Use a regular API key here.",
+            fg=typer.colors.RED, err=True,
+        )
         raise typer.Exit(code=2)
 
     async def verify() -> None:
@@ -464,7 +492,11 @@ def login(
             # Check the gateway is reachable and get version info.
             try:
                 live = await client.get("/health/live")
-                remote_version = live.json().get("version", "unknown") if live.status_code == 200 else "unknown"
+                remote_version = (
+                    live.json().get("version", "unknown")
+                    if live.status_code == 200
+                    else "unknown"
+                )
             except httpx.HTTPError:
                 remote_version = "unknown"
 
@@ -476,7 +508,12 @@ def login(
             resp.raise_for_status()
 
             from localgate import __version__ as local_version  # noqa: PLC0415
-            if remote_version != "unknown" and remote_version.split(".")[0] != local_version.split(".")[0]:
+            major_mismatch = (
+                remote_version != "unknown"
+                and remote_version.split(".")[0]
+                != local_version.split(".")[0]
+            )
+            if major_mismatch:
                 typer.secho(
                     f"Warning: local version {local_version} and gateway version {remote_version} "
                     "have different major versions — some features may not work.",
@@ -675,17 +712,24 @@ def code(
     if use_remote:
         if gateway_creds is None:
             typer.secho(
-                "No gateway credentials found. Run `localgate login --url <url> --api-key <key>` first.",
+                "No gateway credentials found."
+                " Run `localgate login --url <url> --api-key <key>` first.",
                 fg=typer.colors.RED,
                 err=True,
             )
             raise typer.Exit(code=2)
         gw_url, gw_key = gateway_creds
-        backend = get_backend("openai_compat", gw_url, api_key=gw_key, timeout=settings.backend_timeout)
+        backend = get_backend(
+            "openai_compat", gw_url,
+            api_key=gw_key, timeout=settings.backend_timeout,
+        )
         # Remote mode disables local memory: the gateway handles server-side memory,
         # and without a stable X-Session-Id the server-side retrieval is useless anyway.
         effective_no_memory = True
-        typer.secho(f"Using remote gateway: {gw_url}", fg=typer.colors.CYAN, err=True)
+        typer.secho(
+            f"Using remote gateway: {gw_url}",
+            fg=typer.colors.CYAN, err=True,
+        )
     else:
         backend = get_backend(
             settings.backend_type,
@@ -1043,11 +1087,17 @@ def db_set_url(
 
 @app.command()
 def deploy(
-    domain: str = typer.Option(..., "--domain", help="Public domain name, e.g. gw.example.com"),
+    domain: str = typer.Option(
+        ..., "--domain",
+        help="Public domain name, e.g. gw.example.com",
+    ),
     target: str = typer.Option(
         "compose",
         "--target",
-        help="Deployment type: 'compose' (Docker Compose + Caddy) or 'systemd' (systemd unit + system Caddy).",
+        help=(
+            "Deployment type: 'compose' (Docker Compose + Caddy)"
+            " or 'systemd' (systemd unit + system Caddy)."
+        ),
     ),
     expose_admin: bool = typer.Option(
         False,
@@ -1061,16 +1111,21 @@ def deploy(
         help="Directory to write generated files into.",
     ),
 ) -> None:
-    """Generate deployment files (Caddyfile + compose or systemd) for self-hosting with automatic HTTPS.
+    """Generate deployment files for self-hosting with automatic HTTPS.
 
-    Caddy handles ACME certificate issuance automatically. Only /v1/* and /health* are
-    exposed by default; pass --expose-admin to also expose /admin* and /dashboard*.
+    Caddy handles ACME certificate issuance automatically.
+    Only /v1/* and /health* are exposed by default;
+    pass --expose-admin to also expose /admin* and /dashboard*.
 
     After generation, follow the printed instructions to deploy and then run:
       localgate login --url https://<domain> --api-key <key>
     """
     if target not in ("compose", "systemd"):
-        typer.secho(f"Unknown target {target!r} — choose 'compose' or 'systemd'.", fg=typer.colors.RED, err=True)
+        typer.secho(
+            f"Unknown target {target!r}"
+            " — choose 'compose' or 'systemd'.",
+            fg=typer.colors.RED, err=True,
+        )
         raise typer.Exit(code=2)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1120,7 +1175,7 @@ def deploy(
     )
 
     if target == "compose":
-        compose_content = f"""services:
+        compose_content = """services:
   localgate:
     image: ghcr.io/anjallll/localgate:latest
     restart: unless-stopped
@@ -1153,7 +1208,7 @@ volumes:
         typer.echo(f"  wrote  {output_dir / 'localgate.env'}  (0600 — contains admin key)")
 
     else:  # systemd
-        unit_content = f"""[Unit]
+        unit_content = """[Unit]
 Description=localgate API gateway
 After=network.target
 
@@ -1187,12 +1242,26 @@ WantedBy=multi-user.target
         typer.echo("Next steps:")
         typer.echo("  1. Copy files to your server and run: docker compose up -d")
         typer.echo("  2. Mint an API key: localgate keys create --name me")
-        typer.echo("  3. On your local machine: localgate login --url https://" + domain + " --api-key <key>")
+        typer.echo(
+            "  3. On your local machine:"
+            f" localgate login --url https://{domain}"
+            " --api-key <key>"
+        )
     else:
         typer.echo("Next steps:")
-        typer.echo("  1. Install files: sudo cp localgate.service /etc/systemd/system/")
-        typer.echo("  2. sudo mkdir -p /etc/localgate && sudo cp localgate.env /etc/localgate/ && sudo chmod 0600 /etc/localgate/localgate.env")
-        typer.echo("  3. sudo systemctl enable --now localgate && sudo caddy reload --config Caddyfile")
+        typer.echo(
+            "  1. Install files:"
+            " sudo cp localgate.service /etc/systemd/system/"
+        )
+        typer.echo(
+            "  2. sudo mkdir -p /etc/localgate"
+            " && sudo cp localgate.env /etc/localgate/"
+            " && sudo chmod 0600 /etc/localgate/localgate.env"
+        )
+        typer.echo(
+            "  3. sudo systemctl enable --now localgate"
+            " && sudo caddy reload --config Caddyfile"
+        )
         typer.echo("  4. Mint a key and login as above.")
 
 
