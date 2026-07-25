@@ -153,19 +153,26 @@ def serve(
 ) -> None:
     """Start the gateway."""
     settings = _settings()
-    uvicorn_kwargs: dict = dict(
-        factory=True,
+    common: dict = dict(
         host=host or settings.host,
         port=port or settings.port,
-        reload=reload,
-        workers=None if reload else workers,
         log_config=None,  # localgate configures structlog itself; don't fight over it
     )
     if proxy_headers:
-        uvicorn_kwargs["proxy_headers"] = True
+        common["proxy_headers"] = True
         if forwarded_allow_ips is not None:
-            uvicorn_kwargs["forwarded_allow_ips"] = forwarded_allow_ips
-    uvicorn.run("localgate.app:create_app", **uvicorn_kwargs)
+            common["forwarded_allow_ips"] = forwarded_allow_ips
+
+    if reload or workers <= 1:
+        # Single-process: pass the app object directly so uvicorn runs in-process
+        # rather than forking a supervisor that exits immediately after handing off.
+        from localgate.app import create_app  # noqa: PLC0415
+
+        uvicorn.run(create_app(), reload=reload, **common)
+    else:
+        # Multi-worker: must use a string import path + factory so each worker
+        # forks and calls create_app() independently.
+        uvicorn.run("localgate.app:create_app", factory=True, workers=workers, **common)
 
 
 @app.command()
