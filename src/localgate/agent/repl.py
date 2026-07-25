@@ -555,6 +555,7 @@ def _render_startup_banner(
     return Panel(
         "\n".join(lines),
         title="[bold green]localgate code[/bold green]",
+        subtitle="[dim]github.com/AnjalLLL/localgate[/dim]",
         border_style="green",
         padding=(0, 1),
     )
