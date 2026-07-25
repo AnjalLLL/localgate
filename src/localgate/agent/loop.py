@@ -27,6 +27,8 @@ from localgate.agent.tools import (
     TOOL_SCHEMAS,
     ToolCallResult,
     execute_tool_call,
+    list_directory,
+    read_file,
 )
 from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
@@ -287,8 +289,47 @@ class AgentSession:
         """Drop history, starting a new conversation in the same session."""
         self.messages = [{"role": "system", "content": self.system_prompt()}]
 
+    def _build_project_context(self) -> str:
+        """Build a compact project context to inject on the first turn."""
+        parts: list[str] = [f"## Project: {self.root}\n\nFiles in this directory:"]
+        try:
+            entries = list_directory(self.root, ".")
+        except (OSError, ValueError):
+            return ""
+        for entry in entries[:30]:
+            parts.append(entry)
+
+        # Auto-read small key files at root level
+        _AUTO_READ_EXTS = {".html", ".py", ".js", ".ts", ".css", ".jsx", ".tsx"}
+        _MAX_FILE_LINES = 150
+        _MAX_TOTAL_CHARS = 4000
+        total_chars = 0
+        for entry in entries:
+            if "/" in entry:
+                continue
+            ext = Path(entry).suffix.lower()
+            if ext not in _AUTO_READ_EXTS:
+                continue
+            try:
+                content = read_file(self.root, entry)
+            except (OSError, ValueError):
+                continue
+            lines = content.splitlines()
+            if len(lines) > _MAX_FILE_LINES:
+                continue
+            if total_chars + len(content) > _MAX_TOTAL_CHARS:
+                break
+            total_chars += len(content)
+            parts.append(f"\nContents of {entry}:\n```\n{content}\n```")
+
+        return "\n".join(parts)
+
     async def send(self, user_input: str) -> str:
         """Run one user turn to completion and return the model's final reply."""
+        if len(self.messages) == 1:
+            context = self._build_project_context()
+            if context:
+                user_input = f"{context}\n\nUser request: {user_input}"
         self.messages.append({"role": "user", "content": user_input})
 
         for _ in range(self.max_turns):
