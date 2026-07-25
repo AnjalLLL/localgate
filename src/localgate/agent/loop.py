@@ -191,7 +191,76 @@ def _as_synthetic_tool_call(content: str, known_names: frozenset[str]) -> dict[s
             if result is not None:
                 return result
 
+    # Fourth: extract a named code block as a write_file call.
+    # Models often say "### `contact.html`\n```html\n...code...\n```"
+    # which IS a write_file action expressed as prose.
+    if "write_file" in known_names:
+        write = _extract_code_block_as_write(content)
+        if write is not None:
+            return write
+
     return None
+
+
+#: Matches a filename hint before a code block:
+#: "### `filename.ext`", "#### filename.ext", "<!-- filename.ext -->",
+#: "// filename.ext", "src/filename.ext:", etc.
+_FILENAME_HINT_RE = re.compile(
+    r"(?:^|\n)"
+    r"[#*/ <!-]*"
+    r"[`\"']?"
+    r"((?:src/|\./)?"
+    r"[\w][\w./-]*\."
+    r"(?:html|css|js|jsx|tsx|ts|py|json|md|txt|yml|yaml|toml|cfg|ini|sh))"
+    r"[`\"']?"
+    r"[: )*#>-]*"
+    r"\s*\n"
+    r"```\w*\s*\n"
+    r"(.*?)"
+    r"\n```",
+    re.DOTALL,
+)
+
+
+def _extract_code_block_as_write(content: str) -> dict[str, Any] | None:
+    """If model output contains a named code block (filename hint + fence),
+    synthesize a write_file tool call from the first one found.
+    """
+    for match in _FILENAME_HINT_RE.finditer(content):
+        path = match.group(1).strip()
+        code = match.group(2)
+        if len(code.strip()) < 50:
+            continue
+        return {
+            "id": f"synthetic-{uuid.uuid4().hex[:8]}",
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps({"path": path, "content": code}),
+            },
+        }
+    return None
+
+
+def _extract_all_code_blocks_as_writes(content: str) -> list[dict[str, Any]]:
+    """Extract ALL named code blocks from model output as write_file calls."""
+    writes: list[dict[str, Any]] = []
+    for match in _FILENAME_HINT_RE.finditer(content):
+        path = match.group(1).strip()
+        code = match.group(2)
+        if len(code.strip()) < 50:
+            continue
+        writes.append(
+            {
+                "id": f"synthetic-{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": path, "content": code}),
+                },
+            }
+        )
+    return writes
 
 
 class AgentTurnLimitExceeded(RuntimeError):
@@ -441,15 +510,24 @@ class AgentSession:
             if not tool_calls and content:
                 synthetic = _as_synthetic_tool_call(content, self._known_tool_names)
                 if synthetic is not None:
+                    # If it's a code-block write, grab ALL code blocks as writes
+                    if (
+                        synthetic["function"]["name"] == "write_file"
+                        and "write_file" in self._known_tool_names
+                    ):
+                        all_writes = _extract_all_code_blocks_as_writes(content)
+                        tool_calls = all_writes if len(all_writes) > 1 else [synthetic]
+                    else:
+                        tool_calls = [synthetic]
                     if self.on_event is not None:
-                        fn = synthetic["function"]
-                        self.on_event(f"{fn['name']}(...)")
+                        for tc in tool_calls:
+                            fn = tc["function"]
+                            self.on_event(f"{fn['name']}(...)")
                     message = {
                         "role": "assistant",
                         "content": None,
-                        "tool_calls": [synthetic],
+                        "tool_calls": tool_calls,
                     }
-                    tool_calls = [synthetic]
 
             self.messages.append(message)
 

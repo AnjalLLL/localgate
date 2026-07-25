@@ -699,3 +699,39 @@ async def test_confirm_delegate_approving_runs_the_sub_agent(project):
     assert result == "done"
     tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
     assert tool_message["content"] == "sub-agent summary"
+
+
+async def test_multiple_code_blocks_extracted_as_multiple_writes(tmp_path):
+    """When the model dumps multiple named code blocks, all are executed as writes."""
+    multi_block_prose = (
+        "Here are your files:\n\n"
+        "### index.html\n"
+        "```html\n"
+        "<html><head><title>Test</title></head><body><h1>Hello World</h1>"
+        "<p>This is a test page with enough content to pass the threshold.</p>"
+        "</body></html>\n"
+        "```\n\n"
+        "### style.css\n"
+        "```css\n"
+        "body { margin: 0; padding: 20px; font-family: sans-serif; }\n"
+        "h1 { color: navy; border-bottom: 2px solid navy; padding-bottom: 10px; }\n"
+        "```\n\n"
+        "Done: created index.html and style.css"
+    )
+    backend = ScriptedBackend(
+        [
+            {"role": "assistant", "content": multi_block_prose},
+            {"role": "assistant", "content": "Done: created two files."},
+        ]
+    )
+    events: list[str] = []
+    session = AgentSession(
+        backend, "m", tmp_path, on_event=events.append, confirm_write=lambda *_: True
+    )
+    await session.send("create a page")
+
+    # Both files should have been written
+    assert (tmp_path / "index.html").exists()
+    assert (tmp_path / "style.css").exists()
+    assert "<html>" in (tmp_path / "index.html").read_text()
+    assert "sans-serif" in (tmp_path / "style.css").read_text()
