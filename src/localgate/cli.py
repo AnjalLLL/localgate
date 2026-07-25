@@ -696,17 +696,16 @@ def code(
     model_candidate = model or env_model or user_config.default_model
     resolved_model = settings.resolve_model(model_candidate)
 
-    search_fn = None
-    if settings.search_provider:
-        try:
-            search_fn = make_search_fn(
-                settings.search_provider,
-                api_key=settings.search_api_key,
-                base_url=settings.search_base_url,
-            )
-        except ValueError as exc:
-            typer.secho(str(exc), fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=2) from exc
+    search_provider = settings.search_provider or "duckduckgo"
+    try:
+        search_fn: Any = make_search_fn(
+            search_provider,
+            api_key=settings.search_api_key,
+            base_url=settings.search_base_url,
+        )
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
 
     # --- remote vs local mode ---
     gateway_creds = _read_gateway_creds()

@@ -23,6 +23,7 @@ content enters the model's context.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -49,7 +50,7 @@ WEB_SEARCH_SCHEMA: dict[str, Any] = {
     },
 }
 
-SUPPORTED_PROVIDERS = ("openserp", "tavily")
+SUPPORTED_PROVIDERS = ("duckduckgo", "openserp", "tavily")
 
 #: The self-hosted OpenSERP server's default port (its own documented default).
 DEFAULT_OPENSERP_BASE_URL = "http://localhost:7000"
@@ -91,6 +92,69 @@ def _format_results(
         url = next((result[k] for k in url_keys if result.get(k)), "")
         lines.append(f"- {title.strip()}\n  {_truncate(snippet)}\n  {url}")
     return "\n".join(lines)
+
+
+async def duckduckgo_search(
+    query: str,
+    *,
+    max_results: int = 5,
+    timeout: float = 15.0,
+) -> str:
+    """Free, zero-config web search via DuckDuckGo's HTML lite endpoint.
+
+    No API key or self-hosted server required — works out of the box for any user.
+    Parses the lightweight HTML response for result titles, snippets, and URLs.
+    """
+    url = "https://lite.duckduckgo.com/lite/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        try:
+            resp = await client.post(url, data={"q": query}, headers=headers)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise WebSearchError(f"web search failed (DuckDuckGo): {exc}") from exc
+
+    html = resp.text
+    results: list[dict[str, Any]] = []
+    # DuckDuckGo lite returns results as links with class="result-link"
+    # or as table rows with result snippets. Parse both formats.
+    link_pattern = re.compile(
+        r'<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
+    )
+    snippet_pattern = re.compile(r'<td class="result-snippet">(.*?)</td>', re.DOTALL)
+
+    links = link_pattern.findall(html)
+    snippets = snippet_pattern.findall(html)
+
+    # Fallback: try a more generic pattern if the above didn't match
+    if not links:
+        link_pattern2 = re.compile(
+            r'<a[^>]+rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
+        )
+        links = link_pattern2.findall(html)
+
+    for i, (href, title) in enumerate(links[:max_results]):
+        clean_title = re.sub(r"<[^>]+>", "", title).strip()
+        snippet = ""
+        if i < len(snippets):
+            snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+        if clean_title and href:
+            results.append({"title": clean_title, "snippet": snippet, "url": href})
+
+    if not results:
+        return "No results."
+    return _format_results(
+        results,
+        title_keys=("title",),
+        snippet_keys=("snippet",),
+        url_keys=("url",),
+        max_results=max_results,
+    )
 
 
 async def openserp_search(
@@ -166,6 +230,16 @@ def make_search_fn(
             f"unsupported LOCALGATE_SEARCH_PROVIDER {provider!r} — "
             f"choose from {', '.join(SUPPORTED_PROVIDERS)}"
         )
+
+    if provider == "duckduckgo":
+
+        async def _search_duckduckgo(query: str) -> str:
+            try:
+                return await duckduckgo_search(query)
+            except WebSearchError as exc:
+                return str(exc)
+
+        return _search_duckduckgo
 
     if provider == "tavily":
         if not api_key:
