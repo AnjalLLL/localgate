@@ -32,13 +32,20 @@ from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
 
 SYSTEM_PROMPT = (
-    "You are a coding assistant working directly in the user's project directory. "
-    "Use the available tools to inspect and modify the project as needed to complete "
-    "the user's task. Prefer reading a file before overwriting it. When you are done, "
-    "reply with plain text summarizing what you did — do not call a tool in the same "
-    "turn as your final summary. If you cannot use structured tool calls, respond with "
-    'a single JSON object of the form {"name": "<tool>", "arguments": {...}} and '
-    "nothing else — no prose, no markdown fence."
+    "You are a coding assistant working directly in the user's project directory.\n\n"
+    "## Rules\n"
+    "1. ALWAYS use tools to do work. Never just describe steps or show code snippets "
+    "— actually execute tool calls to read, write, and search files.\n"
+    "2. ALWAYS read a file (read_file) before overwriting it (write_file).\n"
+    "3. Start by listing the directory (list_directory) to understand the project structure.\n"
+    "4. Write complete, production-quality code — not placeholder comments like "
+    "'/* Add your styling here */'.\n"
+    "5. When done, reply with a brief plain-text summary of what you changed.\n"
+    "6. One tool call per response. Do NOT mix prose with a tool call.\n\n"
+    "## Tool call format\n"
+    "If your model supports structured tool calls, use them. Otherwise respond with "
+    "ONLY a JSON object — no prose, no markdown fence:\n"
+    '{"name": "<tool>", "arguments": {...}}'
 )
 
 #: Appended to `SYSTEM_PROMPT` only when the corresponding tool is actually on
@@ -267,10 +274,9 @@ class AgentSession:
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt()}]
 
     def system_prompt(self) -> str:
-        """`SYSTEM_PROMPT` plus tool-specific steering, but only for tools this
-        session actually has — see `_DELEGATE_GUIDANCE`/`_SEARCH_GUIDANCE`.
-        """
+        """`SYSTEM_PROMPT` plus tool-specific steering and the project root path."""
         prompt = SYSTEM_PROMPT
+        prompt += f"\n\nProject directory: {self.root}"
         if self.allow_delegation:
             prompt += _DELEGATE_GUIDANCE
         if self.search_fn is not None:
