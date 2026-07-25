@@ -781,6 +781,7 @@ async def run_repl(
         allow_delegation=allow_delegation,
         search_fn=search_fn,
         mcp_registry=mcp_registry,
+        auto_read=True,
     )
     prompt_session = _make_prompt_session(gate)
 
@@ -987,6 +988,7 @@ async def run_single_shot(
         allow_delegation=allow_delegation,
         search_fn=search_fn,
         mcp_registry=mcp_registry,
+        auto_read=True,
     )
     text = await run_turn(console, session, gate, task, memory=memory, usage=SessionUsage())
     return SingleShotResult(text, gate.declined_a_write)

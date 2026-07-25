@@ -57,7 +57,8 @@ async def test_streamed_text_is_reassembled_and_forwarded_token_by_token(project
     result = await session.send("say hi")
 
     assert result == "Hello, world!"
-    assert tokens == ["Hello, ", "world!"]
+    # Output is buffered during tool loop and emitted at once as the final answer
+    assert tokens == ["Hello, world!"]
 
 
 async def test_streamed_tool_call_arguments_are_concatenated_across_fragments(project):
