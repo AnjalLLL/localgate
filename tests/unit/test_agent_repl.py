@@ -428,7 +428,10 @@ async def test_run_turn_flushes_plan_after_the_model_finishes(repo, monkeypatch)
     out = console()
     gate = WriteGate(out, repo, plan_mode=True)
     session = AgentSession(
-        backend, "scripted-model", repo, confirm_write=gate.confirm_write,
+        backend,
+        "scripted-model",
+        repo,
+        confirm_write=gate.confirm_write,
         tool_executor=gate.tracking_executor,
     )
     result = await run_turn(out, session, gate, "write something")
@@ -642,7 +645,10 @@ async def test_run_turn_records_usage(repo):
     out = console()
     gate = WriteGate(out, repo, auto_approve=True)
     session = AgentSession(
-        backend, "scripted-model", repo, confirm_write=gate.confirm_write,
+        backend,
+        "scripted-model",
+        repo,
+        confirm_write=gate.confirm_write,
         tool_executor=gate.tracking_executor,
     )
     usage = SessionUsage()
@@ -704,7 +710,10 @@ async def test_run_turn_restarts_the_spinner_after_a_tool_call(repo, monkeypatch
     out = console()
     gate = WriteGate(out, repo, auto_approve=True)
     session = AgentSession(
-        backend, "scripted-model", repo, confirm_write=gate.confirm_write,
+        backend,
+        "scripted-model",
+        repo,
+        confirm_write=gate.confirm_write,
         tool_executor=gate.tracking_executor,
     )
     result = await run_turn(out, session, gate, "update app.py")

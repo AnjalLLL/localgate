@@ -264,11 +264,13 @@ def version() -> None:
 @app.command()
 def init(
     force: bool = typer.Option(
-        False, "--force",
+        False,
+        "--force",
         help="Regenerate the admin key even if one exists.",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run",
+        False,
+        "--dry-run",
         help="Preview what would be written without touching the filesystem.",
     ),
 ) -> None:
@@ -328,10 +330,7 @@ def init(
             fg=typer.colors.YELLOW,
         )
     else:
-        typer.echo(
-            f"  env file    {env_file}"
-            "  (exists — use --force to regenerate)"
-        )
+        typer.echo(f"  env file    {env_file}  (exists — use --force to regenerate)")
     typer.echo(f"  database    {redact_database_url(db_url)}  (revision {revision})")
 
 
@@ -358,12 +357,8 @@ def doctor() -> None:
     typer.secho("--- paths ---", bold=True)
     config_dir = paths.config_dir()
     data_dir = paths.data_dir()
-    cfg_mode = (
-        paths.describe_mode(config_dir) if config_dir.exists() else "missing"
-    )
-    dat_mode = (
-        paths.describe_mode(data_dir) if data_dir.exists() else "missing"
-    )
+    cfg_mode = paths.describe_mode(config_dir) if config_dir.exists() else "missing"
+    dat_mode = paths.describe_mode(data_dir) if data_dir.exists() else "missing"
     typer.echo(f"  config dir   {config_dir}  ({cfg_mode})")
     typer.echo(f"  data dir     {data_dir}  ({dat_mode})")
 
@@ -386,8 +381,7 @@ def doctor() -> None:
     if legacy.exists():
         _check(
             "legacy config",
-            f"{legacy} exists in CWD"
-            " — run `localgate init` to migrate",
+            f"{legacy} exists in CWD — run `localgate init` to migrate",
             warn=True,
         )
 
@@ -464,11 +458,13 @@ def _read_gateway_creds() -> tuple[str, str] | None:
 @app.command()
 def login(
     url: str = typer.Option(
-        ..., "--url",
+        ...,
+        "--url",
         help="Base URL of the gateway, e.g. https://gw.example.com",
     ),
     api_key: str = typer.Option(
-        ..., "--api-key",
+        ...,
+        "--api-key",
         help="An API key (not the admin key) minted on that gateway.",
     ),
 ) -> None:
@@ -483,7 +479,8 @@ def login(
     if api_key == INSECURE_ADMIN_KEY or api_key.startswith("X-Admin-Key"):
         typer.secho(
             "This looks like an admin key. Use a regular API key here.",
-            fg=typer.colors.RED, err=True,
+            fg=typer.colors.RED,
+            err=True,
         )
         raise typer.Exit(code=2)
 
@@ -493,9 +490,7 @@ def login(
             try:
                 live = await client.get("/health/live")
                 remote_version = (
-                    live.json().get("version", "unknown")
-                    if live.status_code == 200
-                    else "unknown"
+                    live.json().get("version", "unknown") if live.status_code == 200 else "unknown"
                 )
             except httpx.HTTPError:
                 remote_version = "unknown"
@@ -508,10 +503,10 @@ def login(
             resp.raise_for_status()
 
             from localgate import __version__ as local_version  # noqa: PLC0415
+
             major_mismatch = (
                 remote_version != "unknown"
-                and remote_version.split(".")[0]
-                != local_version.split(".")[0]
+                and remote_version.split(".")[0] != local_version.split(".")[0]
             )
             if major_mismatch:
                 typer.secho(
@@ -720,15 +715,18 @@ def code(
             raise typer.Exit(code=2)
         gw_url, gw_key = gateway_creds
         backend = get_backend(
-            "openai_compat", gw_url,
-            api_key=gw_key, timeout=settings.backend_timeout,
+            "openai_compat",
+            gw_url,
+            api_key=gw_key,
+            timeout=settings.backend_timeout,
         )
         # Remote mode disables local memory: the gateway handles server-side memory,
         # and without a stable X-Session-Id the server-side retrieval is useless anyway.
         effective_no_memory = True
         typer.secho(
             f"Using remote gateway: {gw_url}",
-            fg=typer.colors.CYAN, err=True,
+            fg=typer.colors.CYAN,
+            err=True,
         )
     else:
         backend = get_backend(
@@ -1039,7 +1037,9 @@ def db_current() -> None:
 
 @db_app.command("set-url")
 def db_set_url(
-    database_url: str = typer.Argument(..., help="SQLAlchemy async database URL, e.g. postgresql+asyncpg://user:pass@host/db"),
+    database_url: str = typer.Argument(
+        ..., help="SQLAlchemy async database URL, e.g. postgresql+asyncpg://user:pass@host/db"
+    ),
 ) -> None:
     """Test a database URL and save it as the active database.
 
@@ -1088,7 +1088,8 @@ def db_set_url(
 @app.command()
 def deploy(
     domain: str = typer.Option(
-        ..., "--domain",
+        ...,
+        "--domain",
         help="Public domain name, e.g. gw.example.com",
     ),
     target: str = typer.Option(
@@ -1122,9 +1123,9 @@ def deploy(
     """
     if target not in ("compose", "systemd"):
         typer.secho(
-            f"Unknown target {target!r}"
-            " — choose 'compose' or 'systemd'.",
-            fg=typer.colors.RED, err=True,
+            f"Unknown target {target!r} — choose 'compose' or 'systemd'.",
+            fg=typer.colors.RED,
+            err=True,
         )
         raise typer.Exit(code=2)
 
@@ -1243,24 +1244,18 @@ WantedBy=multi-user.target
         typer.echo("  1. Copy files to your server and run: docker compose up -d")
         typer.echo("  2. Mint an API key: localgate keys create --name me")
         typer.echo(
-            "  3. On your local machine:"
-            f" localgate login --url https://{domain}"
-            " --api-key <key>"
+            f"  3. On your local machine: localgate login --url https://{domain} --api-key <key>"
         )
     else:
         typer.echo("Next steps:")
-        typer.echo(
-            "  1. Install files:"
-            " sudo cp localgate.service /etc/systemd/system/"
-        )
+        typer.echo("  1. Install files: sudo cp localgate.service /etc/systemd/system/")
         typer.echo(
             "  2. sudo mkdir -p /etc/localgate"
             " && sudo cp localgate.env /etc/localgate/"
             " && sudo chmod 0600 /etc/localgate/localgate.env"
         )
         typer.echo(
-            "  3. sudo systemctl enable --now localgate"
-            " && sudo caddy reload --config Caddyfile"
+            "  3. sudo systemctl enable --now localgate && sudo caddy reload --config Caddyfile"
         )
         typer.echo("  4. Mint a key and login as above.")
 

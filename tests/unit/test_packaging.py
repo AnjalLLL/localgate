@@ -74,8 +74,6 @@ def test_wheel_contains_runtime_data_files(built_wheel):
 def test_wheel_contains_at_least_one_migration(built_wheel):
     names = zipfile.ZipFile(built_wheel).namelist()
     versions = [
-        n
-        for n in names
-        if n.startswith("localgate/db/migrations/versions/") and n.endswith(".py")
+        n for n in names if n.startswith("localgate/db/migrations/versions/") and n.endswith(".py")
     ]
     assert versions, "no Alembic migration scripts in the wheel — `serve` would fail at startup"

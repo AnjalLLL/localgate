@@ -502,7 +502,12 @@ def _print_tools(console: Console, session: AgentSession) -> None:
     extra steering the always-on tools don't get).
     """
     builtin = [
-        "read_file", "write_file", "list_directory", "search_files", "git_status", "git_diff",
+        "read_file",
+        "write_file",
+        "list_directory",
+        "search_files",
+        "git_status",
+        "git_diff",
     ]
     console.print(f"[bold]built-in:[/bold] {', '.join(builtin)}")
 
@@ -680,8 +685,13 @@ async def run_repl(
     cfg = user_config or UserConfig()
     usage = SessionUsage()
     gate = WriteGate(
-        console, root, auto_approve=auto_approve, force=force, auto_commit=auto_commit,
-        theme_name=theme_name, plan_mode=plan_mode,
+        console,
+        root,
+        auto_approve=auto_approve,
+        force=force,
+        auto_commit=auto_commit,
+        theme_name=theme_name,
+        plan_mode=plan_mode,
     )
     session = AgentSession(
         backend,
@@ -741,8 +751,7 @@ async def run_repl(
                 requested = parts[1].strip().lower()
                 if requested not in THEMES:
                     console.print(
-                        f"[red]invalid theme {requested!r} — choose from "
-                        f"{', '.join(THEMES)}[/red]"
+                        f"[red]invalid theme {requested!r} — choose from {', '.join(THEMES)}[/red]"
                     )
                 else:
                     theme_name = requested
@@ -882,8 +891,13 @@ async def run_single_shot(
     """One task, one turn, with the same diff/spinner/streaming UI as the REPL."""
     console = theme_mod.make_console(theme, no_color=no_color)
     gate = WriteGate(
-        console, root, auto_approve=auto_approve, force=force, auto_commit=auto_commit,
-        theme_name=theme, plan_mode=plan_mode,
+        console,
+        root,
+        auto_approve=auto_approve,
+        force=force,
+        auto_commit=auto_commit,
+        theme_name=theme,
+        plan_mode=plan_mode,
     )
     session = AgentSession(
         backend,

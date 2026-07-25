@@ -32,6 +32,7 @@ from typing import Any
 try:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+
     _HAS_MCP = True
 except ImportError:
     _HAS_MCP = False
@@ -182,9 +183,7 @@ class McpRegistry:
     def tool_schemas(self) -> list[dict[str, Any]]:
         return [schema for conn in self._connections.values() for schema in conn.tools]
 
-    async def connect_all(
-        self, configs: list[McpServerConfig], *, on_error: Any = None
-    ) -> None:
+    async def connect_all(self, configs: list[McpServerConfig], *, on_error: Any = None) -> None:
         """Connect every configured server, best-effort — a failure connecting
         to one server is reported via `on_error(name, exc)` (if given) and
         otherwise skipped, not raised.
