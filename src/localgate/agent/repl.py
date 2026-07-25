@@ -18,6 +18,7 @@ import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
+from rich.panel import Panel
 
 from localgate.agent import gitutil
 from localgate.agent import theme as theme_mod
@@ -50,11 +51,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "Show this list."),
 ]
 
-HELP_TEXT = (
-    "[dim]"
-    + "  ".join(cmd for cmd, _ in SLASH_COMMANDS)
-    + "  —  shift+tab cycles manual/auto/plan[/dim]"
-)
+_QUICK_COMMANDS = "/model  /theme  /mode  /tools  /help  /exit"
 
 #: The three write-handling modes, cycled by Shift+Tab (in a real terminal) or
 #: set once at startup via `--auto-approve`/`--plan`. Order matters: cycling
@@ -463,6 +460,25 @@ async def _model_picker(console: Console, session: AgentSession) -> None:
     await _switch_model(console, session, target, models)
 
 
+def _theme_picker(console: Console, current: str) -> str | None:
+    """`/theme` with no argument: show available themes and let user pick."""
+    console.print(f"[dim]current theme: {current}[/dim]")
+    for i, name in enumerate(THEMES, start=1):
+        marker = "*" if name == current else " "
+        console.print(f"  {marker}{i}. {name}")
+    choice = console.input(
+        "[bold green]select a theme (number or name, blank to cancel): [/bold green]"
+    ).strip()
+    if not choice:
+        return None
+    if choice.isdigit() and 1 <= int(choice) <= len(THEMES):
+        return THEMES[int(choice) - 1]
+    if choice.lower() in THEMES:
+        return choice.lower()
+    console.print(f"[red]invalid choice: {choice!r}[/red]")
+    return None
+
+
 def _set_config_value(cfg: UserConfig, key: str, raw_value: str) -> UserConfig:
     """Validate and apply one `/config <key> <value>` change. Raises `ValueError`
     with a message fit to show the user directly on anything invalid.
@@ -494,26 +510,33 @@ def _print_config(console: Console, cfg: UserConfig) -> None:
         console.print(f"  {f.name} = {getattr(cfg, f.name)}")
 
 
-def _print_startup_info(
-    console: Console,
+def _render_startup_banner(
     root: Path,
+    model: str,
+    mode: str,
     session: AgentSession,
     search_fn: Any,
     mcp_registry: Any,
-) -> None:
-    """Show project files and capabilities at startup so the user knows what's available."""
-    # Show top-level files (max 15)
+) -> Panel:
+    """Build a Rich Panel with project info, model, files, tools, and commands."""
+    lines: list[str] = []
+    lines.append(f"[bold]project:[/bold] {root}")
+    lines.append(f"[bold]model:[/bold]   {model}")
+    lines.append(f"[bold]mode:[/bold]    {mode}")
+
+    # Files
     try:
         entries = sorted(root.iterdir())
         visible = [
             e.name + ("/" if e.is_dir() else "") for e in entries if not e.name.startswith(".")
-        ][:15]
+        ][:12]
         if visible:
-            console.print(f"[dim]files: {', '.join(visible)}[/dim]")
+            lines.append("")
+            lines.append(f"[dim]files:[/dim] {', '.join(visible)}")
     except OSError:
         pass
 
-    # Show capabilities summary
+    # Tools
     caps: list[str] = ["read", "write", "search", "git"]
     if search_fn is not None:
         caps.append("web_search")
@@ -522,7 +545,19 @@ def _print_startup_info(
     if mcp_registry is not None and mcp_registry.servers():
         names = [name for name, _ in mcp_registry.servers()]
         caps.extend(f"mcp:{n}" for n in names)
-    console.print(f"[dim]tools: {', '.join(caps)}[/dim]")
+    lines.append(f"[dim]tools:[/dim] {', '.join(caps)}")
+
+    # Quick command reference
+    lines.append("")
+    lines.append(f"[dim]{_QUICK_COMMANDS}[/dim]")
+    lines.append("[dim]shift+tab cycles mode[/dim]")
+
+    return Panel(
+        "\n".join(lines),
+        title="[bold green]localgate code[/bold green]",
+        border_style="green",
+        padding=(0, 1),
+    )
 
 
 def _print_tools(console: Console, session: AgentSession) -> None:
@@ -663,7 +698,10 @@ async def run_turn(
     def on_event(line: str) -> None:
         nonlocal stopped
         stop()
-        console.print(f"[cyan]  {line}[/cyan]")
+        if "wrote " in line or "write_file" in line:
+            console.print(f"[bold green]  ✓ {line}[/bold green]")
+        else:
+            console.print(f"[cyan]  → {line}[/cyan]")
         status.update("[dim]working...[/dim]")
         status.start()
         stopped = False
@@ -679,6 +717,12 @@ async def run_turn(
 
     if gate.plan_mode:
         gate.flush_plan()
+
+    # Show a summary of files written this turn
+    if gate.writes_this_turn:
+        names = ", ".join(gate.writes_this_turn)
+        console.print(f"[bold green]  files written: {names}[/bold green]")
+
     gate.after_turn(user_input)
     console.print()
     if usage is not None:
@@ -739,12 +783,10 @@ async def run_repl(
     )
     prompt_session = _make_prompt_session(gate)
 
-    console.print(f"[bold]localgate code[/bold] — {root}  [dim]({mode_label(gate.mode())})[/dim]")
-    console.print(f"[dim]model: {model}[/dim]")
-    # Show a concise project overview
-    _print_startup_info(console, root, session, search_fn, mcp_registry)
-    console.print(HELP_TEXT)
-    console.print()
+    banner = _render_startup_banner(
+        root, model, mode_label(gate.mode()), session, search_fn, mcp_registry
+    )
+    console.print(banner)
 
     while True:
         try:
@@ -787,7 +829,15 @@ async def run_repl(
                     cfg.save()
                     console.print(f"[dim]theme set to {theme_name}[/dim]")
             else:
-                console.print(f"[dim]current theme: {theme_name}[/dim]")
+                picked = _theme_picker(console, theme_name)
+                if picked is not None:
+                    theme_name = picked
+                    console = theme_mod.make_console(theme_name, no_color=no_color)
+                    gate.console = console
+                    gate.theme_name = theme_name
+                    cfg = cfg.with_override(theme=theme_name)
+                    cfg.save()
+                    console.print(f"[dim]theme set to {theme_name}[/dim]")
             continue
         if line.startswith("/mode"):
             parts = line.split(maxsplit=1)
