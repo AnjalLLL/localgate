@@ -65,6 +65,7 @@ def project(tmp_path):
 
 
 async def test_plain_text_response_stops_immediately(project):
+    """Short plain-text responses (under 80 chars) are treated as final answers."""
     backend = ScriptedBackend([final_text("nothing to do here")])
     result = await run_agent(backend, "scripted-model", project, "look around")
     assert result == "nothing to do here"
@@ -324,12 +325,18 @@ async def test_json_config_shown_as_a_final_answer_is_not_misread(project):
     assert result == '{"debug": true, "port": 8000}'
 
 
-async def test_json_embedded_in_prose_is_not_treated_as_a_tool_call(project):
+async def test_json_embedded_in_prose_is_extracted_as_a_tool_call(project):
+    """Small models often mix prose with a JSON tool call — we extract and execute it."""
     backend = ScriptedBackend(
-        [final_text('I\'ll read it: {"name": "read_file", "arguments": {"path": "app.py"}}')]
+        [
+            final_text('I\'ll read it: {"name": "read_file", "arguments": {"path": "app.py"}}'),
+            final_text("the file has old content"),
+        ]
     )
     result = await run_agent(backend, "scripted-model", project, "read app.py")
-    assert "I'll read it" in result
+    assert result == "the file has old content"
+    tool_message = next(m for m in backend.requests[1]["messages"] if m["role"] == "tool")
+    assert tool_message["content"] == "old content\n"
 
 
 async def test_fallback_never_triggers_for_real_structured_tool_calls(project):
@@ -346,7 +353,7 @@ async def test_fallback_never_triggers_for_real_structured_tool_calls(project):
         backend, "scripted-model", project, "read app.py", on_event=events.append
     )
     assert result == "done"
-    assert not any("isn't using structured tool calls" in e for e in events)
+    assert not any("parsed" in e for e in events)
 
 
 async def test_on_event_notes_when_falling_back_to_synthetic_parsing(project):
@@ -358,7 +365,7 @@ async def test_on_event_notes_when_falling_back_to_synthetic_parsing(project):
     )
     events: list[str] = []
     await run_agent(backend, "scripted-model", project, "read app.py", on_event=events.append)
-    assert any("isn't using structured tool calls" in e for e in events)
+    assert any("parsed" in e and "read_file" in e for e in events)
 
 
 # --------------------------------------------------------------- delegate_task
