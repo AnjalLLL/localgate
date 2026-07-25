@@ -29,8 +29,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    _HAS_MCP = True
+except ImportError:
+    _HAS_MCP = False
 
 from localgate import paths
 
@@ -129,9 +133,11 @@ class McpServerConnection:
         self.config = config
         self.tools: list[dict[str, Any]] = []
         self._stack = AsyncExitStack()
-        self._session: ClientSession | None = None
+        self._session: Any = None
 
     async def connect(self) -> None:
+        if not _HAS_MCP:
+            raise ImportError("mcp package is not installed")
         params = StdioServerParameters(
             command=self.config.command, args=self.config.args, env=self.config.env
         )
