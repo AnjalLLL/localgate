@@ -143,6 +143,57 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 TOOL_NAMES = frozenset(schema["function"]["name"] for schema in TOOL_SCHEMAS)
 
+#: What a delegated sub-agent gets when the parent doesn't specify `allowed_tools`
+#: — read-only, so delegation never grants a bigger trust boundary than the
+#: top-level agent already has without the parent explicitly opting in per call.
+READ_ONLY_TOOL_NAMES = frozenset(
+    {"read_file", "list_directory", "search_files", "git_status", "git_diff"}
+)
+
+#: Kept out of `TOOL_SCHEMAS`/`TOOL_NAMES` deliberately — this tool only exists
+#: on a session `AgentSession` constructs with `allow_delegation=True`, and a
+#: delegated sub-agent's own session never gets it (depth 1, no recursion). See
+#: `AgentSession._run_delegated_task` in loop.py for the execution side.
+DELEGATE_TASK_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "delegate_task",
+        "description": (
+            "Hand off a self-contained sub-task (e.g. 'find every place foo() is called and "
+            "summarize the call sites') to a fresh sub-agent, and get back only its final "
+            "summary — the sub-agent's own exploration doesn't clutter this conversation. "
+            "Only use this for sub-tasks that genuinely benefit from an isolated context; a "
+            "single-file edit or a quick lookup should stay in the current turn instead. The "
+            "sub-agent cannot itself delegate further."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The sub-task to hand off, as a complete, self-contained "
+                    "instruction — the sub-agent has no memory of this conversation.",
+                },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Tool names the sub-agent may use. Defaults to read-only "
+                        f"({', '.join(sorted(READ_ONLY_TOOL_NAMES))}). Include 'write_file' "
+                        "only if this sub-task is actually expected to edit files — its "
+                        "writes still go through the same confirmation as any other write."
+                    ),
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Tool-call turns before the sub-agent gives up. Defaults to 10.",
+                },
+            },
+            "required": ["task"],
+        },
+    },
+}
+
 
 class PathEscapeError(ValueError):
     """Raised when a tool argument would resolve outside the project root."""

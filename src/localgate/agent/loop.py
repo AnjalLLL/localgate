@@ -20,7 +20,15 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from localgate.agent.tools import TOOL_SCHEMAS, ToolCallResult, execute_tool_call
+from localgate.agent.mcp import McpRegistry, is_mcp_tool_name
+from localgate.agent.tools import (
+    DELEGATE_TASK_SCHEMA,
+    READ_ONLY_TOOL_NAMES,
+    TOOL_SCHEMAS,
+    ToolCallResult,
+    execute_tool_call,
+)
+from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
 
 SYSTEM_PROMPT = (
@@ -31,6 +39,23 @@ SYSTEM_PROMPT = (
     "turn as your final summary. If you cannot use structured tool calls, respond with "
     'a single JSON object of the form {"name": "<tool>", "arguments": {...}} and '
     "nothing else — no prose, no markdown fence."
+)
+
+#: Appended to `SYSTEM_PROMPT` only when the corresponding tool is actually on
+#: this session's schema — no point spending tokens (or risking confusion)
+#: steering the model around a tool it doesn't have. This is the concrete
+#: answer to "does the model decide when to search/delegate on its own?" — yes,
+#: and this is the only place that decision gets any guidance beyond each
+#: tool's own one-line `description`.
+_DELEGATE_GUIDANCE = (
+    " Use delegate_task only for a large, self-contained sub-exploration (e.g. "
+    '"find every call site of foo() across the project and summarize them") — a '
+    "single-file edit or a quick lookup should stay in this turn instead of being delegated."
+)
+_SEARCH_GUIDANCE = (
+    " Use web_search only for information that isn't in this project or your training "
+    "data (a library's current version, a recent CVE, docs published after your "
+    "training cutoff) — don't search for things you can find by reading the project."
 )
 
 #: Some models (observed live with qwen2.5-coder via Ollama's OpenAI-compat shim)
@@ -194,29 +219,67 @@ class AgentSession:
         root: Path,
         *,
         confirm_write: ConfirmWrite | None = None,
+        confirm_search: Callable[[str], bool] | None = None,
+        confirm_delegate: Callable[[str], bool] | None = None,
         on_event: OnEvent | None = None,
         on_token: OnToken | None = None,
         max_turns: int = 20,
         tool_schemas: list[dict[str, Any]] | None = None,
         tool_executor: ToolExecutor | None = None,
         augment: Augment | None = None,
+        allow_delegation: bool = False,
+        search_fn: SearchFn | None = None,
+        mcp_registry: McpRegistry | None = None,
     ) -> None:
         self.backend = backend
         self.model = model
         self.root = root
         self.confirm_write = confirm_write
+        #: Asked before a web_search/delegate_task call actually runs, same
+        #: shape as `confirm_write` — `None` means always allowed (e.g. a
+        #: delegated sub-agent's own session never re-confirms its parent's
+        #: already-approved delegation).
+        self.confirm_search = confirm_search
+        self.confirm_delegate = confirm_delegate
         self.on_event = on_event
         self.on_token = on_token
         self.max_turns = max_turns
-        self.tool_schemas = tool_schemas if tool_schemas is not None else TOOL_SCHEMAS
+        self.tool_schemas = list(tool_schemas) if tool_schemas is not None else list(TOOL_SCHEMAS)
+        #: Whether *this* session may call `delegate_task` — never propagated to
+        #: a delegated sub-agent's own session (see `_run_delegated_task`), which
+        #: is the depth-1 cap: a sub-agent cannot itself spawn a sub-agent.
+        self.allow_delegation = allow_delegation
+        if allow_delegation:
+            self.tool_schemas.append(DELEGATE_TASK_SCHEMA)
+        #: Executes `web_search`, if the CLI configured a provider — `None` means
+        #: the tool isn't in `self.tool_schemas` at all, not that it silently no-ops.
+        self.search_fn = search_fn
+        if search_fn is not None:
+            self.tool_schemas.append(WEB_SEARCH_SCHEMA)
+        #: Every connected MCP server's tools, if any were configured — see
+        #: `agent/mcp.py`. `None`/empty means no `mcp__*` tools are offered.
+        self.mcp_registry = mcp_registry
+        if mcp_registry is not None:
+            self.tool_schemas.extend(mcp_registry.tool_schemas)
         self.tool_executor = tool_executor if tool_executor is not None else execute_tool_call
         self.augment = augment
         self._known_tool_names = frozenset(s["function"]["name"] for s in self.tool_schemas)
-        self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt()}]
+
+    def system_prompt(self) -> str:
+        """`SYSTEM_PROMPT` plus tool-specific steering, but only for tools this
+        session actually has — see `_DELEGATE_GUIDANCE`/`_SEARCH_GUIDANCE`.
+        """
+        prompt = SYSTEM_PROMPT
+        if self.allow_delegation:
+            prompt += _DELEGATE_GUIDANCE
+        if self.search_fn is not None:
+            prompt += _SEARCH_GUIDANCE
+        return prompt
 
     def reset(self) -> None:
         """Drop history, starting a new conversation in the same session."""
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [{"role": "system", "content": self.system_prompt()}]
 
     async def send(self, user_input: str) -> str:
         """Run one user turn to completion and return the model's final reply."""
@@ -261,6 +324,20 @@ class AgentSession:
         name = fn["name"]
         arguments = _parse_arguments(fn.get("arguments", ""))
 
+        if name not in self._known_tool_names:
+            # Not just a typo guard: this is the actual boundary that keeps a
+            # delegated sub-agent confined to its `allowed_tools` — its schema
+            # simply excludes anything it wasn't granted, and a model that
+            # hallucinates a call for a tool it was never offered (structured
+            # `tool_calls` aren't otherwise checked against the schema) hits
+            # this rather than `self.tool_executor`.
+            return {
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "name": name,
+                "content": f"Unknown tool: {name}",
+            }
+
         if name == "write_file" and self.confirm_write is not None:
             path = arguments.get("path", "?")
             if not self.confirm_write(path, arguments.get("content", "")):
@@ -270,6 +347,40 @@ class AgentSession:
                     "name": name,
                     "content": f"User declined to write {path}. Ask before trying again.",
                 }
+
+        if name == "delegate_task" and self.allow_delegation:
+            task = arguments.get("task", "")
+            if self.confirm_delegate is not None and not self.confirm_delegate(task):
+                return {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": name,
+                    "content": "User declined this delegation. Do the sub-task directly instead.",
+                }
+            if self.on_event is not None:
+                self.on_event(f"delegate_task({_summarize(arguments)})")
+            content = await self._run_delegated_task(arguments)
+            return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+
+        if name == "web_search" and self.search_fn is not None:
+            query = arguments.get("query", "")
+            if self.confirm_search is not None and not self.confirm_search(query):
+                return {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": name,
+                    "content": "User declined this search. Ask before trying again.",
+                }
+            if self.on_event is not None:
+                self.on_event(f"web_search(query={query!r})")
+            content = await self.search_fn(query) if query else "web_search requires a query."
+            return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+
+        if is_mcp_tool_name(name) and self.mcp_registry is not None:
+            if self.on_event is not None:
+                self.on_event(f"{name}({_summarize(arguments)})")
+            content = await self.mcp_registry.call_tool(name, arguments)
+            return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
 
         if self.on_event is not None:
             args_repr = ", ".join(f"{k}={v!r}" for k, v in _summarize(arguments).items())
@@ -283,6 +394,51 @@ class AgentSession:
             "content": result.content,
         }
 
+    async def _run_delegated_task(self, arguments: dict[str, Any]) -> str:
+        """Run one sub-task to completion in a fresh, isolated `AgentSession` and
+        return only its final text — the parent's `messages` never see the
+        sub-agent's own tool calls, just this summary.
+
+        Shares `root`, `confirm_write`, and `tool_executor` with the parent, so a
+        delegated write hits the same path-safety checks and the same
+        confirmation UI as any other write — delegation changes who's asking,
+        not whether it's asked.
+        """
+        task = arguments.get("task")
+        if not isinstance(task, str) or not task.strip():
+            return "delegate_task requires a non-empty 'task' string."
+
+        requested = arguments.get("allowed_tools")
+        if isinstance(requested, list) and requested and all(isinstance(t, str) for t in requested):
+            allowed = frozenset(requested) & self._known_tool_names - {"delegate_task"}
+            if not allowed:
+                allowed = READ_ONLY_TOOL_NAMES
+        else:
+            allowed = READ_ONLY_TOOL_NAMES
+
+        requested_turns = arguments.get("max_turns")
+        sub_max_turns = 10
+        if isinstance(requested_turns, int) and requested_turns > 0:
+            sub_max_turns = requested_turns
+
+        sub_schemas = [s for s in TOOL_SCHEMAS if s["function"]["name"] in allowed]
+        sub_confirm_write = self.confirm_write if "write_file" in allowed else None
+
+        sub_session = AgentSession(
+            self.backend,
+            self.model,
+            self.root,
+            confirm_write=sub_confirm_write,
+            tool_executor=self.tool_executor,
+            max_turns=sub_max_turns,
+            tool_schemas=sub_schemas,
+            allow_delegation=False,  # depth 1 — a sub-agent cannot itself delegate
+        )
+        try:
+            return await sub_session.send(task)
+        except AgentTurnLimitExceeded as exc:
+            return f"Sub-agent stopped without finishing: {exc}"
+
 
 async def run_agent(
     backend: InferenceBackend,
@@ -291,10 +447,15 @@ async def run_agent(
     task: str,
     *,
     confirm_write: ConfirmWrite | None = None,
+    confirm_search: Callable[[str], bool] | None = None,
+    confirm_delegate: Callable[[str], bool] | None = None,
     on_event: OnEvent | None = None,
     on_token: OnToken | None = None,
     max_turns: int = 20,
     augment: Augment | None = None,
+    allow_delegation: bool = False,
+    search_fn: SearchFn | None = None,
+    mcp_registry: McpRegistry | None = None,
 ) -> str:
     """Run one task to completion and return the model's final plain-text reply.
 
@@ -306,10 +467,15 @@ async def run_agent(
         model,
         root,
         confirm_write=confirm_write,
+        confirm_search=confirm_search,
+        confirm_delegate=confirm_delegate,
         on_event=on_event,
         on_token=on_token,
         max_turns=max_turns,
         augment=augment,
+        allow_delegation=allow_delegation,
+        search_fn=search_fn,
+        mcp_registry=mcp_registry,
     )
     return await session.send(task)
 

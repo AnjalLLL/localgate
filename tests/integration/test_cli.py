@@ -32,6 +32,18 @@ def test_version(env):
     assert result.stdout.strip()
 
 
+def test_version_flag(env):
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.strip()
+
+
+def test_version_flag_matches_the_version_subcommand(env):
+    flag_result = runner.invoke(app, ["--version"])
+    subcommand_result = runner.invoke(app, ["version"])
+    assert flag_result.stdout == subcommand_result.stdout
+
+
 def test_backends_lists_the_installed_adapters(env):
     result = runner.invoke(app, ["backends"])
     assert result.exit_code == 0

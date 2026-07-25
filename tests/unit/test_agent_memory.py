@@ -4,13 +4,18 @@ SQLite) database and the deterministic `FakeBackend`, the same pattern
 `tests/integration/test_rag_pipeline.py` uses for the HTTP path.
 """
 
+import json
+
 import pytest
 from sqlalchemy import select
 
 from localgate.agent.memory import (
     AgentMemory,
     get_or_create_local_agent_key_id,
+    list_project_sessions,
     project_session_id,
+    set_current_project_session,
+    start_new_project_session,
 )
 from localgate.backends.fake import FakeBackend
 from localgate.config import Settings
@@ -18,6 +23,7 @@ from localgate.db.engine import init_models, make_engine, make_session_factory
 from localgate.db.models import MemoryChunk
 from localgate.db.repositories.conversations import ConversationRepository
 from localgate.db.repositories.keys import APIKeyRepository
+from localgate.db.repositories.usage import UsageRepository
 
 
 @pytest.fixture
@@ -64,6 +70,47 @@ def test_project_session_id_writes_a_marker_file(tmp_path):
     marker = tmp_path / ".localgate" / "session_id"
     assert marker.is_file()
     assert marker.read_text().strip() == session_id
+
+
+def test_project_session_id_reuses_the_current_entry_in_the_index(tmp_path):
+    first = project_session_id(tmp_path)
+    index = json.loads((tmp_path / ".localgate" / "sessions.json").read_text())
+    assert index["current"] == first
+    assert [s["id"] for s in index["sessions"]] == [first]
+    assert project_session_id(tmp_path) == first
+
+
+def test_project_session_id_migrates_a_legacy_marker_file(tmp_path):
+    marker_dir = tmp_path / ".localgate"
+    marker_dir.mkdir()
+    (marker_dir / "session_id").write_text("legacy-id-123\n")
+    assert project_session_id(tmp_path) == "legacy-id-123"
+    assert [s["id"] for s in list_project_sessions(tmp_path)] == ["legacy-id-123"]
+
+
+def test_start_new_project_session_becomes_current_and_is_listed(tmp_path):
+    first = project_session_id(tmp_path)
+    second = start_new_project_session(tmp_path)
+    assert second != first
+    assert project_session_id(tmp_path) == second
+    ids = {s["id"] for s in list_project_sessions(tmp_path)}
+    assert ids == {first, second}
+
+
+def test_set_current_project_session_switches_back(tmp_path):
+    first = project_session_id(tmp_path)
+    start_new_project_session(tmp_path)
+    set_current_project_session(tmp_path, first)
+    assert project_session_id(tmp_path) == first
+    marker = tmp_path / ".localgate" / "session_id"
+    assert marker.read_text().strip() == first
+
+
+def test_list_project_sessions_is_most_recent_first(tmp_path):
+    first = project_session_id(tmp_path)
+    second = start_new_project_session(tmp_path)
+    ids = [s["id"] for s in list_project_sessions(tmp_path)]
+    assert ids == [second, first]
 
 
 async def test_get_or_create_local_agent_key_id_is_idempotent(session_factory, settings):
@@ -184,3 +231,37 @@ async def test_augment_does_not_leak_across_sessions(session_factory, settings, 
     messages = [{"role": "user", "content": "secret project codename is falcon"}]
     augmented = await session_b.augment(messages)
     assert augmented is messages  # nothing recalled — session-b has no history
+
+
+# --------------------------------------------------------------------- usage/history
+
+
+async def test_record_usage_persists_a_usage_record(session_factory, settings, backend):
+    async with session_factory() as db_session:
+        api_key_id = await get_or_create_local_agent_key_id(db_session, settings)
+    memory = AgentMemory(session_factory, backend, settings, "session-1", api_key_id)
+
+    await memory.record_usage("scripted-model", 100, 20)
+
+    async with session_factory() as db_session:
+        summary = await UsageRepository(db_session).summary_for_key(api_key_id)
+    assert summary["request_count"] == 1
+    assert summary["prompt_tokens"] == 100
+    assert summary["completion_tokens"] == 20
+
+
+async def test_load_history_returns_stored_turns_oldest_first(session_factory, settings, backend):
+    async with session_factory() as db_session:
+        api_key_id = await get_or_create_local_agent_key_id(db_session, settings)
+    memory = AgentMemory(session_factory, backend, settings, "session-1", api_key_id)
+
+    await memory.record_turn("first question", "first answer")
+    await memory.record_turn("second question", "second answer")
+
+    history = await memory.load_history()
+    assert [m["content"] for m in history] == [
+        "first question",
+        "first answer",
+        "second question",
+        "second answer",
+    ]

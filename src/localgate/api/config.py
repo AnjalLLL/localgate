@@ -17,20 +17,17 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from localgate.api.deps import require_admin
 from localgate.backends import available_backends
-from localgate.core.db_config_store import is_database_established, save_database_url
+from localgate.core.db_config_store import (
+    is_database_established,
+    redact_database_url,
+    save_database_url,
+)
 from localgate.core.errors import InvalidRequestError
 from localgate.db.engine import make_engine
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
 
-
-def redact_database_url(url: str) -> str:
-    """Hide credentials in a connection string before it is displayed or logged."""
-    if "@" not in url:
-        return url
-    scheme_and_creds, rest = url.rsplit("@", 1)
-    scheme = scheme_and_creds.split("://", 1)[0]
-    return f"{scheme}://***:***@{rest}"
+__all__ = ["redact_database_url", "router"]  # re-exported: importers used to find it here
 
 
 @router.get("/config")
@@ -49,7 +46,7 @@ async def get_config(request: Request) -> dict:
             "available_types": available_backends(),
         },
         "database": {
-            "url": redact_database_url(settings.database_url),
+            "url": redact_database_url(request.app.state.active_database_url),
             "established": is_database_established(config_path),
         },
         "memory": {

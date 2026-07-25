@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from localgate.agent.loop import AgentTurnLimitExceeded, run_agent
+from localgate.agent.loop import SYSTEM_PROMPT, AgentSession, AgentTurnLimitExceeded, run_agent
 from localgate.backends.base import InferenceBackend
 
 
@@ -359,3 +359,351 @@ async def test_on_event_notes_when_falling_back_to_synthetic_parsing(project):
     events: list[str] = []
     await run_agent(backend, "scripted-model", project, "read app.py", on_event=events.append)
     assert any("isn't using structured tool calls" in e for e in events)
+
+
+# --------------------------------------------------------------- delegate_task
+
+
+async def test_delegate_task_is_not_offered_by_default(project):
+    """A plain session's schema never includes delegate_task — the model
+    literally cannot discover it exists unless the parent opts in."""
+    backend = ScriptedBackend([final_text("done")])
+    await run_agent(backend, "scripted-model", project, "do something")
+    names = {t["function"]["name"] for t in backend.requests[0]["tools"]}
+    assert "delegate_task" not in names
+
+
+async def test_delegate_task_is_offered_when_allowed(project):
+    backend = ScriptedBackend([final_text("done")])
+    await run_agent(
+        backend, "scripted-model", project, "do something", allow_delegation=True
+    )
+    names = {t["function"]["name"] for t in backend.requests[0]["tools"]}
+    assert "delegate_task" in names
+
+
+async def test_delegate_task_runs_a_sub_agent_and_returns_its_summary(project):
+    backend = ScriptedBackend(
+        [
+            tool_call("c1", "delegate_task", {"task": "find every read_file call"}),
+            # the sub-agent's own turn(s) come next, in call order:
+            tool_call("c2", "read_file", {"path": "app.py"}),
+            final_text("found one usage in app.py"),
+            # then the parent's final turn:
+            final_text("done — see sub-agent summary"),
+        ]
+    )
+    result = await run_agent(
+        backend, "scripted-model", project, "audit read_file usage", allow_delegation=True
+    )
+    assert result == "done — see sub-agent summary"
+
+    # the parent's final request must carry the sub-agent's summary as the
+    # delegate_task tool result, not the sub-agent's raw tool-call noise
+    final_request = backend.requests[-1]
+    tool_message = next(m for m in final_request["messages"] if m["role"] == "tool")
+    assert tool_message["content"] == "found one usage in app.py"
+    assert tool_message["tool_call_id"] == "c1"
+
+
+async def test_delegate_task_defaults_to_read_only_tools(project):
+    """Without an explicit allowed_tools, a sub-agent can't write — a write_file
+    call it attempts should come back as 'unknown tool', not actually write."""
+    backend = ScriptedBackend(
+        [
+            tool_call("c1", "delegate_task", {"task": "write something"}),
+            tool_call("c2", "write_file", {"path": "app.py", "content": "hacked\n"}),
+            final_text("sub-agent tried to write but couldn't"),
+            final_text("done"),
+        ]
+    )
+    await run_agent(
+        backend, "scripted-model", project, "delegate a write", allow_delegation=True
+    )
+    assert (project / "app.py").read_text() == "old content\n"  # untouched
+
+
+async def test_delegate_task_write_access_is_opt_in_and_still_confirmed(project):
+    backend = ScriptedBackend(
+        [
+            tool_call(
+                "c1",
+                "delegate_task",
+                {"task": "update app.py", "allowed_tools": ["write_file"]},
+            ),
+            tool_call("c2", "write_file", {"path": "app.py", "content": "new content\n"}),
+            final_text("wrote it"),
+            final_text("done"),
+        ]
+    )
+    declined: list[str] = []
+
+    def confirm_write(path: str, content: str) -> bool:
+        declined.append(path)
+        return False  # decline — proves the sub-agent's write went through the SAME gate
+
+    await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "delegate a write",
+        allow_delegation=True,
+        confirm_write=confirm_write,
+    )
+    assert declined == ["app.py"]
+    assert (project / "app.py").read_text() == "old content\n"  # declined, so unchanged
+
+
+async def test_delegate_task_sub_agent_cannot_itself_delegate(project):
+    """Depth cap: the sub-agent's own schema must not include delegate_task."""
+    backend = ScriptedBackend(
+        [
+            tool_call("c1", "delegate_task", {"task": "nested task"}),
+            final_text("sub-agent finished"),
+            final_text("done"),
+        ]
+    )
+    await run_agent(
+        backend, "scripted-model", project, "delegate", allow_delegation=True
+    )
+    # the sub-agent's own request (index 1) is the one whose tools list to check
+    sub_agent_request = backend.requests[1]
+    names = {t["function"]["name"] for t in sub_agent_request["tools"]}
+    assert "delegate_task" not in names
+
+
+async def test_delegate_task_respects_a_custom_max_turns(project):
+    responses = [tool_call("c1", "delegate_task", {"task": "loop", "max_turns": 2})]
+    responses += [tool_call(f"sub{i}", "list_directory", {}) for i in range(2)]
+    responses.append(final_text("done, sub-agent gave up"))
+    backend = ScriptedBackend(responses)
+    result = await run_agent(
+        backend, "scripted-model", project, "delegate a looping task", allow_delegation=True
+    )
+    assert result == "done, sub-agent gave up"
+    tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
+    assert "Sub-agent stopped without finishing" in tool_message["content"]
+
+
+async def test_delegate_task_requires_a_task_string(project):
+    backend = ScriptedBackend(
+        [
+            tool_call("c1", "delegate_task", {}),
+            final_text("done"),
+        ]
+    )
+    await run_agent(backend, "scripted-model", project, "delegate nothing", allow_delegation=True)
+    tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
+    assert "requires a non-empty" in tool_message["content"]
+
+
+async def test_delegating_does_not_mutate_the_shared_tool_schemas_list(project):
+    """AgentSession.tool_schemas must be its own list — appending delegate_task
+    for one session must not leak it into every other session's tool schema.
+    """
+    from localgate.agent.tools import TOOL_SCHEMAS
+
+    before = len(TOOL_SCHEMAS)
+    backend = ScriptedBackend([final_text("done")])
+    await run_agent(backend, "scripted-model", project, "task", allow_delegation=True)
+    assert len(TOOL_SCHEMAS) == before
+
+
+# -------------------------------------------------------------------- web_search
+
+
+async def test_web_search_is_not_offered_by_default(project):
+    backend = ScriptedBackend([final_text("done")])
+    await run_agent(backend, "scripted-model", project, "do something")
+    names = {t["function"]["name"] for t in backend.requests[0]["tools"]}
+    assert "web_search" not in names
+
+
+async def test_web_search_is_offered_when_a_search_fn_is_configured(project):
+    async def fake_search(query: str) -> str:
+        return "fake results"
+
+    backend = ScriptedBackend([final_text("done")])
+    await run_agent(backend, "scripted-model", project, "do something", search_fn=fake_search)
+    names = {t["function"]["name"] for t in backend.requests[0]["tools"]}
+    assert "web_search" in names
+
+
+async def test_web_search_calls_the_configured_search_fn(project):
+    calls: list[str] = []
+
+    async def fake_search(query: str) -> str:
+        calls.append(query)
+        return "- Example\n  a snippet\n  https://example.com"
+
+    backend = ScriptedBackend(
+        [
+            tool_call("c1", "web_search", {"query": "localgate release notes"}),
+            final_text("found it"),
+        ]
+    )
+    result = await run_agent(
+        backend, "scripted-model", project, "look it up", search_fn=fake_search
+    )
+    assert result == "found it"
+    assert calls == ["localgate release notes"]
+
+    tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
+    assert "example.com" in tool_message["content"]
+
+
+async def test_web_search_without_a_query_does_not_call_search_fn(project):
+    calls: list[str] = []
+
+    async def fake_search(query: str) -> str:
+        calls.append(query)
+        return "should not happen"
+
+    backend = ScriptedBackend(
+        [tool_call("c1", "web_search", {}), final_text("done")]
+    )
+    await run_agent(backend, "scripted-model", project, "look it up", search_fn=fake_search)
+    assert calls == []
+
+
+# ------------------------------------------------------------- system prompt guidance
+
+
+def test_system_prompt_is_the_base_prompt_with_no_optional_tools(project):
+    session = AgentSession(ScriptedBackend([]), "scripted-model", project)
+    assert session.system_prompt() == SYSTEM_PROMPT
+    assert session.messages[0]["content"] == SYSTEM_PROMPT
+
+
+def test_system_prompt_adds_delegate_guidance_when_allowed(project):
+    session = AgentSession(
+        ScriptedBackend([]), "scripted-model", project, allow_delegation=True
+    )
+    prompt = session.system_prompt()
+    assert prompt.startswith(SYSTEM_PROMPT)
+    assert "delegate_task" in prompt
+    assert "web_search" not in prompt
+
+
+async def test_system_prompt_adds_search_guidance_when_configured(project):
+    async def fake_search(query: str) -> str:
+        return "x"
+
+    session = AgentSession(
+        ScriptedBackend([]), "scripted-model", project, search_fn=fake_search
+    )
+    prompt = session.system_prompt()
+    assert "web_search" in prompt
+    assert "delegate_task" not in prompt
+
+
+async def test_system_prompt_adds_both_when_both_are_configured(project):
+    async def fake_search(query: str) -> str:
+        return "x"
+
+    session = AgentSession(
+        ScriptedBackend([]),
+        "scripted-model",
+        project,
+        allow_delegation=True,
+        search_fn=fake_search,
+    )
+    prompt = session.system_prompt()
+    assert "delegate_task" in prompt
+    assert "web_search" in prompt
+
+
+def test_reset_rebuilds_the_dynamic_system_prompt(project):
+    session = AgentSession(
+        ScriptedBackend([]), "scripted-model", project, allow_delegation=True
+    )
+    session.messages.append({"role": "user", "content": "hi"})
+    session.reset()
+    assert session.messages == [{"role": "system", "content": session.system_prompt()}]
+
+
+# ---------------------------------------------------------------- confirm_search/delegate
+
+
+async def test_confirm_search_declining_skips_the_search(project):
+    calls: list[str] = []
+
+    async def fake_search(query: str) -> str:
+        calls.append(query)
+        return "should not happen"
+
+    backend = ScriptedBackend(
+        [tool_call("c1", "web_search", {"query": "x"}), final_text("ok, declined")]
+    )
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "search something",
+        search_fn=fake_search,
+        confirm_search=lambda q: False,
+    )
+    assert result == "ok, declined"
+    assert calls == []
+    tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
+    assert "declined" in tool_message["content"]
+
+
+async def test_confirm_search_approving_runs_the_search(project):
+    async def fake_search(query: str) -> str:
+        return "results here"
+
+    backend = ScriptedBackend(
+        [tool_call("c1", "web_search", {"query": "x"}), final_text("done")]
+    )
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "search something",
+        search_fn=fake_search,
+        confirm_search=lambda q: True,
+    )
+    assert result == "done"
+    tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
+    assert tool_message["content"] == "results here"
+
+
+async def test_confirm_delegate_declining_skips_the_sub_agent(project):
+    backend = ScriptedBackend(
+        [tool_call("c1", "delegate_task", {"task": "explore"}), final_text("ok, declined")]
+    )
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "delegate something",
+        allow_delegation=True,
+        confirm_delegate=lambda t: False,
+    )
+    assert result == "ok, declined"
+    # only one chat() call happened at all — no sub-agent turn was ever run
+    assert len(backend.requests) == 2
+    tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
+    assert "declined" in tool_message["content"]
+
+
+async def test_confirm_delegate_approving_runs_the_sub_agent(project):
+    backend = ScriptedBackend(
+        [
+            tool_call("c1", "delegate_task", {"task": "explore"}),
+            final_text("sub-agent summary"),
+            final_text("done"),
+        ]
+    )
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "delegate something",
+        allow_delegation=True,
+        confirm_delegate=lambda t: True,
+    )
+    assert result == "done"
+    tool_message = next(m for m in backend.requests[-1]["messages"] if m["role"] == "tool")
+    assert tool_message["content"] == "sub-agent summary"

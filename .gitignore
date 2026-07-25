@@ -18,10 +18,18 @@ localgate.config.json
 
 # Private planning notes — kept locally, never published.
 ROADMAP.md
+CODING_AGENT_PLAN.md
+CODING_AGENT_PLAN_PHASE8_SUBAGENTS.md
+NEW_FEATURES.md
+UPDATE_EXISTING_FEATURES.md
+see-update-existing-features-md-and-new-kind-cray.md
 
 # Local codegen / patch scratch scripts
 apply_*.sh
 reapply_*.sh
+
+# R history
+.Rhistory
 
 # Databases
 *.db

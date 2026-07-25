@@ -17,10 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from localgate import __version__
 from localgate.backends import available_backends, get_backend
-from localgate.config import Settings
+from localgate.config import Settings, load_settings
 from localgate.core.cache import PromptCache
 from localgate.core.db_config_store import (
-    DEFAULT_CONFIG_PATH,
+    _default_config_path,
     is_database_established,
     load_database_url,
 )
@@ -51,7 +51,7 @@ def resolve_database_url(settings: Settings, config_path: Path | None = None) ->
     the tested one is what makes a database "established" rather than merely
     "configured".
     """
-    stored = load_database_url(config_path or DEFAULT_CONFIG_PATH)
+    stored = load_database_url(config_path)
     return stored or settings.database_url
 
 
@@ -64,8 +64,8 @@ def create_app(
     a test run can never pick up the developer's real established database from the
     working directory.
     """
-    settings = settings or Settings()
-    config_path = database_config_path or DEFAULT_CONFIG_PATH
+    settings = settings or load_settings()
+    config_path = database_config_path or _default_config_path()
     active_database_url = resolve_database_url(settings, config_path)
 
     configure_logging(settings.log_level, settings.log_format)
@@ -75,6 +75,14 @@ def create_app(
         raise ConfigurationError(
             f"LOCALGATE_BACKEND_TYPE is {settings.backend_type!r}, which is not installed. "
             f"Available backends: {', '.join(available_backends())}."
+        )
+
+    if settings.host == "0.0.0.0" and settings.uses_insecure_admin_key:  # noqa: S104
+        raise ConfigurationError(
+            "Refusing to bind to 0.0.0.0 with the default admin key. "
+            "This would expose your gateway to the network with a key that is printed in the docs. "
+            "Either set LOCALGATE_ADMIN_KEY to a real value (generate one with "
+            "`openssl rand -hex 32`), or bind to 127.0.0.1 (the default) for local-only use."
         )
 
     @asynccontextmanager
@@ -136,9 +144,9 @@ def create_app(
     )
 
     app.state.settings = settings
-    # Reflect where the data actually lives, so /admin/config can't report the .env
-    # value while the gateway is really writing somewhere else.
-    app.state.settings.database_url = active_database_url
+    # Expose the resolved URL separately rather than mutating the settings object,
+    # so settings stays immutable and /admin/config reads from this field.
+    app.state.active_database_url = active_database_url
     app.state.database_config_path = config_path
 
     app.add_middleware(RequestContextMiddleware, metrics_enabled=settings.metrics_enabled)
@@ -173,6 +181,7 @@ def create_app(
     app.include_router(embeddings.router)
     app.include_router(models.router)
     app.include_router(conversations.router)
+    app.include_router(usage.self_router)
     app.include_router(keys.router, prefix="/admin")
     app.include_router(usage.router, prefix="/admin")
     app.include_router(config.router, prefix="/admin")

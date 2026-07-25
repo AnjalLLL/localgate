@@ -4,6 +4,64 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-07-26
+
+This release makes localgate properly installable and self-hostable for anyone who isn't
+in the repo directory, and adds a remote-client path so you can hand someone an API key
+and they can use your gateway from their own CLI.
+
+### Added
+
+- **`localgate init`** — idempotent first-run setup: creates `~/.config/localgate/` and
+  `~/.local/share/localgate/` at 0700, generates a secure admin key into
+  `~/.config/localgate/localgate.env` at 0600, and runs database migrations.
+  `--force` regenerates the key; `--dry-run` previews without touching the filesystem.
+- **`localgate doctor`** — diagnoses the installation: config/data paths, which env files
+  loaded, the resolved database URL and which of the three sources won, secret file
+  permissions, admin-key placeholder status, and database connectivity.
+- **`localgate login --url <url> --api-key <key>`** — verifies a key against a remote
+  gateway (via `/v1/usage` — never calls the backend, so a 502 from a down Ollama can't
+  block login), does a version handshake, and saves credentials at 0600.
+- **`localgate whoami`** — shows your usage stats from the stored gateway credentials.
+- **`localgate code --remote/--local`** — routes inference through a logged-in gateway.
+  Remote mode defaults to `--no-memory` (the gateway handles memory server-side; running
+  both would embed every turn twice into two separate databases).
+- **`localgate keys update <id> --rate-limit N`** — change a key's rate limit without
+  reissuing it. The error message in `api/deps.py` has been advertising this command since
+  0.6.0; now it exists.
+- **`localgate db set-url <url>`** — test a database URL and save it as the active database,
+  the same connection test the admin dashboard uses — so DB setup isn't dashboard-only.
+- **`localgate deploy --domain <domain> --target compose|systemd`** — generates a Caddyfile
+  (Caddy handles ACME/TLS automatically) plus either a Docker Compose file or a systemd
+  unit, with a fresh admin key printed once and written to a 0600 env file. By default only
+  `/v1/*` and `/health*` are exposed; `--expose-admin` adds the dashboard/admin routes.
+- **`--proxy-headers` / `--forwarded-allow-ips`** on `localgate serve` — passed through to
+  uvicorn so client IP and scheme are correct behind a reverse proxy.
+
+### Changed
+
+- **Default `host` is now `127.0.0.1`** (was `0.0.0.0`). Local-first software defaults to
+  loopback; binding to the network is an explicit deployment choice.
+- **`create_app` refuses to start** when `host == "0.0.0.0"` and the admin key is still the
+  placeholder. A warning was not a control.
+- **Default database is now `~/.local/share/localgate/localgate.db`** — stable across
+  directories. Before this, `sqlite+aiosqlite:///./localgate.db` resolved relative to CWD,
+  giving a different database per directory. `LOCALGATE_DATABASE_URL` and
+  `localgate db set-url` still override this.
+- **`localgate.config.json`** (the admin-dashboard-established database config) now lives at
+  `~/.config/localgate/database.json` (0600) instead of CWD. The legacy CWD file is
+  recognised with a one-time warning.
+- **`app.state.active_database_url`** replaces the previous `app.state.settings.database_url`
+  mutation, so `Settings` stays immutable after construction.
+- Dockerfile now sets `LOCALGATE_DATABASE_URL=sqlite+aiosqlite:////data/localgate.db` so the
+  database lands in the declared `/data` volume rather than `/app` (which is root-owned and
+  caused a permissions error on first boot with a plain `docker run`).
+
+### Fixed
+
+- **HTTP 429 from the gateway** now shows a clear rate-limit message with the retry window,
+  instead of the misleading "model doesn't support tool calling" text.
+
 ## [0.7.1] — 2026-07-19
 
 ### Fixed

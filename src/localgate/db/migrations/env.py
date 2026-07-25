@@ -25,7 +25,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from localgate.app import resolve_database_url
-from localgate.config import Settings
+from localgate.config import load_settings
+from localgate.core.db_config_store import redact_database_url
 from localgate.db.models import Base
 
 config = context.config
@@ -37,7 +38,19 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    return resolve_database_url(Settings())
+    """The database a bare ``alembic`` invocation should migrate.
+
+    ``-x url=...`` wins, so a developer can target a scratch database explicitly.
+    Otherwise this applies the gateway's own precedence, which since localgate
+    started reading a *per-user* config file means a bare ``alembic upgrade head``
+    in a checkout resolves the user's real database rather than something
+    CWD-local. That used to be impossible, so `run_async_migrations` announces
+    what it resolved before touching anything.
+    """
+    forced = context.get_x_argument(as_dictionary=True).get("url")
+    if forced:
+        return str(forced)
+    return resolve_database_url(load_settings())
 
 
 def run_migrations_offline() -> None:
@@ -67,7 +80,12 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     """Open our own connection — the path taken by a bare ``alembic upgrade head``."""
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = get_url()
+    url = get_url()
+    # Only on this path: the application and `localgate db upgrade` pass in a
+    # connection, and they already log where they are pointed. Here nothing else
+    # would tell you that you are about to migrate a remote production database.
+    print(f"alembic: migrating {redact_database_url(url)}")  # noqa: T201 — operator-facing
+    configuration["sqlalchemy.url"] = url
 
     engine = async_engine_from_config(configuration, prefix="sqlalchemy.", poolclass=pool.NullPool)
     async with engine.connect() as connection:
