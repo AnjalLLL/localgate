@@ -549,7 +549,31 @@ class AgentSession:
 
             for call in tool_calls:
                 self.messages.append(await self._run_tool_call(call))
-            self.messages.append({"role": "user", "content": "Next step. One tool call only."})
+
+            # After enough reading, push model to start writing
+            read_count = sum(
+                1
+                for m in self.messages
+                if m.get("role") == "tool" and m.get("name") in READ_ONLY_TOOL_NAMES
+            )
+            write_count = sum(
+                1
+                for m in self.messages
+                if m.get("role") == "tool" and m.get("name") == "write_file"
+            )
+            if read_count >= 4 and write_count == 0:
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have read enough. Now call write_file to create/update files. "
+                            'JSON only: {"name": "write_file", "arguments": {"path": ..., '
+                            '"content": ...}}'
+                        ),
+                    }
+                )
+            else:
+                self.messages.append({"role": "user", "content": "Next step. One tool call only."})
 
         raise AgentTurnLimitExceeded(
             f"Stopped after {self.max_turns} turns without a final answer — "
