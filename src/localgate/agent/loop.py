@@ -202,12 +202,14 @@ def _as_synthetic_tool_call(content: str, known_names: frozenset[str]) -> dict[s
     return None
 
 
-#: Matches a filename hint before a code block:
-#: "### `filename.ext`", "#### filename.ext", "<!-- filename.ext -->",
-#: "// filename.ext", "src/filename.ext:", etc.
+#: Matches a filename hint before a code block. Handles real model output like:
+#: "### File: `src/contact.html`\n\n```html\n...\n```"
+#: "### index.html\n```html\n...\n```"
+#: "#### `styles.css`:\n\n```css\n...\n```"
 _FILENAME_HINT_RE = re.compile(
     r"(?:^|\n)"
     r"[#*/ <!-]*"
+    r"(?:File:\s*|file:\s*)?"
     r"[`\"']?"
     r"((?:src/|\./)?"
     r"[\w][\w./-]*\."
@@ -215,6 +217,7 @@ _FILENAME_HINT_RE = re.compile(
     r"[`\"']?"
     r"[: )*#>-]*"
     r"\s*\n"
+    r"\n?"
     r"```\w*\s*\n"
     r"(.*?)"
     r"\n```",
@@ -324,11 +327,12 @@ async def _stream_completion(
             content_len += len(text)
             on_token(text)
 
-            # Early stop: if content is getting long and contains a tool call,
-            # stop consuming the stream — we already have what we need.
+            # Early stop: if content is getting long and contains a JSON tool call,
+            # stop consuming the stream. But NOT if we're inside a code fence
+            # (model may be writing file contents as named blocks).
             if known_tool_names and not tool_calls and content_len > 200:
                 joined = "".join(content_parts)
-                if _EMBEDDED_JSON_RE.search(joined):
+                if _EMBEDDED_JSON_RE.search(joined) and "```" not in joined:
                     early_stopped = True
                     break
 
@@ -490,7 +494,7 @@ class AgentSession:
                 "model": self.model,
                 "messages": outgoing,
                 "tools": self.tool_schemas,
-                "max_tokens": 1024,
+                "max_tokens": 4096,
             }
             # Buffer silently — don't stream model prose to user
             if self.on_token is not None:
@@ -502,7 +506,8 @@ class AgentSession:
                 message = response["choices"][0]["message"]
 
             content = message.get("content") or ""
-            if len(content) > 2000:
+            # Truncate only prose without code blocks — code blocks need full content
+            if len(content) > 2000 and "```" not in content:
                 message["content"] = content[:2000]
                 content = message["content"]
 
