@@ -793,6 +793,8 @@ def code(
                     allow_delegation=allow_delegation,
                     search_fn=search_fn,
                     mcp_registry=mcp_registry,
+                    settings=settings,
+                    session_id=project_session_id(root) if memory else None,
                 )
                 return False
             result = await run_single_shot(

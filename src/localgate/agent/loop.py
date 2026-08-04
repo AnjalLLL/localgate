@@ -15,12 +15,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from localgate.agent.mcp import McpRegistry, is_mcp_tool_name
+from localgate.agent.tool_executor import (
+    ToolCallTracker,
+    execute_tool_call_with_timeout,
+    get_tool_timeout,
+)
 from localgate.agent.tools import (
     DELEGATE_TASK_SCHEMA,
     READ_ONLY_TOOL_NAMES,
@@ -385,6 +391,8 @@ class AgentSession:
         search_fn: SearchFn | None = None,
         mcp_registry: McpRegistry | None = None,
         auto_read: bool = False,
+        settings: Any | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.backend = backend
         self.model = model
@@ -419,6 +427,9 @@ class AgentSession:
         self.tool_executor = tool_executor if tool_executor is not None else execute_tool_call
         self.augment = augment
         self.auto_read = auto_read
+        self.settings = settings
+        self.session_id = session_id or str(uuid.uuid4())
+        self.tool_tracker = ToolCallTracker()
         self._known_tool_names = frozenset(s["function"]["name"] for s in self.tool_schemas)
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt()}]
 
@@ -550,7 +561,7 @@ class AgentSession:
             for call in tool_calls:
                 self.messages.append(await self._run_tool_call(call))
 
-            # After enough reading, push model to start writing
+            # Count read/write operations
             read_count = sum(
                 1
                 for m in self.messages
@@ -561,7 +572,22 @@ class AgentSession:
                 for m in self.messages
                 if m.get("role") == "tool" and m.get("name") == "write_file"
             )
-            if read_count >= 4 and write_count == 0:
+
+            # Check for stuck loop before continuing
+            if self.tool_tracker.is_stuck_loop():
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "PROGRESS CHECK: You've repeated similar actions without completing "
+                            "the task. Either: 1) Show final result now, 2) Ask user for "
+                            "clarification, 3) Try a completely different approach. "
+                            "Do NOT repeat previous actions."
+                        ),
+                    }
+                )
+            # After enough reading, push model to start writing
+            elif read_count >= 4 and write_count == 0:
                 self.messages.append(
                     {
                         "role": "user",
@@ -745,7 +771,45 @@ class AgentSession:
             args_repr = ", ".join(f"{k}={v!r}" for k, v in _summarize(arguments).items())
             self.on_event(f"{name}({args_repr})")
 
-        result = self.tool_executor(self.root, call["id"], name, arguments)
+        # Execute with timeout if settings are available
+        start_time = time.time()
+        if self.settings is not None:
+            result = await execute_tool_call_with_timeout(
+                self.root, call["id"], name, arguments, self.settings
+            )
+            timed_out = "timed out" in result.content.lower() if result.is_error else False
+        else:
+            # Fallback to original executor if no settings
+            result = self.tool_executor(self.root, call["id"], name, arguments)
+            timed_out = False
+
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        # Track the call for stuck detection
+        self.tool_tracker.record(name, not result.is_error)
+
+        # Log to database if enabled (async, non-blocking)
+        if self.settings is not None and self.settings.tool_logging_enabled:
+            # Import here to avoid circular dependency
+            from localgate.db import engine
+            from localgate.db.repositories.tool_calls import ToolCallRepository
+
+            try:
+                async with engine.get_session() as session:
+                    repo = ToolCallRepository(session)
+                    await repo.create(
+                        session_id=self.session_id,
+                        tool_name=name,
+                        arguments=arguments,
+                        success=not result.is_error,
+                        duration_ms=duration_ms,
+                        error=result.content if result.is_error else None,
+                        timed_out=timed_out,
+                    )
+            except Exception:
+                # Don't fail tool execution because logging failed
+                pass
+
         return {
             "role": "tool",
             "tool_call_id": result.tool_call_id,
