@@ -13,6 +13,7 @@ convenience wrapper around a single-turn session, used by the single-shot
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -756,13 +757,42 @@ class AgentSession:
                 }
             if self.on_event is not None:
                 self.on_event(f"web_search(query={query!r})")
-            content = await self.search_fn(query) if query else "web_search requires a query."
+
+            # Wrap search with timeout
+            if self.settings is not None and query:
+                timeout = self.settings.tool_timeout_search
+                try:
+                    content = await asyncio.wait_for(self.search_fn(query), timeout=timeout)
+                except asyncio.TimeoutError:
+                    content = (
+                        f"Web search timed out after {timeout}s. "
+                        "Try a more specific query or skip this search."
+                    )
+            else:
+                content = await self.search_fn(query) if query else "web_search requires a query."
+
+            # Track the call
+            self.tool_tracker.record(name, "timed out" not in content.lower())
             return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
 
         if is_mcp_tool_name(name) and self.mcp_registry is not None:
             if self.on_event is not None:
                 self.on_event(f"{name}({_summarize(arguments)})")
-            content = await self.mcp_registry.call_tool(name, arguments)
+
+            # Wrap MCP tool with timeout
+            if self.settings is not None:
+                timeout = self.settings.tool_timeout_read  # Use read timeout for MCP tools
+                try:
+                    content = await asyncio.wait_for(
+                        self.mcp_registry.call_tool(name, arguments), timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    content = f"Tool '{name}' timed out after {timeout}s. Try a simpler operation."
+            else:
+                content = await self.mcp_registry.call_tool(name, arguments)
+
+            # Track the call
+            self.tool_tracker.record(name, "timed out" not in content.lower())
             return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
 
         if self.on_event is not None:
