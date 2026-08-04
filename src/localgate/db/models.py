@@ -131,3 +131,21 @@ class MemoryChunk(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ToolCallLog(Base):
+    """Tracks tool call execution for debugging and heuristic improvement."""
+
+    __tablename__ = "tool_call_logs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String, index=True)
+    tool_name: Mapped[str] = mapped_column(String, index=True)
+    arguments: Mapped[dict] = mapped_column(JSON)
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (Index("ix_toolcall_session_created", "session_id", "created_at"),)

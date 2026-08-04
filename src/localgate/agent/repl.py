@@ -754,6 +754,8 @@ async def run_repl(
     allow_delegation: bool = False,
     search_fn: SearchFn | None = None,
     mcp_registry: McpRegistry | None = None,
+    settings: Any | None = None,
+    session_id: str | None = None,
 ) -> None:
     """A persistent chat session in `root`, until `/exit` or EOF (Ctrl+D)."""
     console = theme_mod.make_console(theme, no_color=no_color)
@@ -782,6 +784,8 @@ async def run_repl(
         search_fn=search_fn,
         mcp_registry=mcp_registry,
         auto_read=True,
+        settings=settings,
+        session_id=session_id,
     )
     prompt_session = _make_prompt_session(gate)
 
@@ -989,6 +993,8 @@ async def run_single_shot(
         search_fn=search_fn,
         mcp_registry=mcp_registry,
         auto_read=True,
+        settings=settings,
+        session_id=session_id,
     )
     text = await run_turn(console, session, gate, task, memory=memory, usage=SessionUsage())
     return SingleShotResult(text, gate.declined_a_write)
