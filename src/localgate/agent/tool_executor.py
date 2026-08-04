@@ -48,7 +48,7 @@ async def execute_tool_call_with_timeout(
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
             loop.run_in_executor(None, execute_tool_call, root, tool_call_id, name, arguments),
-            timeout=timeout
+            timeout=timeout,
         )
         return result
     except asyncio.TimeoutError:
@@ -57,10 +57,7 @@ async def execute_tool_call_with_timeout(
             "Try a different approach or break the task into smaller steps."
         )
         return ToolCallResult(
-            tool_call_id=tool_call_id,
-            name=name,
-            content=error_msg,
-            is_error=True
+            tool_call_id=tool_call_id, name=name, content=error_msg, is_error=True
         )
 
 
@@ -78,7 +75,8 @@ class ToolCallTracker:
         """Count recent failures for a specific tool within the time window."""
         cutoff = time.time() - window_seconds
         return sum(
-            1 for name, success, ts in self.history
+            1
+            for name, success, ts in self.history
             if name == tool_name and not success and ts >= cutoff
         )
 
@@ -100,7 +98,4 @@ class ToolCallTracker:
 
         # Check if all are the same tool and it's read-only
         first_tool = last_n[0]
-        return (
-            all(tool == first_tool for tool in last_n)
-            and first_tool in READ_ONLY_TOOLS
-        )
+        return all(tool == first_tool for tool in last_n) and first_tool in READ_ONLY_TOOLS
