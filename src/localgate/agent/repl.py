@@ -968,6 +968,8 @@ async def run_single_shot(
     allow_delegation: bool = False,
     search_fn: SearchFn | None = None,
     mcp_registry: McpRegistry | None = None,
+    settings: Any | None = None,
+    session_id: str | None = None,
 ) -> SingleShotResult:
     """One task, one turn, with the same diff/spinner/streaming UI as the REPL."""
     console = theme_mod.make_console(theme, no_color=no_color)

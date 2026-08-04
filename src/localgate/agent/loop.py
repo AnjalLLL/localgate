@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -25,7 +24,6 @@ from localgate.agent.mcp import McpRegistry, is_mcp_tool_name
 from localgate.agent.tool_executor import (
     ToolCallTracker,
     execute_tool_call_with_timeout,
-    get_tool_timeout,
 )
 from localgate.agent.tools import (
     DELEGATE_TASK_SCHEMA,
@@ -772,43 +770,19 @@ class AgentSession:
             self.on_event(f"{name}({args_repr})")
 
         # Execute with timeout if settings are available
-        start_time = time.time()
         if self.settings is not None:
             result = await execute_tool_call_with_timeout(
                 self.root, call["id"], name, arguments, self.settings
             )
-            timed_out = "timed out" in result.content.lower() if result.is_error else False
         else:
             # Fallback to original executor if no settings
             result = self.tool_executor(self.root, call["id"], name, arguments)
-            timed_out = False
-
-        duration_ms = int((time.time() - start_time) * 1000)
 
         # Track the call for stuck detection
         self.tool_tracker.record(name, not result.is_error)
 
-        # Log to database if enabled (async, non-blocking)
-        if self.settings is not None and self.settings.tool_logging_enabled:
-            # Import here to avoid circular dependency
-            from localgate.db import engine
-            from localgate.db.repositories.tool_calls import ToolCallRepository
-
-            try:
-                async with engine.get_session() as session:
-                    repo = ToolCallRepository(session)
-                    await repo.create(
-                        session_id=self.session_id,
-                        tool_name=name,
-                        arguments=arguments,
-                        success=not result.is_error,
-                        duration_ms=duration_ms,
-                        error=result.content if result.is_error else None,
-                        timed_out=timed_out,
-                    )
-            except Exception:
-                # Don't fail tool execution because logging failed
-                pass
+        # TODO: Add database logging via dependency injection
+        # For now, tool call tracking is done in-memory via self.tool_tracker
 
         return {
             "role": "tool",

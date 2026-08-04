@@ -58,7 +58,7 @@ def test_db_upgrade_then_current(env):
 
     current = runner.invoke(app, ["db", "current"])
     assert current.exit_code == 0
-    assert "0002" in current.stdout
+    assert "0003" in current.stdout
 
 
 def test_db_current_on_an_unmigrated_database_says_what_to_do(env):
