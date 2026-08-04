@@ -53,9 +53,7 @@ def test_get_tool_timeout_for_unknown_tools(settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_call_with_timeout_success(
-    tmp_path: Path, settings: Settings
-) -> None:
+async def test_execute_tool_call_with_timeout_success(tmp_path: Path, settings: Settings) -> None:
     """Successful tool execution should return the result."""
     # Create a test file
     test_file = tmp_path / "test.txt"
@@ -70,14 +68,13 @@ async def test_execute_tool_call_with_timeout_success(
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_call_with_timeout_timeout(
-    tmp_path: Path, settings: Settings
-) -> None:
+async def test_execute_tool_call_with_timeout_timeout(tmp_path: Path, settings: Settings) -> None:
     """Tool execution that times out should return an error result."""
 
     def slow_tool(*_args, **_kwargs):
         """Simulate a slow tool that takes too long."""
         import time
+
         time.sleep(10)  # Block for 10 seconds
         return Mock(is_error=False, content="Should not reach here")
 
