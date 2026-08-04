@@ -813,6 +813,8 @@ def code(
                 theme=resolved_theme,
                 no_color=resolved_no_color,
                 max_turns=resolved_max_turns,
+                settings=settings,
+                session_id=project_session_id(root) if memory else None,
             )
             return result.declined_a_write
         finally:

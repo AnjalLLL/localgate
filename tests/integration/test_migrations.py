@@ -46,8 +46,9 @@ async def test_fresh_database_migrates_to_head(tmp_path):
     engine = make_engine(f"sqlite+aiosqlite:///{tmp_path}/fresh.db")
     await init_models(engine)
 
-    assert await current_revision(engine) == "0002"
+    assert await current_revision(engine) == "0003"
     assert "conversation_summaries" in await _tables(engine)
+    assert "tool_call_logs" in await _tables(engine)
     assert "key_prefix" in await _columns(engine, "api_keys")
     await engine.dispose()
 
@@ -58,7 +59,7 @@ async def test_migrating_twice_is_a_no_op(tmp_path):
     engine = make_engine(url)
     await init_models(engine)
     await init_models(engine)  # must not raise
-    assert await current_revision(engine) == "0002"
+    assert await current_revision(engine) == "0003"
     await engine.dispose()
 
 
@@ -93,7 +94,7 @@ async def test_pre_migrations_database_is_adopted_without_losing_data(tmp_path):
     engine = make_engine(url)
     await init_models(engine)  # the real startup path
 
-    assert await current_revision(engine) == "0002"
+    assert await current_revision(engine) == "0003"
     assert "key_prefix" in await _columns(engine, "api_keys")
     assert {"latency_ms", "cached"} <= await _columns(engine, "usage_records")
     assert "conversation_summaries" in await _tables(engine)
@@ -149,7 +150,7 @@ async def test_a_partially_migrated_database_converges_instead_of_failing(tmp_pa
     engine = make_engine(url)
     await init_models(engine)  # must converge, not abort
 
-    assert await current_revision(engine) == "0002"
+    assert await current_revision(engine) == "0003"
     assert "key_prefix" in await _columns(engine, "api_keys")  # the missing bits were added
     assert "kind" in await _columns(engine, "memory_chunks")
 
@@ -165,7 +166,7 @@ async def test_migrating_a_drifted_database_twice_is_still_a_no_op(tmp_path):
     engine = make_engine(url)
     await init_models(engine)
     await init_models(engine)
-    assert await current_revision(engine) == "0002"
+    assert await current_revision(engine) == "0003"
     await engine.dispose()
 
 

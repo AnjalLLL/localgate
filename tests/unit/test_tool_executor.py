@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -76,7 +75,7 @@ async def test_execute_tool_call_with_timeout_timeout(
 ) -> None:
     """Tool execution that times out should return an error result."""
 
-    def slow_tool(*args, **kwargs):
+    def slow_tool(*_args, **_kwargs):
         """Simulate a slow tool that takes too long."""
         import time
         time.sleep(10)  # Block for 10 seconds

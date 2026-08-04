@@ -10,7 +10,6 @@ from typing import Any
 from localgate.agent.tools import ToolCallResult, execute_tool_call
 from localgate.config import Settings
 
-
 READ_ONLY_TOOLS = {"read_file", "list_directory", "search_files", "git_status", "git_diff"}
 WRITE_TOOLS = {"write_file"}
 
