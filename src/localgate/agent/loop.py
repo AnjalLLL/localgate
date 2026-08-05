@@ -332,14 +332,18 @@ async def _stream_completion(
             content_len += len(text)
             on_token(text)
 
-            # Early stop: if content is getting long and contains a JSON tool call,
+            # Early stop: if content is getting long and contains a COMPLETE JSON tool call,
             # stop consuming the stream. But NOT if we're inside a code fence
             # (model may be writing file contents as named blocks).
-            if known_tool_names and not tool_calls and content_len > 200:
+            # Check every 100 chars to avoid parsing on every token.
+            if known_tool_names and not tool_calls and content_len > 200 and content_len % 100 < 10:
                 joined = "".join(content_parts)
-                if _EMBEDDED_JSON_RE.search(joined) and "```" not in joined:
-                    early_stopped = True
-                    break
+                if "```" not in joined:
+                    # Only stop if we have a complete, parseable tool call
+                    synthetic = _as_synthetic_tool_call(joined, known_tool_names)
+                    if synthetic is not None:
+                        early_stopped = True
+                        break
 
         for tc_delta in delta.get("tool_calls") or []:
             index = tc_delta.get("index", 0)
