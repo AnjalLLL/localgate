@@ -98,7 +98,7 @@ async def duckduckgo_search(
     query: str,
     *,
     max_results: int = 5,
-    timeout: float = 15.0,
+    timeout: float = 10.0,
 ) -> str:
     """Free, zero-config web search via DuckDuckGo's HTML lite endpoint.
 
@@ -112,7 +112,9 @@ async def duckduckgo_search(
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
     }
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    # Use explicit timeout for all phases to prevent hanging
+    timeout_config = httpx.Timeout(timeout, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout_config, follow_redirects=True) as client:
         try:
             resp = await client.post(url, data={"q": query}, headers=headers)
             resp.raise_for_status()
@@ -163,13 +165,14 @@ async def openserp_search(
     *,
     engine: str = "google",
     max_results: int = 5,
-    timeout: float = 15.0,
+    timeout: float = 10.0,
 ) -> str:
     """One OpenSERP search against a self-hosted instance — no API key, no
     third party involved once the server is running on the user's own machine.
     """
     url = f"{base_url.rstrip('/')}/{engine}/search"
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    timeout_config = httpx.Timeout(timeout, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout_config) as client:
         try:
             resp = await client.get(
                 url, params={"text": query, "limit": max_results, "format": "json"}
@@ -194,10 +197,11 @@ async def openserp_search(
 
 
 async def tavily_search(
-    query: str, api_key: str, *, max_results: int = 5, timeout: float = 15.0
+    query: str, api_key: str, *, max_results: int = 5, timeout: float = 10.0
 ) -> str:
     """One Tavily search, formatted as title + short snippet + URL per result."""
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    timeout_config = httpx.Timeout(timeout, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout_config) as client:
         try:
             resp = await client.post(
                 "https://api.tavily.com/search",
