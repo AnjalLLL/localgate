@@ -134,7 +134,7 @@ class Settings(BaseSettings):
     # --- Tool execution ---
     tool_timeout_read: float = Field(default=30.0, gt=0)  # timeout for read-only tools
     tool_timeout_write: float = Field(default=60.0, gt=0)  # timeout for write operations
-    tool_timeout_search: float = Field(default=60.0, gt=0)  # timeout for web search
+    tool_timeout_search: float = Field(default=20.0, gt=0)  # timeout for web search
     tool_timeout_delegate: float = Field(default=180.0, gt=0)  # timeout for sub-agents
     tool_logging_enabled: bool = True  # log all tool calls for debugging
 
