@@ -154,4 +154,4 @@ async def get_compat_for_models(
     """
     tasks = [client.get_compat(model) for model in models]
     results = await asyncio.gather(*tasks, return_exceptions=False)
-    return dict(zip(models, results))
+    return dict(zip(models, results, strict=True))

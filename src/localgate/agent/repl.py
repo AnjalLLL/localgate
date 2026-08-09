@@ -481,9 +481,14 @@ async def _model_picker(
                 rate = overall_pass_rate(compat)
                 label = "reliable" if rate >= 0.7 else "unreliable"
                 color = "green" if rate >= 0.7 else "red"
-                compat_suffix = f"  [{color}]tool calling: {label} ({rate:.0%}, {compat.total_reports} reports)[/{color}]"
+                compat_suffix = (
+                    f"  [{color}]tool calling: {label} "
+                    f"({rate:.0%}, {compat.total_reports} reports)[/{color}]"
+                )
             else:
-                compat_suffix = f"  [dim]no compat data yet — run: caniollama check {m['name']}[/dim]"
+                compat_suffix = (
+                    f"  [dim]no compat data yet — run: caniollama check {m['name']}[/dim]"
+                )
 
         suffix = f"  [dim]{extra}[/dim]" if extra else ""
         console.print(f"  {marker}{i}. {m['name']}{suffix}{compat_suffix}")
@@ -868,7 +873,9 @@ async def run_repl(
         if line.startswith("/model"):
             parts = line.split(maxsplit=1)
             if len(parts) == 2:
-                await _switch_model(console, session, parts[1].strip(), caniollama_client=caniollama_client)
+                await _switch_model(
+                    console, session, parts[1].strip(), caniollama_client=caniollama_client
+                )
             else:
                 await _model_picker(console, session, caniollama_client)
             continue
