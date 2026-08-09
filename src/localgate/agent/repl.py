@@ -31,6 +31,11 @@ from localgate.agent.tools import ToolCallResult, execute_tool_call
 from localgate.agent.userconfig import UserConfig
 from localgate.agent.websearch import SearchFn
 from localgate.core.token_counter import count_message_tokens, count_tokens
+from localgate.integrations.caniollama import (
+    CaniollamaClient,
+    get_compat_for_models,
+    overall_pass_rate,
+)
 
 #: (command, one-line description) — the single source of truth for both the
 #: startup banner and `/help`, so a new command only needs to be added here once.
@@ -383,6 +388,7 @@ async def _switch_model(
     session: AgentSession,
     name: str,
     known: list[dict[str, Any]] | None = None,
+    caniollama_client: CaniollamaClient | None = None,
 ) -> None:
     """Validate, warn, and apply a model switch — shared by `/model <name>` and
     picking a numbered entry from `/model`'s list.
@@ -410,21 +416,41 @@ async def _switch_model(
             console.print("[dim]model unchanged[/dim]")
             return
 
-    supports_tools = await session.backend.check_tool_support(name)
-    if supports_tools is False:
-        console.print(
-            f"[red]{name} doesn't advertise tool-calling support — switching would likely "
-            "400 on the next turn.[/red]"
-        )
-        answer = console.input("[yellow]Switch anyway? [y/N] [/yellow]").strip().lower()
-        if answer not in ("y", "yes"):
-            return
+    # Prefer registry data when available, fall back to backend's check_tool_support
+    warned = False
+    if caniollama_client:
+        compat = await caniollama_client.get_compat(name)
+        if compat is not None:
+            rate = overall_pass_rate(compat)
+            if rate < 0.5:  # Threshold for unreliable
+                console.print(
+                    f"[red]{name}: registry reports {rate:.0%} structured-pass rate "
+                    f"across {compat.total_reports} runs — switching will likely misbehave.[/red]"
+                )
+                answer = console.input("[yellow]Switch anyway? [y/N] [/yellow]").strip().lower()
+                if answer not in ("y", "yes"):
+                    return
+                warned = True
+
+    # Fallback to backend's check_tool_support if registry had no data
+    if not warned:
+        supports_tools = await session.backend.check_tool_support(name)
+        if supports_tools is False:
+            console.print(
+                f"[red]{name} doesn't advertise tool-calling support — switching would likely "
+                "400 on the next turn.[/red]"
+            )
+            answer = console.input("[yellow]Switch anyway? [y/N] [/yellow]").strip().lower()
+            if answer not in ("y", "yes"):
+                return
 
     session.model = name
     console.print(f"[dim]model set to {session.model}[/dim]")
 
 
-async def _model_picker(console: Console, session: AgentSession) -> None:
+async def _model_picker(
+    console: Console, session: AgentSession, caniollama_client: CaniollamaClient | None = None
+) -> None:
     """`/model` with no argument: a numbered, selectable list with size/quant info."""
     try:
         models = await session.backend.list_models_detailed()
@@ -435,13 +461,32 @@ async def _model_picker(console: Console, session: AgentSession) -> None:
         console.print("[dim]no models found[/dim]")
         return
 
+    # Fan out caniollama lookups concurrently if the client is available
+    compat_map = {}
+    if caniollama_client:
+        model_names = [m["name"] for m in models]
+        compat_map = await get_compat_for_models(caniollama_client, model_names)
+
     console.print(f"[dim]current model: {session.model}[/dim]")
     for i, m in enumerate(models, start=1):
         details = (m.get("parameter_size"), m.get("quantization"), m.get("size_human"))
         extra = "  ".join(str(v) for v in details if v)
         marker = "*" if m["name"] == session.model else " "
+
+        # Add caniollama compat annotation if available
+        compat_suffix = ""
+        if caniollama_client:
+            compat = compat_map.get(m["name"])
+            if compat is not None:
+                rate = overall_pass_rate(compat)
+                label = "reliable" if rate >= 0.7 else "unreliable"
+                color = "green" if rate >= 0.7 else "red"
+                compat_suffix = f"  [{color}]tool calling: {label} ({rate:.0%}, {compat.total_reports} reports)[/{color}]"
+            else:
+                compat_suffix = f"  [dim]no compat data yet — run: caniollama check {m['name']}[/dim]"
+
         suffix = f"  [dim]{extra}[/dim]" if extra else ""
-        console.print(f"  {marker}{i}. {m['name']}{suffix}")
+        console.print(f"  {marker}{i}. {m['name']}{suffix}{compat_suffix}")
 
     choice = console.input(
         "[bold green]select a model (number or name, blank to cancel): [/bold green]"
@@ -457,7 +502,7 @@ async def _model_picker(console: Console, session: AgentSession) -> None:
     if target is None:
         console.print(f"[red]no such model: {choice!r}[/red]")
         return
-    await _switch_model(console, session, target, models)
+    await _switch_model(console, session, target, models, caniollama_client)
 
 
 def _theme_picker(console: Console, current: str) -> str | None:
@@ -789,6 +834,15 @@ async def run_repl(
     )
     prompt_session = _make_prompt_session(gate)
 
+    # Initialize caniollama client if settings are available
+    caniollama_client = None
+    if settings is not None:
+        caniollama_client = CaniollamaClient(
+            registry_url=settings.caniollama_registry_url,
+            enabled=settings.caniollama_enabled,
+            timeout=settings.caniollama_timeout,
+        )
+
     banner = _render_startup_banner(
         root, model, mode_label(gate.mode()), session, search_fn, mcp_registry
     )
@@ -814,9 +868,9 @@ async def run_repl(
         if line.startswith("/model"):
             parts = line.split(maxsplit=1)
             if len(parts) == 2:
-                await _switch_model(console, session, parts[1].strip())
+                await _switch_model(console, session, parts[1].strip(), caniollama_client=caniollama_client)
             else:
-                await _model_picker(console, session)
+                await _model_picker(console, session, caniollama_client)
             continue
         if line.startswith("/theme"):
             parts = line.split(maxsplit=1)

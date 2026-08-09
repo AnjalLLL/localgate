@@ -195,6 +195,21 @@ wheels = [
 ]
 
 [[package]]
+name = "caniollama"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "rich" },
+    { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/80/c4/c9ab1fe9ccb0fde20a9bc2040caa76d4f04c188cd59de3606c56545243f8/caniollama-0.1.3.tar.gz", hash = "sha256:3af1c2fca87f89e22352af6d48b6674df4c5c81d072d59fe4d1e54cc85698671", size = 14099, upload-time = "2026-08-09T15:45:27.54Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/c3/ae3bd50df6f5007291e580ec9c045eaa04b1ef21e3ea0765a1096eba7104/caniollama-0.1.3-py3-none-any.whl", hash = "sha256:31fb400a99ddd4dc090f50214b5382355225c970337356bcbb00f8ad3d5b331c", size = 14481, upload-time = "2026-08-09T15:45:26.496Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.6.17"
 source = { registry = "https://pypi.org/simple" }
@@ -962,11 +977,12 @@ wheels = [
 
 [[package]]
 name = "localgate"
-version = "0.10.1"
+version = "0.10.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "caniollama" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "mcp" },
@@ -1003,6 +1019,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", marker = "extra == 'dev'", specifier = ">=0.29" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29" },
+    { name = "caniollama", specifier = ">=0.1.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
