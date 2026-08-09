@@ -105,7 +105,10 @@ class Settings(BaseSettings):
     model_aliases: dict[str, str] = Field(default_factory=dict)
 
     # --- caniollama registry integration (read-only) ---
-    caniollama_registry_url: str = "https://registry.caniollama.com"
+    # Default assumes registry running locally:
+    # cd ~/caniollama/compat-registry && uv run uvicorn compat_registry.main:app --port 8001
+    # Or via Docker: docker run -p 8001:8000 ghcr.io/anjallll/caniollama-registry:latest
+    caniollama_registry_url: str = "http://localhost:8001"
     caniollama_enabled: bool = True
     caniollama_timeout: float = Field(default=1.5, gt=0)
 
