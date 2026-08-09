@@ -50,6 +50,7 @@ dependencies = [
     "rich>=13.7",
     "prompt-toolkit>=3.0",
     "mcp>=1.0",
+    "caniollama>=0.1.0",
 ]
 
 [project.optional-dependencies]

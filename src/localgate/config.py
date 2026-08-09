@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     #: Set as JSON: LOCALGATE_MODEL_ALIASES='{"fast": "phi4-mini"}'
     model_aliases: dict[str, str] = Field(default_factory=dict)
 
+    # --- caniollama registry integration (read-only) ---
+    caniollama_registry_url: str = "https://registry.caniollama.com"
+    caniollama_enabled: bool = True
+    caniollama_timeout: float = Field(default=1.5, gt=0)
+
     # --- Web search (see agent/websearch.py) ---
     # Defaults to "duckduckgo" (free, no key needed) when unset. Set explicitly to
     # override: "openserp" (self-hosted) or "tavily" (paid, needs API key).
