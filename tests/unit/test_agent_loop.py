@@ -86,6 +86,10 @@ async def test_single_tool_call_then_final_answer(project):
     tool_message = next(m for m in second_request["messages"] if m["role"] == "tool")
     assert tool_message["content"] == "old content\n"
     assert tool_message["tool_call_id"] == "c1"
+    assistant_tool_message = next(
+        m for m in second_request["messages"] if m["role"] == "assistant" and "tool_calls" in m
+    )
+    assert assistant_tool_message["content"] == ""
 
 
 async def test_write_file_actually_writes_when_approved(project):
@@ -238,7 +242,7 @@ async def test_raw_json_content_is_treated_as_a_tool_call(project):
     # message once it's in history, or replaying it on a later turn would confuse
     # a model expecting the standard shape.
     assistant_message = next(m for m in second_request["messages"] if m.get("role") == "assistant")
-    assert assistant_message["content"] is None
+    assert assistant_message["content"] == ""
     assert assistant_message["tool_calls"][0]["function"]["name"] == "read_file"
 
 
