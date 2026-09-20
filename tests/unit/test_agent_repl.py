@@ -14,7 +14,7 @@ import pytest
 from rich.console import Console
 from rich.status import Status
 
-from localgate.agent import userconfig
+from localgate.agent import gitutil, userconfig
 from localgate.agent.gitutil import AGENT_COMMIT_PREFIX
 from localgate.agent.loop import AgentSession
 from localgate.agent.repl import (
@@ -29,7 +29,9 @@ from localgate.backends.base import InferenceBackend
 
 
 def _git(root, *args):
-    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    return subprocess.run(
+        ["git", *args], cwd=root, check=True, capture_output=True, text=True
+    ).stdout
 
 
 @pytest.fixture
@@ -104,6 +106,23 @@ def write_call(path: str, content: str) -> dict[str, Any]:
     }
 
 
+def read_call(path: str) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "read-call",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": path}),
+                },
+            }
+        ],
+    }
+
+
 def final_text(text: str) -> dict[str, Any]:
     return {"role": "assistant", "content": text}
 
@@ -111,9 +130,17 @@ def final_text(text: str) -> dict[str, Any]:
 # --------------------------------------------------------------------- WriteGate
 
 
-def test_confirm_write_auto_approves_on_a_clean_tree(repo):
+def test_auto_mode_approves_a_new_file_without_prompt(repo):
+    gate = WriteGate(console(), repo, auto_approve=True)
+    assert gate.confirm_write("new.py", "new\n") is True
+
+
+def test_auto_mode_still_confirms_an_overwrite(repo, monkeypatch):
+    prompts = []
+    monkeypatch.setattr("typer.confirm", lambda prompt, **_kwargs: prompts.append(prompt) or True)
     gate = WriteGate(console(), repo, auto_approve=True)
     assert gate.confirm_write("app.py", "new\n") is True
+    assert prompts == ["Overwrite app.py?"]
 
 
 def test_dirty_tree_check_runs_only_once(repo):
@@ -127,17 +154,16 @@ def test_dirty_tree_check_runs_only_once(repo):
 
 def test_force_skips_the_dirty_prompt(repo, monkeypatch):
     (repo / "app.py").write_text("dirty\n")
-    called = False
+    prompts = []
 
-    def fail_confirm(*a, **k):
-        nonlocal called
-        called = True
-        return False
+    def approve_overwrite(prompt, **_kwargs):
+        prompts.append(prompt)
+        return True
 
-    monkeypatch.setattr("typer.confirm", fail_confirm)
+    monkeypatch.setattr("typer.confirm", approve_overwrite)
     gate = WriteGate(console(), repo, auto_approve=True, force=True)
     assert gate.confirm_write("app.py", "new\n") is True
-    assert called is False
+    assert prompts == ["Overwrite app.py?"]
 
 
 def test_confirm_write_declining_sets_declined_a_write(repo, monkeypatch):
@@ -152,6 +178,16 @@ def test_confirm_write_approving_leaves_declined_a_write_false(repo, monkeypatch
     gate = WriteGate(console(), repo)
     assert gate.confirm_write("app.py", "new\n") is True
     assert gate.declined_a_write is False
+
+
+def test_confirm_write_validates_boundary_before_reading_preview(repo, tmp_path):
+    outside = tmp_path.parent / "preview-secret.txt"
+    outside.write_text("PREVIEW_SECRET_MUST_NOT_LEAK")
+    out = console()
+    gate = WriteGate(out, repo, force=True)
+
+    assert gate.confirm_write("../preview-secret.txt", "replacement") is False
+    assert "PREVIEW_SECRET_MUST_NOT_LEAK" not in out.file.getvalue()
 
 
 def test_confirm_search_prompts_in_manual_mode(repo, monkeypatch):
@@ -186,6 +222,14 @@ def test_confirm_delegate_skips_the_prompt_outside_manual_mode(repo, monkeypatch
     assert gate.confirm_delegate("some task") is True
 
 
+def test_mcp_tool_calls_always_require_confirmation(repo, monkeypatch):
+    prompts = []
+    monkeypatch.setattr("typer.confirm", lambda prompt, **_kwargs: prompts.append(prompt) or False)
+    gate = WriteGate(console(), repo, auto_approve=True)
+    assert gate.confirm_mcp("mcp__server__tool", {"path": "x"}) is False
+    assert prompts and "mcp__server__tool" in prompts[0]
+
+
 def test_tracking_executor_records_successful_writes(repo):
     gate = WriteGate(console(), repo, auto_approve=True)
     gate.tracking_executor(repo, "c1", "write_file", {"path": "app.py", "content": "x\n"})
@@ -209,6 +253,26 @@ def test_after_turn_auto_commits_when_enabled(repo):
     assert gitutil.last_commit_message(repo) == f"{AGENT_COMMIT_PREFIX} update app.py"
 
 
+def test_after_turn_does_not_stage_unrelated_human_changes(repo):
+    gate = WriteGate(console(), repo, auto_commit=True)
+    (repo / "human.txt").write_text("human work\n")
+    gate.tracking_executor(repo, "c1", "write_file", {"path": "app.py", "content": "agent\n"})
+    gate.after_turn("update app.py")
+
+    assert _git(repo, "show", "--format=", "--name-only", "HEAD") == "app.py\n"
+    assert (repo / "human.txt").read_text() == "human work\n"
+
+
+def test_after_turn_does_not_commit_a_path_that_was_already_dirty(repo):
+    (repo / "app.py").write_text("human edit\n")
+    gate = WriteGate(console(), repo, auto_commit=True, force=True)
+    gate.tracking_executor(repo, "c1", "write_file", {"path": "app.py", "content": "agent\n"})
+    gate.after_turn("update app.py")
+
+    assert gitutil.last_commit_message(repo) == "initial"
+    assert (repo / "app.py").read_text() == "agent\n"
+
+
 def test_after_turn_does_nothing_without_auto_commit(repo):
     gate = WriteGate(console(), repo, auto_approve=True)
     gate.tracking_executor(repo, "c1", "write_file", {"path": "app.py", "content": "x\n"})
@@ -221,7 +285,7 @@ def test_after_turn_does_nothing_without_auto_commit(repo):
 
 def test_undo_without_git_repo(tmp_path):
     gate = WriteGate(console(), tmp_path, auto_approve=True)
-    assert "Not a git repository" in gate.undo()
+    assert "Nothing written" in gate.undo()
 
 
 def test_undo_with_nothing_written(repo):
@@ -229,35 +293,52 @@ def test_undo_with_nothing_written(repo):
     assert "Nothing written" in gate.undo()
 
 
-def test_undo_reverts_last_written_file(repo):
+def test_undo_reverts_last_written_file(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     gate = WriteGate(console(), repo, auto_approve=True)
-    (repo / "app.py").write_text("edited\n")
-    gate.last_written_path = "app.py"
+    assert gate.confirm_write("app.py", "edited\n")
+    gate.tracking_executor(repo, "c1", "write_file", {"path": "app.py", "content": "edited\n"})
     message = gate.undo()
     assert (repo / "app.py").read_text() == "original\n"
-    assert "Reverted" in message
+    assert "Restored" in message
 
 
-def test_undo_with_auto_commit_resets_agent_commit(repo):
+def test_undo_restores_a_preexisting_human_edit(repo, monkeypatch):
+    (repo / "app.py").write_text("human edit\n")
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    gate = WriteGate(console(), repo, auto_approve=True, force=True)
+    assert gate.confirm_write("app.py", "agent edit\n")
+    gate.tracking_executor(repo, "c1", "write_file", {"path": "app.py", "content": "agent edit\n"})
+
+    gate.undo()
+    assert (repo / "app.py").read_text() == "human edit\n"
+
+
+def test_undo_with_auto_commit_creates_a_restoration_commit(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     gate = WriteGate(console(), repo, auto_approve=True, auto_commit=True)
+    assert gate.confirm_write("app.py", "changed\n")
     gate.tracking_executor(repo, "c1", "write_file", {"path": "app.py", "content": "changed\n"})
-    (repo / "app.py").write_text("changed\n")
     gate.after_turn("change app.py")
     message = gate.undo()
     assert (repo / "app.py").read_text() == "original\n"
-    assert "Reset the last agent commit" in message
+    assert "Restored" in message
+    assert gitutil.last_commit_message(repo) == f"{AGENT_COMMIT_PREFIX} undo app.py"
 
 
-def test_undo_with_auto_commit_refuses_a_human_commit(repo):
+def test_undo_never_resets_a_human_commit(repo):
     _git(repo, "commit", "--allow-empty", "-q", "-m", "a human's commit")
     gate = WriteGate(console(), repo, auto_approve=True, auto_commit=True)
-    assert "refusing to reset" in gate.undo()
+    head = _git(repo, "rev-parse", "HEAD")
+    assert "Nothing written" in gate.undo()
+    assert _git(repo, "rev-parse", "HEAD") == head
 
 
 # ------------------------------------------------------------------- checkpoints
 
 
-def test_confirm_write_records_a_checkpoint(repo):
+def test_confirm_write_records_a_checkpoint(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     gate = WriteGate(console(), repo, auto_approve=True)
     gate.confirm_write("app.py", "new content\n")
     assert len(gate.checkpoints) == 1
@@ -283,7 +364,8 @@ def test_rewind_with_no_checkpoints_says_so(repo):
     assert "Nothing to rewind" in gate.rewind()
 
 
-def test_rewind_restores_previous_content(repo):
+def test_rewind_restores_previous_content(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     gate = WriteGate(console(), repo, auto_approve=True)
     gate.confirm_write("app.py", "changed\n")
     (repo / "app.py").write_text("changed\n")  # simulate the tool actually writing it
@@ -303,7 +385,8 @@ def test_rewind_deletes_a_newly_created_file(repo):
     assert not (repo / "new_file.py").is_file()
 
 
-def test_rewind_multiple_steps_in_reverse_order(repo):
+def test_rewind_multiple_steps_in_reverse_order(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     gate = WriteGate(console(), repo, auto_approve=True)
     gate.confirm_write("app.py", "v1\n")
     (repo / "app.py").write_text("v1\n")
@@ -315,16 +398,18 @@ def test_rewind_multiple_steps_in_reverse_order(repo):
     assert gate.checkpoints == []
 
 
-def test_rewind_caps_steps_at_available_checkpoints(repo):
+def test_rewind_caps_steps_at_available_checkpoints(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     gate = WriteGate(console(), repo, auto_approve=True)
     gate.confirm_write("app.py", "v1\n")
     message = gate.rewind(99)
     assert "1 checkpoint" in message
 
 
-def test_rewind_is_independent_of_auto_commit_and_undo(repo):
+def test_rewind_is_independent_of_auto_commit_and_undo(repo, monkeypatch):
     """/rewind restores content directly; it doesn't need --auto-commit and
     doesn't touch git history the way /undo does."""
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     gate = WriteGate(console(), repo, auto_approve=True)
     gate.confirm_write("app.py", "changed\n")
     (repo / "app.py").write_text("changed\n")
@@ -424,7 +509,13 @@ def test_flush_plan_with_nothing_pending_is_a_noop(repo):
 
 async def test_run_turn_flushes_plan_after_the_model_finishes(repo, monkeypatch):
     monkeypatch.setattr("typer.prompt", lambda *a, **k: "a")
-    backend = ScriptedBackend([write_call("app.py", "from plan\n"), final_text("done")])
+    backend = ScriptedBackend(
+        [
+            read_call("app.py"),
+            write_call("app.py", "from plan\n"),
+            final_text("done"),
+        ]
+    )
     out = console()
     gate = WriteGate(out, repo, plan_mode=True)
     session = AgentSession(
@@ -589,6 +680,7 @@ async def test_repl_starts_in_plan_mode_with_plan_mode_flag(repo, monkeypatch):
 async def test_repl_rewind_restores_a_write(repo, monkeypatch):
     inputs = iter(["write it", "/rewind", "/exit"])
     monkeypatch.setattr(Console, "input", lambda self, *a, **k: next(inputs))
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     backend = ScriptedBackend([write_call("app.py", "new content\n"), final_text("done")])
     await run_repl(backend, "scripted-model", repo, auto_approve=True)
     assert (repo / "app.py").read_text() == "original\n"
@@ -666,7 +758,8 @@ async def test_run_single_shot_reports_a_declined_write(repo, monkeypatch):
     assert result.declined_a_write is True
 
 
-async def test_run_single_shot_with_auto_approve_never_declines(repo):
+async def test_run_single_shot_auto_mode_confirms_overwrite(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     backend = ScriptedBackend([write_call("app.py", "new\n"), final_text("done")])
     result = await run_single_shot(
         backend, "scripted-model", repo, "write something", auto_approve=True
@@ -705,8 +798,11 @@ async def test_run_turn_restarts_the_spinner_after_a_tool_call(repo, monkeypatch
         return orig_start(self)
 
     monkeypatch.setattr(Status, "start", counting_start)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
 
-    backend = ScriptedBackend([write_call("app.py", "content\n"), final_text("done")])
+    backend = ScriptedBackend(
+        [read_call("app.py"), write_call("app.py", "content\n"), final_text("done")]
+    )
     out = console()
     gate = WriteGate(out, repo, auto_approve=True)
     session = AgentSession(
@@ -722,8 +818,15 @@ async def test_run_turn_restarts_the_spinner_after_a_tool_call(repo, monkeypatch
     assert starts >= 2
 
 
-async def test_run_turn_streams_and_auto_commits(repo):
-    backend = ScriptedBackend([write_call("app.py", "streamed content\n"), final_text("done")])
+async def test_run_turn_streams_and_auto_commits(repo, monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    backend = ScriptedBackend(
+        [
+            read_call("app.py"),
+            write_call("app.py", "streamed content\n"),
+            final_text("done"),
+        ]
+    )
     out = console()
     gate = WriteGate(out, repo, auto_approve=True, auto_commit=True)
     session = AgentSession(

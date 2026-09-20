@@ -91,6 +91,7 @@ async def test_single_tool_call_then_final_answer(project):
 async def test_write_file_actually_writes_when_approved(project):
     backend = ScriptedBackend(
         [
+            tool_call("read", "read_file", {"path": "app.py"}),
             tool_call("c1", "write_file", {"path": "app.py", "content": "new content\n"}),
             final_text("updated app.py"),
         ]
@@ -105,6 +106,7 @@ async def test_write_file_actually_writes_when_approved(project):
 async def test_write_file_is_skipped_when_declined(project):
     backend = ScriptedBackend(
         [
+            tool_call("read", "read_file", {"path": "app.py"}),
             tool_call("c1", "write_file", {"path": "app.py", "content": "new content\n"}),
             final_text("ok, left it alone"),
         ]
@@ -115,9 +117,31 @@ async def test_write_file_is_skipped_when_declined(project):
     assert result == "ok, left it alone"
     assert (project / "app.py").read_text() == "old content\n"  # unchanged
 
-    second_request = backend.requests[1]
-    tool_message = next(m for m in second_request["messages"] if m["role"] == "tool")
-    assert "declined" in tool_message["content"]
+    tool_messages = [m for m in backend.requests[-1]["messages"] if m["role"] == "tool"]
+    assert "declined" in tool_messages[-1]["content"]
+
+
+async def test_overwrite_is_rejected_until_that_file_is_read(project):
+    backend = ScriptedBackend(
+        [
+            tool_call("c1", "write_file", {"path": "app.py", "content": "new content\n"}),
+            final_text("could not update it"),
+        ]
+    )
+    confirmations = []
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "update app.py",
+        confirm_write=lambda *args: confirmations.append(args) or True,
+    )
+
+    assert result == "could not update it"
+    assert confirmations == []
+    assert (project / "app.py").read_text() == "old content\n"
+    tool_message = next(m for m in backend.requests[1]["messages"] if m["role"] == "tool")
+    assert "Read 'app.py' successfully" in tool_message["content"]
 
 
 async def test_multiple_tool_calls_in_one_turn_are_all_executed(project):
@@ -286,6 +310,7 @@ async def test_write_confirmation_still_applies_to_a_synthetic_tool_call(project
     """
     backend = ScriptedBackend(
         [
+            tool_call("read", "read_file", {"path": "app.py"}),
             final_text(
                 '{"name": "write_file", "arguments": '
                 '{"path": "app.py", "content": "new content\\n"}}'
@@ -432,8 +457,9 @@ async def test_delegate_task_write_access_is_opt_in_and_still_confirmed(project)
             tool_call(
                 "c1",
                 "delegate_task",
-                {"task": "update app.py", "allowed_tools": ["write_file"]},
+                {"task": "update app.py", "allowed_tools": ["read_file", "write_file"]},
             ),
+            tool_call("read", "read_file", {"path": "app.py"}),
             tool_call("c2", "write_file", {"path": "app.py", "content": "new content\n"}),
             final_text("wrote it"),
             final_text("done"),

@@ -26,7 +26,7 @@ async def test_a_short_session_is_left_alone(db_session, summarizing_settings):
     result = await maybe_summarize(db_session, FakeBackend(), summarizing_settings, "short", "k1")
 
     assert result is None
-    assert await SummaryRepository(db_session).latest("short") is None
+    assert await SummaryRepository(db_session).latest("short", "k1") is None
 
 
 async def test_a_long_session_is_summarized(db_session, summarizing_settings):
@@ -70,7 +70,7 @@ async def test_the_summary_is_stored_as_a_retrievable_chunk(db_session, summariz
     await maybe_summarize(db_session, FakeBackend(), summarizing_settings, "chunked", "k1")
 
     chunks = await EmbeddingRepository(db_session).search(
-        "chunked", await FakeBackend().embed("anything", "fake"), top_k=10
+        "chunked", "k1", await FakeBackend().embed("anything", "fake"), top_k=10
     )
     assert any(chunk.kind == "summary" for chunk in chunks)
 

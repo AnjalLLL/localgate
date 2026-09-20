@@ -74,11 +74,12 @@ async def chat_completions(
     user_text = body.latest_user_text()
 
     messages = await _augment_with_memory(
-        session, backend, settings, session_id, user_text, body.messages
+        session, backend, settings, session_id, api_key.id, user_text, body.messages
     )
     payload = body.to_backend_payload(messages, model)
 
-    key = cache_key(payload)
+    # Cache entries are tenant-scoped even when two keys submit identical prompts.
+    key = cache_key({"_localgate_api_key_id": api_key.id, **payload})
     if settings.cache_enabled:
         hit = cache.get(key)
         if hit is not None:
@@ -170,6 +171,7 @@ async def _augment_with_memory(
     backend: InferenceBackend,
     settings: Settings,
     session_id: str,
+    api_key_id: str,
     user_text: str,
     messages: list[ChatMessage],
 ) -> list[ChatMessage]:
@@ -188,12 +190,13 @@ async def _augment_with_memory(
             session=session,
             backend=backend,
             session_id=session_id,
+            api_key_id=api_key_id,
             query=user_text,
             embedding_model=settings.embedding_model,
             top_k=settings.max_retrieved_chunks,
             min_score=settings.memory_min_score,
         )
-        summary = await SummaryRepository(session).latest(session_id)
+        summary = await SummaryRepository(session).latest(session_id, api_key_id)
     except httpx.HTTPError as exc:
         logger.warning(
             "memory_retrieval_failed",

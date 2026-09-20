@@ -134,7 +134,7 @@ async def test_record_turn_persists_conversation_messages(session_factory, setti
     await memory.record_turn("what does app.py do?", "it defines add()")
 
     async with session_factory() as db_session:
-        messages = await ConversationRepository(db_session).recent("session-1")
+        messages = await ConversationRepository(db_session).recent("session-1", api_key_id)
     assert [m.role for m in messages] == ["user", "assistant"]
     assert messages[0].content == "what does app.py do?"
     assert messages[1].content == "it defines add()"
@@ -162,7 +162,7 @@ async def test_record_turn_skips_memory_chunks_when_disabled(session_factory, se
 
     async with session_factory() as db_session:
         chunks = (await db_session.execute(select(MemoryChunk))).scalars().all()
-        messages = await ConversationRepository(db_session).recent("session-1")
+        messages = await ConversationRepository(db_session).recent("session-1", api_key_id)
     assert chunks == []
     assert len(messages) == 2  # conversation history is kept even with memory off
 

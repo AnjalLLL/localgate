@@ -49,9 +49,30 @@ def status(root: Path) -> str:
     return _run(root, "status", "--porcelain")
 
 
+def status_entries(root: Path) -> list[tuple[str, str]]:
+    """Return porcelain status entries without shell/path quoting ambiguity."""
+    raw = _run(root, "status", "--porcelain", "-z")
+    parts = raw.split("\0")
+    entries: list[tuple[str, str]] = []
+    i = 0
+    while i < len(parts) and parts[i]:
+        item = parts[i]
+        code, path = item[:2], item[3:]
+        if code[0] in "RC" or code[1] in "RC":
+            i += 1  # porcelain -z adds the original rename/copy path next
+        entries.append((code, path))
+        i += 1
+    return entries
+
+
 def diff(root: Path, path: str | None = None) -> str:
     args = ["diff"] if path is None else ["diff", "--", path]
     return _run(root, *args)
+
+
+def diff_paths(root: Path) -> list[str]:
+    raw = _run(root, "diff", "--name-only", "-z")
+    return [path for path in raw.split("\0") if path]
 
 
 def last_commit_message(root: Path) -> str | None:
@@ -66,6 +87,20 @@ def commit_all(root: Path, message: str) -> bool:
     _run(root, "add", "-A")
     try:
         _run(root, "commit", "-m", message)
+    except GitError as exc:
+        if "nothing to commit" in str(exc):
+            return False
+        raise
+    return True
+
+
+def commit_paths(root: Path, message: str, paths: list[str]) -> bool:
+    """Commit only named paths, leaving unrelated index/worktree state alone."""
+    unique = list(dict.fromkeys(paths))
+    if not unique:
+        return False
+    try:
+        _run(root, "commit", "--only", "-m", message, "--", *unique)
     except GitError as exc:
         if "nothing to commit" in str(exc):
             return False

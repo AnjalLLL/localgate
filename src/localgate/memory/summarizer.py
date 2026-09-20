@@ -60,9 +60,9 @@ async def maybe_summarize(
     convo_repo = ConversationRepository(session)
     summary_repo = SummaryRepository(session)
 
-    previous = await summary_repo.latest(session_id)
+    previous = await summary_repo.latest(session_id, api_key_id)
     pending = await convo_repo.messages_after(
-        session_id, previous.covers_until if previous else None
+        session_id, api_key_id, previous.covers_until if previous else None
     )
 
     # Only the messages past the live tail are candidates: the tail is still inside

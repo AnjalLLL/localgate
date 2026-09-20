@@ -184,12 +184,15 @@ class AgentMemory:
                     db_session,
                     self._backend,
                     self.session_id,
+                    self._api_key_id,
                     query,
                     self._settings.embedding_model,
                     top_k=self._settings.max_retrieved_chunks,
                     min_score=self._settings.memory_min_score,
                 )
-                summary = await SummaryRepository(db_session).latest(self.session_id)
+                summary = await SummaryRepository(db_session).latest(
+                    self.session_id, self._api_key_id
+                )
         except httpx.HTTPError as exc:
             # Memory is an enhancement, never a precondition — `chat.py` treats a
             # failed embedding the same way. Most often the embedding model just
@@ -269,5 +272,7 @@ class AgentMemory:
         shape — used by `/resume` to rehydrate `AgentSession.messages`.
         """
         async with self._session_factory() as db_session:
-            messages = await ConversationRepository(db_session).recent(self.session_id, limit=limit)
+            messages = await ConversationRepository(db_session).recent(
+                self.session_id, self._api_key_id, limit=limit
+            )
         return [{"role": m.role, "content": m.content} for m in messages]

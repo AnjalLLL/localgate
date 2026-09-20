@@ -49,14 +49,13 @@ async def get_conversation(
     that was never created look exactly the same.
     """
     convo_repo = ConversationRepository(session)
-    messages = await convo_repo.recent(session_id, limit=limit)
-    owned = [m for m in messages if m.api_key_id == api_key.id]
+    owned = await convo_repo.recent(session_id, api_key.id, limit=limit)
 
     if not owned:
         raise SessionNotFound(f"No conversation {session_id!r} for this API key.")
 
-    summary = await SummaryRepository(session).latest(session_id)
-    chunk_count = await EmbeddingRepository(session).count(session_id)
+    summary = await SummaryRepository(session).latest(session_id, api_key.id)
+    chunk_count = await EmbeddingRepository(session).count(session_id, api_key.id)
 
     return {
         "session_id": session_id,

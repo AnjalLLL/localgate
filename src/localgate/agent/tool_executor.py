@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ from localgate.agent.tools import ToolCallResult, execute_tool_call
 from localgate.config import Settings
 
 READ_ONLY_TOOLS = {"read_file", "list_directory", "search_files", "git_status", "git_diff"}
-WRITE_TOOLS = {"write_file"}
+WRITE_TOOLS = {"write_file", "create_file", "update_file", "delete_file"}
 
 
 def get_tool_timeout(tool_name: str, settings: Settings) -> float:
@@ -35,6 +36,7 @@ async def execute_tool_call_with_timeout(
     name: str,
     arguments: dict[str, Any],
     settings: Settings,
+    executor: Callable[[Path, str, str, dict[str, Any]], ToolCallResult] | None = None,
 ) -> ToolCallResult:
     """Execute a tool call with timeout and return result.
 
@@ -42,12 +44,13 @@ async def execute_tool_call_with_timeout(
     If timeout occurs, returns an error ToolCallResult.
     """
     timeout = get_tool_timeout(name, settings)
+    selected_executor = executor or execute_tool_call
 
     try:
         # Run synchronous tool execution in a thread pool to avoid blocking
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, execute_tool_call, root, tool_call_id, name, arguments),
+            loop.run_in_executor(None, selected_executor, root, tool_call_id, name, arguments),
             timeout=timeout,
         )
         return result

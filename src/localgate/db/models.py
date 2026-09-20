@@ -83,7 +83,9 @@ class ConversationMessage(Base):
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
-    __table_args__ = (Index("ix_message_session_created", "session_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_message_owner_session_created", "api_key_id", "session_id", "created_at"),
+    )
 
 
 class ConversationSummary(Base):
@@ -106,6 +108,10 @@ class ConversationSummary(Base):
     covers_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        Index("ix_summary_owner_session_created", "api_key_id", "session_id", "created_at"),
+    )
 
 
 class MemoryChunk(Base):
@@ -131,6 +137,10 @@ class MemoryChunk(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        Index("ix_memory_owner_session_created", "api_key_id", "session_id", "created_at"),
+    )
 
 
 class ToolCallLog(Base):

@@ -29,6 +29,7 @@ async def test_retrieval_surfaces_the_exact_match_first(db_session):
         session=db_session,
         backend=backend,
         session_id="s1",
+        api_key_id="k1",
         query="Bananas are yellow.",
         embedding_model="fake",
         top_k=1,
@@ -48,8 +49,8 @@ async def test_min_score_drops_weak_matches(db_session):
 
     query_vector = await backend.embed("totally unrelated query", model="fake")
 
-    unfiltered = await repo.search("s2", query_vector, top_k=5, min_score=0.0)
-    filtered = await repo.search("s2", query_vector, top_k=5, min_score=0.99)
+    unfiltered = await repo.search("s2", "k1", query_vector, top_k=5, min_score=0.0)
+    filtered = await repo.search("s2", "k1", query_vector, top_k=5, min_score=0.99)
 
     assert len(unfiltered) == 1
     assert filtered == []
@@ -111,7 +112,16 @@ async def test_memory_is_scoped_to_its_session(db_session):
 
     # Same query vector, different session: it must find nothing. Anything else is a
     # cross-tenant data leak.
-    assert await repo.search("session-B", vector, top_k=5) == []
+    assert await repo.search("session-B", "k1", vector, top_k=5) == []
+
+
+async def test_memory_is_scoped_to_api_key_even_when_session_id_collides(db_session):
+    backend = FakeBackend()
+    repo = EmbeddingRepository(db_session)
+    vector = await backend.embed("owner A secret", model="fake")
+    await repo.add_chunk("shared-session", "key-A", "owner A secret", vector)
+
+    assert await repo.search("shared-session", "key-B", vector, top_k=5) == []
 
 
 def test_recalled_context_is_labelled_and_never_outranks_the_system_prompt():
