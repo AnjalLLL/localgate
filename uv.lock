@@ -977,7 +977,7 @@ wheels = [
 
 [[package]]
 name = "localgate"
-version = "0.10.6"
+version = "0.10.7"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

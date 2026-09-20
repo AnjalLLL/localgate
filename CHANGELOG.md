@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.7] — 2026-09-20
+
+### Fixed
+
+- `localgate code` now opens the interactive REPL even when its configured model lacks tool support,
+  with a warning and access to `/model` for switching. One-shot tasks still fail fast with a clear
+  tool-capability error.
+
 ## [0.10.6] — 2026-09-20
 
 ### Fixed
