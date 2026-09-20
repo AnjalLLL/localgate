@@ -651,7 +651,7 @@ def code(
     (e.g. the model doesn't support tool calling), 6 the backend was
     unreachable, 130 interrupted (Ctrl+C).
     """
-    from localgate.agent.loop import AgentTurnLimitExceeded  # noqa: PLC0415
+    from localgate.agent.loop import AgentToolUseRequired, AgentTurnLimitExceeded  # noqa: PLC0415
     from localgate.agent.mcp import McpRegistry, load_mcp_servers  # noqa: PLC0415
     from localgate.agent.memory import (  # noqa: PLC0415
         AgentMemory,
@@ -753,6 +753,12 @@ def code(
         """
         mcp_registry = McpRegistry()
         try:
+            supports_tools = await backend.check_tool_support(resolved_model)
+            if supports_tools is False:
+                raise AgentToolUseRequired(
+                    f"Model {resolved_model!r} does not advertise tool-calling support; "
+                    "select a tool-capable model with --model."
+                )
             if not no_mcp:
                 configured_servers = load_mcp_servers()
                 if configured_servers:
@@ -827,6 +833,9 @@ def code(
     except AgentTurnLimitExceeded as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=EXIT_MAX_TURNS_EXCEEDED) from exc
+    except AgentToolUseRequired as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_BACKEND_REJECTED) from exc
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
             retry_after = exc.response.headers.get("Retry-After", "unknown")

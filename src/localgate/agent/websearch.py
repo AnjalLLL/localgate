@@ -1,12 +1,14 @@
-"""Optional web search tool for the coding agent — off by default.
+"""Web search providers for the coding agent — DuckDuckGo by default.
 
 Enabling this is the CLI's first outbound dependency on a third-party service
 beyond the user's own inference backend: it sends query text off the user's
-machine. `LOCALGATE_SEARCH_PROVIDER` must be set for the tool to exist at all
-(see `Settings` in `config.py`) — unset means the model never even sees
-`web_search` as an option, not that it exists and silently no-ops.
+machine. The CLI uses DuckDuckGo when `LOCALGATE_SEARCH_PROVIDER` is unset;
+that setting can select a different provider.
 
-Two providers:
+Three providers:
+
+- **`duckduckgo`** (default) — zero-config HTML search. Query text leaves the
+  machine, and manual mode asks before each search.
 
 - **`openserp`** (recommended default) — a self-hosted, MIT-licensed, no-API-key
   search API (github.com/karust/openserp). Runs on the user's own machine/network,

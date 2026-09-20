@@ -27,7 +27,12 @@ from localgate.agent.mcp import McpRegistry
 from localgate.agent.memory import AgentMemory, list_project_sessions, set_current_project_session
 from localgate.agent.render import print_diff
 from localgate.agent.theme import THEMES
-from localgate.agent.tools import ToolCallResult, execute_tool_call
+from localgate.agent.tools import (
+    ToolCallResult,
+    ensure_visible,
+    execute_tool_call,
+    resolve_within,
+)
 from localgate.agent.userconfig import UserConfig
 from localgate.agent.websearch import SearchFn
 from localgate.core.token_counter import count_message_tokens, count_tokens
@@ -167,8 +172,11 @@ class WriteGate:
         #: `mode()`/`set_mode()` below are what let the REPL treat all three
         #: states (manual/auto/plan) as one cycle.
         self.plan_mode = plan_mode
-        self.pending_writes: list[tuple[str, str]] = []
+        self.pending_writes: list[tuple[str, str | None]] = []
         self.is_repo = gitutil.is_repo(root)
+        self._dirty_paths_at_start = (
+            {path for _code, path in gitutil.status_entries(root)} if self.is_repo else set()
+        )
         self._dirty_checked = False
         self.last_written_path: str | None = None
         self.writes_this_turn: list[str] = []
@@ -212,11 +220,21 @@ class WriteGate:
         )
         return typer.confirm("Continue anyway?", default=False)
 
-    def confirm_write(self, path: str, content: str) -> bool:
+    def _target(self, path: str) -> Path:
+        target = resolve_within(self.root, path)
+        ensure_visible(self.root, target)
+        return target
+
+    def confirm_write(self, path: str, content: str | None) -> bool:
+        """Validate and preview a create/update/delete before it can run."""
+        try:
+            target = self._target(path)
+        except ValueError as exc:
+            self.console.print(f"[red]Refusing unsafe path {path!r}: {exc}[/red]")
+            return False
         if not self._dirty_tree_ok():
             return False
 
-        target = self.root / path
         existed = target.is_file()
         old_content = ""
         if existed:
@@ -228,7 +246,7 @@ class WriteGate:
             self.console,
             path,
             old_content,
-            content,
+            content or "",
             syntax_theme=theme_mod.syntax_theme_for(self.theme_name),
         )
 
@@ -237,10 +255,12 @@ class WriteGate:
             self.console.print(f"[dim]queued for plan review: {path}[/dim]")
             return False
 
-        if self.auto_approve:
+        destructive = existed or content is None
+        if self.auto_approve and not destructive:
             self.checkpoints.append(Checkpoint(path, old_content if existed else None))
             return True
-        approved = typer.confirm(f"Write {path}?", default=False)
+        action = "Delete" if content is None else "Overwrite" if existed else "Create"
+        approved = typer.confirm(f"{action} {path}?", default=False)
         if approved:
             self.checkpoints.append(Checkpoint(path, old_content if existed else None))
         else:
@@ -264,6 +284,13 @@ class WriteGate:
         preview = task if len(task) <= 80 else task[:77] + "..."
         return typer.confirm(f"Delegate sub-task {preview!r}?", default=True)
 
+    def confirm_mcp(self, name: str, arguments: dict[str, Any]) -> bool:
+        """MCP tools are externally supplied, so their side effects are unknown."""
+        preview = str(arguments)
+        if len(preview) > 100:
+            preview = preview[:97] + "..."
+        return typer.confirm(f"Allow MCP tool {name} with {preview}?", default=False)
+
     def flush_plan(self) -> None:
         """Show every write queued this turn together and apply the ones the
         user picks — the batch-review step that makes plan mode different from
@@ -276,7 +303,11 @@ class WriteGate:
             f"[bold]{len(self.pending_writes)} pending write(s) from this plan:[/bold]"
         )
         for path, content in self.pending_writes:
-            target = self.root / path
+            try:
+                target = self._target(path)
+            except ValueError as exc:
+                self.console.print(f"[red]Skipping unsafe path {path!r}: {exc}[/red]")
+                continue
             old_content = ""
             if target.is_file():
                 try:
@@ -287,7 +318,7 @@ class WriteGate:
                 self.console,
                 path,
                 old_content,
-                content,
+                content or "",
                 syntax_theme=theme_mod.syntax_theme_for(self.theme_name),
             )
 
@@ -305,7 +336,10 @@ class WriteGate:
             selected = []
 
         for path, content in selected:
-            target = self.root / path
+            try:
+                target = self._target(path)
+            except ValueError:
+                continue
             existed = target.is_file()
             old_content = ""
             if existed:
@@ -313,9 +347,9 @@ class WriteGate:
                     old_content = target.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     old_content = ""
-            result = execute_tool_call(
-                self.root, "plan-apply", "write_file", {"path": path, "content": content}
-            )
+            operation = "delete_file" if content is None else "write_file"
+            arguments = {"path": path} if content is None else {"path": path, "content": content}
+            result = execute_tool_call(self.root, "plan-apply", operation, arguments)
             if not result.is_error:
                 self.checkpoints.append(Checkpoint(path, old_content if existed else None))
                 self.last_written_path = path
@@ -330,7 +364,10 @@ class WriteGate:
     ) -> ToolCallResult:
         """Wraps the default tool executor to record successful writes."""
         result = execute_tool_call(root, tool_call_id, name, arguments)
-        if name == "write_file" and not result.is_error:
+        if (
+            name in {"write_file", "create_file", "update_file", "delete_file"}
+            and not result.is_error
+        ):
             path = arguments.get("path", "?")
             self.last_written_path = path
             self.writes_this_turn.append(path)
@@ -339,24 +376,46 @@ class WriteGate:
     def after_turn(self, summary: str) -> None:
         """Auto-commit whatever was written this turn, if that's enabled."""
         if self.auto_commit and self.is_repo and self.writes_this_turn:
+            safe_paths = [
+                path for path in self.writes_this_turn if path not in self._dirty_paths_at_start
+            ]
+            skipped = sorted(set(self.writes_this_turn) - set(safe_paths))
+            if skipped:
+                self.console.print(
+                    "[yellow]Not auto-committing paths that were already dirty: "
+                    f"{', '.join(skipped)}[/yellow]"
+                )
             message = f"{gitutil.AGENT_COMMIT_PREFIX} {summary[:60]}"
-            gitutil.commit_all(self.root, message)
+            if safe_paths:
+                gitutil.commit_paths(self.root, message, safe_paths)
         self.writes_this_turn = []
 
     def undo(self) -> str:
-        if not self.is_repo:
-            return "Not a git repository — nothing to undo automatically."
-        if self.auto_commit:
-            message = gitutil.last_commit_message(self.root)
-            if message is None or not message.startswith(gitutil.AGENT_COMMIT_PREFIX):
-                return "The last commit wasn't made by the agent — refusing to reset it."
-            gitutil.reset_hard_last(self.root)
-            return f"Reset the last agent commit: {message}"
-        if self.last_written_path is None:
+        if not self.checkpoints:
             return "Nothing written yet this session to undo."
-        outcome = gitutil.undo_file(self.root, self.last_written_path)
+        checkpoint = self.checkpoints.pop()
+        self._restore_checkpoint(checkpoint)
         self.last_written_path = None
-        return outcome
+        if self.auto_commit and self.is_repo:
+            gitutil.commit_paths(
+                self.root,
+                f"{gitutil.AGENT_COMMIT_PREFIX} undo {checkpoint.path}",
+                [checkpoint.path],
+            )
+        return f"Restored {checkpoint.path} to its pre-agent state."
+
+    def _restore_checkpoint(self, checkpoint: Checkpoint) -> None:
+        target = self._target(checkpoint.path)
+        if checkpoint.previous_content is None:
+            if target.exists():
+                target.unlink()
+        else:
+            execute_tool_call(
+                self.root,
+                "checkpoint-restore",
+                "write_file",
+                {"path": checkpoint.path, "content": checkpoint.previous_content},
+            )
 
     def rewind(self, steps: int = 1) -> str:
         """Step back through the last `steps` checkpoints, restoring each file's
@@ -372,13 +431,7 @@ class WriteGate:
         reverted: list[str] = []
         for _ in range(steps):
             checkpoint = self.checkpoints.pop()
-            target = self.root / checkpoint.path
-            if checkpoint.previous_content is None:
-                if target.exists():
-                    target.unlink()
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(checkpoint.previous_content, encoding="utf-8")
+            self._restore_checkpoint(checkpoint)
             reverted.append(checkpoint.path)
         return f"Rewound {len(reverted)} checkpoint(s): {', '.join(reverted)}"
 
@@ -620,6 +673,9 @@ def _print_tools(console: Console, session: AgentSession) -> None:
     """
     builtin = [
         "read_file",
+        "create_file",
+        "update_file",
+        "delete_file",
         "write_file",
         "list_directory",
         "search_files",
@@ -634,7 +690,7 @@ def _print_tools(console: Console, session: AgentSession) -> None:
         console.print("[dim]delegate_task: disabled — enable with --allow-delegation[/dim]")
 
     if session.search_fn is not None:
-        console.print("[bold]web_search:[/bold] enabled")
+        console.print("[bold]web_search:[/bold] enabled (DuckDuckGo by default)")
     else:
         console.print("[dim]web_search: disabled — enable with LOCALGATE_SEARCH_PROVIDER[/dim]")
 
@@ -828,6 +884,7 @@ async def run_repl(
         confirm_write=gate.confirm_write,
         confirm_search=gate.confirm_search,
         confirm_delegate=gate.confirm_delegate,
+        confirm_mcp=gate.confirm_mcp,
         tool_executor=gate.tracking_executor,
         max_turns=max_turns,
         allow_delegation=allow_delegation,
@@ -1050,6 +1107,7 @@ async def run_single_shot(
         confirm_write=gate.confirm_write,
         confirm_search=gate.confirm_search,
         confirm_delegate=gate.confirm_delegate,
+        confirm_mcp=gate.confirm_mcp,
         tool_executor=gate.tracking_executor,
         max_turns=max_turns,
         allow_delegation=allow_delegation,

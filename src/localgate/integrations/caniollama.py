@@ -106,9 +106,7 @@ class CaniollamaClient:
             return None
         except Exception as exc:
             # Catch-all for parse errors, etc. — never let this raise into the picker
-            logger.warning(
-                "unexpected error fetching caniollama data", model=model, error=str(exc)
-            )
+            logger.warning("unexpected error fetching caniollama data", model=model, error=str(exc))
             return None
 
     async def aclose(self) -> None:

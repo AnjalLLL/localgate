@@ -23,6 +23,14 @@ CODING_AGENT_PLAN_PHASE8_SUBAGENTS.md
 NEW_FEATURES.md
 UPDATE_EXISTING_FEATURES.md
 see-update-existing-features-md-and-new-kind-cray.md
+CANIOLLAMA_FAQ.md
+CANIOLLAMA_INTEGRATION.md
+LOCALGATE_CANIOLLAMA_INTEGRATION_PLAN.md
+RELEASE_TEST_RESULTS.md
+
+# Local agent state and history-rewrite deliverables
+.localgate/
+history-rewrite/
 
 # Local codegen / patch scratch scripts
 apply_*.sh

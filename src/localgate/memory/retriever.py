@@ -13,6 +13,7 @@ async def retrieve_relevant_context(
     session: AsyncSession,
     backend: InferenceBackend,
     session_id: str,
+    api_key_id: str,
     query: str,
     embedding_model: str,
     top_k: int = 5,
@@ -28,4 +29,6 @@ async def retrieve_relevant_context(
         return []
     query_embedding = await embed_text(backend, query, embedding_model)
     repo = EmbeddingRepository(session)
-    return await repo.search(session_id, query_embedding, top_k=top_k, min_score=min_score)
+    return await repo.search(
+        session_id, api_key_id, query_embedding, top_k=top_k, min_score=min_score
+    )

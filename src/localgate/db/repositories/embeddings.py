@@ -72,6 +72,7 @@ class EmbeddingRepository:
     async def search(
         self,
         session_id: str,
+        api_key_id: str,
         query_embedding: list[float],
         top_k: int = 5,
         min_score: float = 0.0,
@@ -84,7 +85,10 @@ class EmbeddingRepository:
         noise. Dropping everything below the floor means an irrelevant memory is no
         memory at all.
         """
-        stmt = select(MemoryChunk).where(MemoryChunk.session_id == session_id)
+        stmt = select(MemoryChunk).where(
+            MemoryChunk.session_id == session_id,
+            MemoryChunk.api_key_id == api_key_id,
+        )
         chunks = (await self.session.execute(stmt)).scalars().all()
 
         scored = [
@@ -98,6 +102,9 @@ class EmbeddingRepository:
         scored.sort(key=lambda c: c.score, reverse=True)
         return [c for c in scored if c.score >= min_score][:top_k]
 
-    async def count(self, session_id: str) -> int:
-        stmt = select(func.count(MemoryChunk.id)).where(MemoryChunk.session_id == session_id)
+    async def count(self, session_id: str, api_key_id: str) -> int:
+        stmt = select(func.count(MemoryChunk.id)).where(
+            MemoryChunk.session_id == session_id,
+            MemoryChunk.api_key_id == api_key_id,
+        )
         return int((await self.session.execute(stmt)).scalar_one())

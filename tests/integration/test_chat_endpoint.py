@@ -20,6 +20,37 @@ async def test_chat_completion_roundtrip(client, auth_headers):
     assert body["usage"]["total_tokens"] > 0
 
 
+async def test_same_session_id_is_isolated_between_api_keys(client, admin_headers, auth_headers):
+    second = await client.post("/admin/keys", headers=admin_headers, json={"name": "second-key"})
+    second_headers = {"Authorization": f"Bearer {second.json()['api_key']}"}
+    session = "shared-client-session"
+    body_a = {
+        "model": "fake-model",
+        "messages": [{"role": "user", "content": "secret owned by key A"}],
+    }
+    body_b = {
+        "model": "fake-model",
+        "messages": [{"role": "user", "content": "secret owned by key B"}],
+    }
+    await client.post(
+        "/v1/chat/completions",
+        headers={**auth_headers, "X-Session-Id": session},
+        json=body_a,
+    )
+    await client.post(
+        "/v1/chat/completions",
+        headers={**second_headers, "X-Session-Id": session},
+        json=body_b,
+    )
+
+    history_a = (await client.get(f"/v1/conversations/{session}", headers=auth_headers)).json()
+    history_b = (await client.get(f"/v1/conversations/{session}", headers=second_headers)).json()
+    text_a = " ".join(message["content"] for message in history_a["messages"])
+    text_b = " ".join(message["content"] for message in history_b["messages"])
+    assert "key A" in text_a and "key B" not in text_a
+    assert "key B" in text_b and "key A" not in text_b
+
+
 async def test_missing_auth_is_rejected_in_the_openai_error_shape(client):
     """The OpenAI SDK parses failures out of {"error": {...}}. FastAPI's default
     {"detail": ...} envelope would reach those clients as an unreadable error."""

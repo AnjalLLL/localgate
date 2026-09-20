@@ -10,6 +10,8 @@ import pytest
 from localgate.agent.tools import (
     IgnoredPathError,
     PathEscapeError,
+    create_file,
+    delete_file,
     execute_tool_call,
     git_diff,
     git_status,
@@ -17,6 +19,7 @@ from localgate.agent.tools import (
     read_file,
     resolve_within,
     search_files,
+    update_file,
     write_file,
 )
 
@@ -67,6 +70,29 @@ def test_write_file_creates_parent_dirs(project):
 def test_write_file_overwrites_existing(project):
     write_file(project, "README.md", "# replaced\n")
     assert (project / "README.md").read_text() == "# replaced\n"
+
+
+def test_explicit_create_update_delete_contracts(project):
+    create_file(project, "new.txt", "one")
+    with pytest.raises(FileExistsError):
+        create_file(project, "new.txt", "two")
+    update_file(project, "new.txt", "two")
+    assert (project / "new.txt").read_text() == "two"
+    delete_file(project, "new.txt")
+    assert not (project / "new.txt").exists()
+    with pytest.raises(FileNotFoundError):
+        update_file(project, "new.txt", "three")
+
+
+def test_all_file_tools_reject_symlink_paths(project, tmp_path):
+    outside = tmp_path.parent / "outside-secret.txt"
+    outside.write_text("do not leak")
+    (project / "link.txt").symlink_to(outside)
+    with pytest.raises(PathEscapeError):
+        read_file(project, "link.txt")
+    with pytest.raises(PathEscapeError):
+        write_file(project, "link.txt", "overwrite")
+    assert "link.txt" not in list_directory(project)
 
 
 def test_list_directory_lists_root_by_default(project):
@@ -160,6 +186,13 @@ def test_search_files_returns_no_matches_message_via_execute(project):
     assert not result.is_error
 
 
+def test_search_files_does_not_follow_file_symlinks(project, tmp_path):
+    outside = tmp_path.parent / "outside-search-secret.txt"
+    outside.write_text("UNIQUE_OUTSIDE_SECRET")
+    (project / "linked-secret.txt").symlink_to(outside)
+    assert search_files(project, "UNIQUE_OUTSIDE_SECRET") == []
+
+
 # --------------------------------------------------------------------- git tools
 
 
@@ -203,3 +236,17 @@ def test_git_diff_shows_pending_changes(project):
     (project / "README.md").write_text("changed\n")
     diff = git_diff(project, "README.md")
     assert "+changed" in diff
+
+
+def test_git_diff_hides_tracked_files_added_to_localgateignore(project):
+    (project / "private.txt").write_text("before\n")
+    _git(project, "init", "-q")
+    _git(project, "config", "user.email", "test@example.com")
+    _git(project, "config", "user.name", "Test")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-q", "-m", "initial")
+    (project / ".localgateignore").write_text("private.txt\n")
+    (project / "private.txt").write_text("TOP_SECRET_CHANGE\n")
+    diff = git_diff(project)
+    assert "TOP_SECRET_CHANGE" not in diff
+    assert "private.txt" not in diff

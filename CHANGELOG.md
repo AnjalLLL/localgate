@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.5] — 2026-09-20
+
+### Security
+
+- Confine every file operation to the selected workspace, reject symlink traversal, and apply ignore
+  rules consistently to search, status, and diff output.
+- Validate mutation targets before previewing existing content and use atomic file replacement.
+- Scope conversations, summaries, prompt-cache entries, and retrieved memory by both API key and
+  session ID.
+
+### Fixed
+
+- Timed writes now pass through write tracking, preserving summaries, undo, and auto-commit behavior.
+- Auto-commit includes only exact agent-written paths and excludes files dirty before the session.
+- `/undo` restores pre-agent checkpoints instead of discarding existing human edits or resetting Git.
+- Mutation requests that repeatedly produce no tool calls now fail clearly instead of reporting false
+  success. Models without advertised tool capability are rejected before a CLI session starts.
+
+### Added
+
+- Explicit `create_file`, `update_file`, and `delete_file` tools, with same-task read requirements for
+  updates, deletes, and legacy full-file overwrites.
+- Destructive confirmation for overwrites and deletes even in auto mode, plus confirmation for
+  externally supplied MCP tools.
+- Compound owner/session indexes and regression coverage for cross-key session collisions.
+
 ## [0.8.0] — 2026-07-26
 
 This release makes localgate properly installable and self-hostable for anyone who isn't

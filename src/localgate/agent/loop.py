@@ -31,9 +31,11 @@ from localgate.agent.tools import (
     READ_ONLY_TOOL_NAMES,
     TOOL_SCHEMAS,
     ToolCallResult,
+    ensure_visible,
     execute_tool_call,
     list_directory,
     read_file,
+    resolve_within,
 )
 from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
@@ -42,7 +44,7 @@ SYSTEM_PROMPT = (
     "You are a coding agent. Execute tasks by calling tools.\n"
     "RULES:\n"
     "- Call ONE tool per response. No explanation, no markdown, no code blocks.\n"
-    "- read_file BEFORE write_file. Always read first, then write the full file.\n"
+    "- read_file BEFORE update_file, delete_file, or overwriting with write_file.\n"
     "- Write COMPLETE code. No placeholders like '/* add here */' or '...'.\n"
     "- When finished, say only: Done: <1 sentence summary>\n"
     'FORMAT: {"name": "tool_name", "arguments": {...}}\n'
@@ -76,6 +78,11 @@ _SEARCH_GUIDANCE = (
 #: otherwise-identical live requests, so a fixed tag name isn't reliable.
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 _TAG_RE = re.compile(r"^<(\w+)>\s*(.*?)\s*</\1>$", re.DOTALL)
+_MUTATION_REQUEST_RE = re.compile(
+    r"\b(add|build|change|create|delete|edit|fix|implement|modify|move|refactor|"
+    r"remove|rename|replace|update|write)\b",
+    re.IGNORECASE,
+)
 #: Matches a JSON object embedded anywhere in prose — used as a fallback when the
 #: whole-string parse fails but the model clearly emitted a tool call inside text.
 _EMBEDDED_JSON_RE = re.compile(
@@ -275,8 +282,12 @@ class AgentTurnLimitExceeded(RuntimeError):
     """Raised when the model keeps calling tools without ever finishing a turn."""
 
 
+class AgentToolUseRequired(RuntimeError):
+    """Raised when a coding model repeatedly answers without using project tools."""
+
+
 #: Called before a write_file call actually runs: (path, new_content) -> proceed?
-ConfirmWrite = Callable[[str, str], bool]
+ConfirmWrite = Callable[[str, str | None], bool]
 #: Called with a short human-readable line as each tool call happens.
 OnEvent = Callable[[str], None]
 #: Called with each streamed text fragment as the model produces it.
@@ -384,6 +395,7 @@ class AgentSession:
         confirm_write: ConfirmWrite | None = None,
         confirm_search: Callable[[str], bool] | None = None,
         confirm_delegate: Callable[[str], bool] | None = None,
+        confirm_mcp: Callable[[str, dict[str, Any]], bool] | None = None,
         on_event: OnEvent | None = None,
         on_token: OnToken | None = None,
         max_turns: int = 20,
@@ -407,6 +419,7 @@ class AgentSession:
         #: already-approved delegation).
         self.confirm_search = confirm_search
         self.confirm_delegate = confirm_delegate
+        self.confirm_mcp = confirm_mcp
         self.on_event = on_event
         self.on_token = on_token
         self.max_turns = max_turns
@@ -433,6 +446,9 @@ class AgentSession:
         self.settings = settings
         self.session_id = session_id or str(uuid.uuid4())
         self.tool_tracker = ToolCallTracker()
+        self._task_tool_calls = 0
+        self._task_mutations = 0
+        self._read_paths: set[str] = set()
         self._known_tool_names = frozenset(s["function"]["name"] for s in self.tool_schemas)
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt()}]
 
@@ -491,6 +507,12 @@ class AgentSession:
         Output is buffered silently during the tool loop — only tool events
         (via on_event) are shown. The final answer is streamed at the end.
         """
+        require_tool_evidence = self.auto_read and bool(_MUTATION_REQUEST_RE.search(user_input))
+        self.tool_tracker = ToolCallTracker()
+        self._task_tool_calls = 0
+        self._task_mutations = 0
+        self._read_paths = set()
+        prose_without_tools = 0
         if len(self.messages) == 1:
             context = self._build_project_context()
             if context:
@@ -551,11 +573,24 @@ class AgentSession:
             self.messages.append(message)
 
             if not tool_calls:
-                if self.auto_read and not self._has_done_work():
-                    first = self._pick_first_file()
-                    if first:
-                        await self._force_read(first)
+                if require_tool_evidence and self._task_tool_calls == 0:
+                    prose_without_tools += 1
+                    if prose_without_tools == 1:
+                        self.messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "You have not used a project tool for this task. Inspect the "
+                                    "workspace and perform the requested action with tools. Do not "
+                                    "claim completion without tool evidence."
+                                ),
+                            }
+                        )
                         continue
+                    raise AgentToolUseRequired(
+                        "The selected model answered without using project tools twice; "
+                        "choose a model with reliable tool-calling support."
+                    )
                 # Final answer — show it to user
                 if self.on_token and content:
                     self.on_token(content)
@@ -567,14 +602,10 @@ class AgentSession:
             # Count read/write operations
             read_count = sum(
                 1
-                for m in self.messages
-                if m.get("role") == "tool" and m.get("name") in READ_ONLY_TOOL_NAMES
+                for name, success, _ in self.tool_tracker.history
+                if success and name in READ_ONLY_TOOL_NAMES
             )
-            write_count = sum(
-                1
-                for m in self.messages
-                if m.get("role") == "tool" and m.get("name") == "write_file"
-            )
+            write_count = self._task_mutations
 
             # Check for stuck loop before continuing
             if self.tool_tracker.is_stuck_loop():
@@ -611,7 +642,7 @@ class AgentSession:
 
     def _has_done_work(self) -> bool:
         """Check if any tool calls have been made in this conversation."""
-        return any(msg.get("role") == "tool" for msg in self.messages)
+        return self._task_tool_calls > 0
 
     def _pick_first_file(self) -> str | None:
         """Pick the most relevant file to auto-read from the project root."""
@@ -661,6 +692,7 @@ class AgentSession:
                 "content": content,
             }
         )
+        self._read_paths.add(first)
         if self.on_event is not None:
             self.on_event(f"read_file(path={first!r})")
 
@@ -695,6 +727,7 @@ class AgentSession:
                 "content": content,
             }
         )
+        self._read_paths.add(path)
         if self.on_event is not None:
             self.on_event(f"read_file(path={path!r})")
         self.messages.append(
@@ -711,6 +744,7 @@ class AgentSession:
         fn = call["function"]
         name = fn["name"]
         arguments = _parse_arguments(fn.get("arguments", ""))
+        self._task_tool_calls += 1
 
         if name not in self._known_tool_names:
             # Not just a typo guard: this is the actual boundary that keeps a
@@ -726,9 +760,32 @@ class AgentSession:
                 "content": f"Unknown tool: {name}",
             }
 
-        if name == "write_file" and self.confirm_write is not None:
+        needs_prior_read = name in {"update_file", "delete_file"}
+        if name == "write_file" and isinstance(arguments.get("path"), str):
+            try:
+                candidate = resolve_within(self.root, arguments["path"])
+                ensure_visible(self.root, candidate)
+                needs_prior_read = candidate.is_file()
+            except ValueError:
+                # The normal confirmation/executor path returns the useful boundary error.
+                pass
+        if needs_prior_read:
+            path = arguments.get("path")
+            if not isinstance(path, str) or path not in self._read_paths:
+                return {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": name,
+                    "content": f"Read {path!r} successfully in this turn before {name}.",
+                }
+
+        if (
+            name in {"write_file", "create_file", "update_file", "delete_file"}
+            and self.confirm_write is not None
+        ):
             path = arguments.get("path", "?")
-            if not self.confirm_write(path, arguments.get("content", "")):
+            content = None if name == "delete_file" else arguments.get("content", "")
+            if not self.confirm_write(path, content):
                 return {
                     "role": "tool",
                     "tool_call_id": call["id"],
@@ -774,12 +831,20 @@ class AgentSession:
                     )
             else:
                 content = await self.search_fn(query) if query else "web_search requires a query."
+            content = str(content or "")
 
             # Track the call
             self.tool_tracker.record(name, "timed out" not in content.lower())
             return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
 
         if is_mcp_tool_name(name) and self.mcp_registry is not None:
+            if self.confirm_mcp is not None and not self.confirm_mcp(name, arguments):
+                return {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": name,
+                    "content": "User declined this MCP tool call.",
+                }
             if self.on_event is not None:
                 self.on_event(f"{name}({_summarize(arguments)})")
 
@@ -794,6 +859,7 @@ class AgentSession:
                     content = f"Tool '{name}' timed out after {timeout}s. Try a simpler operation."
             else:
                 content = await self.mcp_registry.call_tool(name, arguments)
+            content = str(content or "")
 
             # Track the call
             self.tool_tracker.record(name, "timed out" not in content.lower())
@@ -806,7 +872,12 @@ class AgentSession:
         # Execute with timeout if settings are available
         if self.settings is not None:
             result = await execute_tool_call_with_timeout(
-                self.root, call["id"], name, arguments, self.settings
+                self.root,
+                call["id"],
+                name,
+                arguments,
+                self.settings,
+                executor=self.tool_executor,
             )
         else:
             # Fallback to original executor if no settings
@@ -814,6 +885,17 @@ class AgentSession:
 
         # Track the call for stuck detection
         self.tool_tracker.record(name, not result.is_error)
+        if not result.is_error and name == "read_file":
+            path = arguments.get("path")
+            if isinstance(path, str):
+                self._read_paths.add(path)
+        if not result.is_error and name in {
+            "write_file",
+            "create_file",
+            "update_file",
+            "delete_file",
+        }:
+            self._task_mutations += 1
 
         # TODO: Add database logging via dependency injection
         # For now, tool call tracking is done in-memory via self.tool_tracker

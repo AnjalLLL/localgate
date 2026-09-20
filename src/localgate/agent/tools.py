@@ -20,7 +20,9 @@ not as a peer to these four read/write tools.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,48 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "description": "Path relative to the project root, e.g. 'src/app.py'.",
                     }
                 },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_file",
+            "description": "Create a new text file. Fails if the path already exists.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project-relative path."},
+                    "content": {"type": "string", "description": "Complete file contents."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_file",
+            "description": "Replace an existing text file after reading it first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project-relative path."},
+                    "content": {"type": "string", "description": "Complete new contents."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete an existing file after reading it first.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Project-relative path."}},
                 "required": ["path"],
             },
         },
@@ -209,8 +253,25 @@ def resolve_within(root: Path, relative: str) -> Path:
     Handles both `../` traversal and absolute paths (which `Path.__truediv__`
     would otherwise happily accept, silently discarding ``root``).
     """
+    if not isinstance(relative, str) or not relative or "\x00" in relative:
+        raise PathEscapeError("path must be a non-empty string without NUL bytes")
+    raw = Path(relative)
+    if raw.is_absolute():
+        raise PathEscapeError(f"absolute paths are not allowed: {relative!r}")
+
     root = root.resolve()
-    candidate = (root / relative).resolve()
+    lexical = root / raw
+    # Reject every existing symlink component, even one that resolves back inside
+    # the root. This keeps the policy stable if a link target changes later.
+    current = root
+    for part in raw.parts:
+        if part in ("", "."):
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise PathEscapeError(f"symlinks are not allowed in tool paths: {relative!r}")
+
+    candidate = lexical.resolve()
     with contextlib.suppress(ValueError):
         candidate.relative_to(root)
         return candidate
@@ -219,8 +280,10 @@ def resolve_within(root: Path, relative: str) -> Path:
 
 def ensure_visible(root: Path, candidate: Path) -> None:
     """Refuse a path excluded by `.gitignore`/`.localgateignore` (or inside `.git`)."""
+    root = root.resolve()
+    candidate = candidate.resolve()
     if is_ignored(root, candidate, load_patterns(root)):
-        relative = candidate.relative_to(root.resolve())
+        relative = candidate.relative_to(root)
         raise IgnoredPathError(f"{relative} is excluded by .gitignore/.localgateignore")
 
 
@@ -232,11 +295,55 @@ def read_file(root: Path, path: str) -> str:
     return target.read_text(encoding="utf-8", errors="replace")
 
 
+def _atomic_write(target: Path, content: str) -> None:
+    """Write text without exposing a partially truncated destination."""
+    mode = target.stat().st_mode & 0o777 if target.exists() else None
+    fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temp_name, mode)
+        os.replace(temp_name, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_name)
+
+
 def write_file(root: Path, path: str, content: str) -> None:
     target = resolve_within(root, path)
     ensure_visible(root, target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    # Re-resolve after mkdir to close the obvious symlink-swap window.
+    target = resolve_within(root, path)
+    ensure_visible(root, target)
+    _atomic_write(target, content)
+
+
+def create_file(root: Path, path: str, content: str) -> None:
+    target = resolve_within(root, path)
+    ensure_visible(root, target)
+    if target.exists():
+        raise FileExistsError(f"Path already exists: {path}")
+    write_file(root, path, content)
+
+
+def update_file(root: Path, path: str, content: str) -> None:
+    target = resolve_within(root, path)
+    ensure_visible(root, target)
+    if not target.is_file():
+        raise FileNotFoundError(f"No such file: {path}")
+    write_file(root, path, content)
+
+
+def delete_file(root: Path, path: str) -> None:
+    target = resolve_within(root, path)
+    ensure_visible(root, target)
+    if not target.is_file():
+        raise FileNotFoundError(f"No such file: {path}")
+    target.unlink()
 
 
 def list_directory(root: Path, path: str = ".") -> list[str]:
@@ -250,7 +357,7 @@ def list_directory(root: Path, path: str = ".") -> list[str]:
     return [
         f"{entry.name}/" if entry.is_dir() else entry.name
         for entry in entries
-        if not is_ignored(root, entry, patterns)
+        if not entry.is_symlink() and not is_ignored(root, entry, patterns)
     ]
 
 
@@ -267,7 +374,14 @@ def search_files(root: Path, pattern: str, path: str = ".", max_results: int = 2
     results: list[str] = []
 
     for file_path in sorted(start.rglob("*")):
-        if not file_path.is_file() or is_ignored(root, file_path, patterns):
+        if file_path.is_symlink() or not file_path.is_file():
+            continue
+        try:
+            canonical = file_path.resolve(strict=True)
+            canonical.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if is_ignored(root, canonical, patterns):
             continue
         try:
             raw = file_path.read_bytes()
@@ -291,15 +405,38 @@ def search_files(root: Path, pattern: str, path: str = ".", max_results: int = 2
 def git_status(root: Path) -> str:
     if not gitutil.is_repo(root):
         return "Not a git repository."
-    return gitutil.status(root) or "Working tree clean."
+    root = root.resolve()
+    patterns = load_patterns(root)
+    visible: list[str] = []
+    for status_code, path in gitutil.status_entries(root):
+        try:
+            target = resolve_within(root, path)
+        except ValueError:
+            continue
+        if not is_ignored(root, target, patterns):
+            visible.append(f"{status_code} {path}")
+    return "\n".join(visible) or "Working tree clean."
 
 
 def git_diff(root: Path, path: str | None = None) -> str:
     if not gitutil.is_repo(root):
         return "Not a git repository."
+    root = root.resolve()
     if path is not None:
         ensure_visible(root, resolve_within(root, path))
-    return gitutil.diff(root, path) or "No changes."
+        return gitutil.diff(root, path) or "No changes."
+    patterns = load_patterns(root)
+    chunks: list[str] = []
+    for changed in gitutil.diff_paths(root):
+        try:
+            target = resolve_within(root, changed)
+        except ValueError:
+            continue
+        if not is_ignored(root, target, patterns):
+            diff = gitutil.diff(root, changed)
+            if diff:
+                chunks.append(diff)
+    return "".join(chunks) or "No changes."
 
 
 @dataclass(frozen=True)
@@ -327,6 +464,15 @@ def execute_tool_call(
         elif name == "write_file":
             write_file(root, arguments["path"], arguments["content"])
             content = f"Wrote {len(arguments['content'])} bytes to {arguments['path']}"
+        elif name == "create_file":
+            create_file(root, arguments["path"], arguments["content"])
+            content = f"Created {arguments['path']}"
+        elif name == "update_file":
+            update_file(root, arguments["path"], arguments["content"])
+            content = f"Updated {arguments['path']}"
+        elif name == "delete_file":
+            delete_file(root, arguments["path"])
+            content = f"Deleted {arguments['path']}"
         elif name == "list_directory":
             content = "\n".join(list_directory(root, arguments.get("path", ".")))
         elif name == "search_files":

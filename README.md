@@ -187,20 +187,21 @@ backend directly rather than through the gateway.
 ```bash
 localgate code                                    # REPL — run /help once inside for the full list
 localgate code "fix the off-by-one in parser.py"   # one-shot
-localgate code "..." --auto-approve --auto-commit  # unattended, with every write committed
+localgate code "..." --auto-approve --auto-commit  # auto-create; confirm overwrites/deletes
 localgate code --plan                              # writes are queued and reviewed as a batch
 ```
 
-- Every write is shown as a colored diff and asks for confirmation, unless `--auto-approve`.
+- Every mutation is shown as a colored diff. Manual mode confirms all mutations;
+  `--auto-approve` skips confirmation only for new files, while overwrites and deletes remain gated.
 - **Write modes** — manual (default), auto-accept (`--auto-approve`), and plan (`--plan`: writes
   are queued during the turn and applied as one all/none/pick-individually batch at the end).
   In a real terminal, **Shift+Tab cycles between the three live**; `/mode` is the same toggle
   for terminals where that key doesn't come through, or to set it non-interactively.
 - On a dirty working tree, it warns once before writing anything (`--force` to skip).
-- `--auto-commit` commits each turn's writes, tagged `localgate-agent:`. `/undo` reverts the last
-  write (or the last agent commit, with `--auto-commit`) via git; `/rewind [n]` steps back
-  through the last `n` writes directly (independent of `--auto-commit` — every write gets a
-  checkpoint, not just committed ones).
+- `--auto-commit` commits only the exact paths written in that turn, tagged `localgate-agent:`;
+  unrelated human changes are never staged. `/undo` restores the last file's pre-agent checkpoint
+  (and records a restoration commit when auto-commit is on), while `/rewind [n]` restores the last
+  `n` checkpoints without resetting Git history.
 - `/model` opens a picker (name, size, quantization); `/model <name>` switches directly, with a
   warning before a mid-session switch and a check for tool-calling support first.
 - `/theme [dark|light|none]`, `--no-color`/`NO_COLOR`, and `/config` for persisted preferences
@@ -209,9 +210,11 @@ localgate code --plan                              # writes are queued and revie
 - `/usage` (session token/request totals), `/context` (how full the conversation is vs. the
   model's context window), `/resume` (pick a past session for this project to continue), `/tools`
   (everything available this session, and what's off and why).
-- Tools: `read_file`, `write_file`, `list_directory`, `search_files` (grep-like), `git_status`,
-  `git_diff`. All confined to the project directory; `.gitignore` and `.localgateignore` keep
-  secrets and generated directories out of the model's reach. No shell/`run_command` tool.
+- Tools: `read_file`, `create_file`, `update_file`, `delete_file`, `write_file`, `list_directory`,
+  `search_files` (grep-like), `git_status`, and `git_diff`. All are confined to the selected
+  project directory; symlink traversal is rejected, atomic replacement prevents partial writes,
+  and `.gitignore`/`.localgateignore` hide excluded content from reads, searches, status, and diffs.
+  There is no shell/`run_command` tool: it stays disabled until a strong OS sandbox is available.
 - **What decides when the agent searches, delegates, or writes?** The model does — there's no
   separate routing logic. Each tool's own description is the primary steering (e.g. `write_file`'s
   says to read a file first; `web_search`'s says to only use it for things not in the project or
@@ -219,7 +222,8 @@ localgate code --plan                              # writes are queued and revie
   the system prompt, but only when that tool is actually enabled for the session — see
   `AgentSession.system_prompt()` in `agent/loop.py`. In **manual** write-mode (the default —
   `/mode`, shift+tab), a search or delegation asks for confirmation first, same as a write;
-  auto/plan mode run both without asking.
+  auto/plan mode run both without asking. Web search is available by default through DuckDuckGo
+  unless another provider is configured.
 - **Sub-agents** (`--allow-delegation`, off by default): the agent can hand off a self-contained
   sub-task to a fresh, isolated sub-agent and get back only its summary. Read-only tools unless
   the delegating call explicitly grants more; a sub-agent cannot itself delegate (depth 1). Test
