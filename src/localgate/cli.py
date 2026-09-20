@@ -755,9 +755,16 @@ def code(
         try:
             supports_tools = await backend.check_tool_support(resolved_model)
             if supports_tools is False:
-                raise AgentToolUseRequired(
+                message = (
                     f"Model {resolved_model!r} does not advertise tool-calling support; "
                     "select a tool-capable model with --model."
+                )
+                if task is not None:
+                    raise AgentToolUseRequired(message)
+                typer.secho(
+                    message + " Use /model inside the REPL to switch models.",
+                    fg=typer.colors.YELLOW,
+                    err=True,
                 )
             if not no_mcp:
                 configured_servers = load_mcp_servers()
