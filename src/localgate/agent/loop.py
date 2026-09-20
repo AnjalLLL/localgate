@@ -40,6 +40,18 @@ from localgate.agent.tools import (
 from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
 
+
+def _normalize_backend_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize empty assistant tool-call content for Ollama compatibility."""
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        if "content" in item and item["content"] is None:
+            item["content"] = ""
+        normalized.append(item)
+    return normalized
+
+
 SYSTEM_PROMPT = (
     "You are a coding agent. Execute tasks by calling tools.\n"
     "RULES:\n"
@@ -528,7 +540,7 @@ class AgentSession:
             outgoing = await self.augment(self.messages) if self.augment else self.messages
             payload = {
                 "model": self.model,
-                "messages": outgoing,
+                "messages": _normalize_backend_messages(outgoing),
                 "tools": self.tool_schemas,
                 "max_tokens": 4096,
             }
