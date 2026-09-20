@@ -798,6 +798,12 @@ async def run_turn(
             status.stop()
             stopped = True
 
+    def restart() -> None:
+        nonlocal stopped
+        status.update("[dim]working...[/dim]")
+        status.start()
+        stopped = False
+
     def on_token(text: str) -> None:
         stop()
         console.print(text, end="")
@@ -809,9 +815,31 @@ async def run_turn(
             console.print(f"[bold green]  ✓ {line}[/bold green]")
         else:
             console.print(f"[cyan]  → {line}[/cyan]")
-        status.update("[dim]working...[/dim]")
-        status.start()
-        stopped = False
+        restart()
+
+    original_confirm_write = session.confirm_write
+    original_confirm_search = session.confirm_search
+    original_confirm_delegate = session.confirm_delegate
+    original_confirm_mcp = session.confirm_mcp
+
+    def with_visible_prompt(callback: Any) -> Any:
+        def visible(*args: Any, **kwargs: Any) -> bool:
+            stop()
+            try:
+                return bool(callback(*args, **kwargs))
+            finally:
+                restart()
+
+        return visible
+
+    if original_confirm_write is not None:
+        session.confirm_write = with_visible_prompt(original_confirm_write)
+    if original_confirm_search is not None:
+        session.confirm_search = with_visible_prompt(original_confirm_search)
+    if original_confirm_delegate is not None:
+        session.confirm_delegate = with_visible_prompt(original_confirm_delegate)
+    if original_confirm_mcp is not None:
+        session.confirm_mcp = with_visible_prompt(original_confirm_mcp)
 
     session.on_token = on_token
     session.on_event = on_event
@@ -821,6 +849,10 @@ async def run_turn(
         result = await session.send(user_input)
     finally:
         stop()
+        session.confirm_write = original_confirm_write
+        session.confirm_search = original_confirm_search
+        session.confirm_delegate = original_confirm_delegate
+        session.confirm_mcp = original_confirm_mcp
 
     if gate.plan_mode:
         gate.flush_plan()
