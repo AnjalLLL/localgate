@@ -818,6 +818,47 @@ async def test_run_turn_restarts_the_spinner_after_a_tool_call(repo, monkeypatch
     assert starts >= 2
 
 
+async def test_run_turn_stops_spinner_while_confirmation_is_visible(repo, monkeypatch):
+    active = False
+    original_start = Status.start
+    original_stop = Status.stop
+
+    def tracked_start(self):
+        nonlocal active
+        active = True
+        return original_start(self)
+
+    def tracked_stop(self):
+        nonlocal active
+        active = False
+        return original_stop(self)
+
+    def confirm(*_args, **_kwargs):
+        assert active is False
+        return True
+
+    monkeypatch.setattr(Status, "start", tracked_start)
+    monkeypatch.setattr(Status, "stop", tracked_stop)
+    monkeypatch.setattr("typer.confirm", confirm)
+    (repo / "app.py").write_text("human edit\n")
+
+    backend = ScriptedBackend(
+        [read_call("app.py"), write_call("app.py", "agent edit\n"), final_text("done")]
+    )
+    out = console()
+    gate = WriteGate(out, repo)
+    session = AgentSession(
+        backend,
+        "scripted-model",
+        repo,
+        confirm_write=gate.confirm_write,
+        tool_executor=gate.tracking_executor,
+    )
+
+    assert await run_turn(out, session, gate, "update app.py") == "done"
+    assert active is False
+
+
 async def test_run_turn_streams_and_auto_commits(repo, monkeypatch):
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     backend = ScriptedBackend(
