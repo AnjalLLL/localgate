@@ -298,3 +298,15 @@ async def test_tool_calls_are_logged_with_owner_run_and_model(session_factory, b
         ("read_file", "run-1", "qwen", 12)
     ]
     assert other == []
+
+
+def test_list_project_sessions_orders_ties_by_creation(tmp_path, monkeypatch):
+    """Two sessions created within one clock tick (common on Windows) still list
+    newest first."""
+    import localgate.agent.memory as memory_module  # noqa: PLC0415
+
+    monkeypatch.setattr(memory_module, "_now_iso", lambda: "2026-10-28T10:00:00+00:00")
+    first = project_session_id(tmp_path)
+    second = start_new_project_session(tmp_path)
+    third = start_new_project_session(tmp_path)
+    assert [s["id"] for s in list_project_sessions(tmp_path)] == [third, second, first]
