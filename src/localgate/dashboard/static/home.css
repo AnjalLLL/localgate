@@ -161,3 +161,5 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
   .steps > li::before { left: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+.status-row[hidden] { display: none; }

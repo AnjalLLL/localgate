@@ -34,6 +34,7 @@ from localgate.core.db_config_store import (
     save_database_url,
 )
 from localgate.core.key_policy import QUOTA_PERIODS, as_utc, is_expired
+from localgate.core.netinfo import is_loopback_host, share_urls
 from localgate.core.passwords import password_problem
 from localgate.db.engine import current_revision, init_models, make_engine, make_session_factory
 from localgate.db.repositories.keys import APIKeyRepository
@@ -204,11 +205,32 @@ def serve(
             "Requires --proxy-headers. Defaults to FORWARDED_ALLOW_IPS env var."
         ),
     ),
+    share: bool = typer.Option(
+        False,
+        "--share",
+        help=(
+            "Let other devices use this machine's models: listen on the network and "
+            "print the addresses to give them. The dashboard stays on trusted networks."
+        ),
+    ),
 ) -> None:
     """Start the gateway."""
     new_admin_key = _ensure_admin_key()
     settings = _settings()
-    dashboard = f"http://{host or settings.host}:{port or settings.port}/dashboard/"
+    bind_host = "0.0.0.0" if share else (host or settings.host)  # noqa: S104
+    bind_port = port or settings.port
+    if not is_loopback_host(bind_host) and settings.uses_insecure_admin_key:
+        typer.secho(
+            f"Refusing to listen on {bind_host} with the placeholder admin key — anyone on "
+            "the network could manage this gateway. Remove LOCALGATE_ADMIN_KEY from your "
+            ".env to get a generated one, or set a real key.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    # 0.0.0.0 isn't an address a browser can open; the owner uses this machine's.
+    local_host = "127.0.0.1" if bind_host in ("0.0.0.0", "::") else bind_host  # noqa: S104
+    dashboard = f"http://{local_host}:{bind_port}/dashboard/"
     account = _first_account_setup(settings)
     if account is not None:
         typer.secho(f"  Sign in at {dashboard} as {account}.", fg=typer.colors.GREEN)
@@ -225,9 +247,11 @@ def serve(
         typer.echo(f"  sign in at  {dashboard}   (show the key again: localgate admin-key)")
         typer.echo("  Or create an email/password login: localgate users create")
         typer.echo()
+    if not is_loopback_host(bind_host):
+        _print_share_box(bind_port, settings)
     common: dict = {
-        "host": host or settings.host,
-        "port": port or settings.port,
+        "host": bind_host,
+        "port": bind_port,
         "log_config": None,  # localgate configures structlog itself
     }
     if proxy_headers:
@@ -245,6 +269,27 @@ def serve(
         # Multi-worker: must use a string import path + factory so each worker
         # forks and calls create_app() independently.
         uvicorn.run("localgate.app:create_app", factory=True, workers=workers, **common)
+
+
+def _print_share_box(port: int, settings: Settings) -> None:
+    """Where other devices reach this gateway, and how to hand them access."""
+    urls = share_urls(port, settings.public_url)
+    typer.secho("Sharing this machine's models", fg=typer.colors.GREEN, bold=True)
+    if not urls:
+        typer.echo("  No network address found — is this machine on a network?")
+    for entry in urls:
+        typer.echo(f"  {entry['label']:<14} {entry['url']}/v1")
+    typer.echo(
+        f"  Give each device its own key: http://127.0.0.1:{port}/dashboard/#/share "
+        "(or `localgate keys create --name <device>`)."
+    )
+    if not settings.public_url:
+        typer.secho(
+            "  This is plain HTTP — fine on your own network or Tailscale. For the internet, "
+            "put HTTPS in front (docs/sharing.md: Tailscale, Cloudflare Tunnel, Caddy).",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo()
 
 
 @app.command()
@@ -679,6 +724,30 @@ def doctor() -> None:
         _check("admin key", "placeholder — run `localgate init` to generate a real one", warn=True)
     else:
         _check("admin key", "set (non-default)")
+
+    typer.secho("\n--- network exposure ---", bold=True)
+    if is_loopback_host(settings.host):
+        _check("listens on", f"{settings.host} (this machine only; `serve --share` to share)")
+    else:
+        _check("listens on", f"{settings.host} (reachable from the network)", warn=True)
+    everyone = "0.0.0.0/0" in settings.admin_allowed_networks
+    _check(
+        "dashboard, /admin, /docs",
+        "anyone (LOCALGATE_ADMIN_ALLOWED_NETWORKS=*)"
+        if everyone
+        else "trusted networks only: " + ", ".join(settings.admin_allowed_networks),
+        warn=everyone,
+    )
+    _check(
+        "public URL",
+        settings.public_url or "not set (devices use this machine's address; plain HTTP)",
+        warn=bool(settings.public_url and settings.public_url.startswith("http://")),
+    )
+    _check(
+        "inference queue",
+        f"{settings.max_concurrent_requests} at once, wait up to "
+        f"{settings.queue_timeout:.0f} s, at most {settings.max_queue} waiting",
+    )
 
     typer.secho("\n--- database ---", bold=True)
 
@@ -1804,22 +1873,26 @@ def deploy(
     # Generate a fresh admin key for this deployment.
     deploy_admin_key = secrets.token_urlsafe(32)
 
+    # Caddy runs next to the gateway: in its own container for compose (so the
+    # gateway is `localgate:8000` on the compose network), on the host for systemd.
+    upstream = "localgate:8000" if target == "compose" else "localhost:8000"
+
     # --- Caddyfile ---
     admin_routes = ""
     if expose_admin:
-        admin_routes = """
+        admin_routes = f"""
     # Admin and dashboard — restrict to trusted IPs or remove this block and use SSH tunnelling.
-    @admin {
+    @admin {{
         path /admin* /dashboard* /metrics /docs /redoc
-    }
+    }}
     # Uncomment and fill in your IP:
-    # @allowed_admin { remote_ip <your-ip> }
-    # handle @admin {
-    #     reverse_proxy localhost:8000
-    # }
-    handle @admin {
+    # @allowed_admin {{ remote_ip <your-ip> }}
+    # handle @admin {{
+    #     reverse_proxy {upstream}
+    # }}
+    handle @admin {{
         respond "Forbidden" 403
-    }
+    }}
 """
     caddyfile_content = f"""{domain} {{
     # Expose only the client-facing API and health by default.
@@ -1827,7 +1900,7 @@ def deploy(
         path /v1/* /health*
     }}
     handle @public {{
-        reverse_proxy localhost:8000
+        reverse_proxy {upstream}
     }}
 {admin_routes}
     # Block everything else.
@@ -1841,7 +1914,8 @@ def deploy(
     env_content = (
         f"LOCALGATE_ADMIN_KEY={deploy_admin_key}\n"
         "LOCALGATE_ENVIRONMENT=production\n"
-        "LOCALGATE_HOST=127.0.0.1\n"
+        # Inside a container 127.0.0.1 is the container itself, unreachable from Caddy.
+        f"LOCALGATE_HOST={'0.0.0.0' if target == 'compose' else '127.0.0.1'}\n"  # noqa: S104
         f"LOCALGATE_DATABASE_URL=sqlite+aiosqlite:////data/localgate.db\n"
     )
 
@@ -1851,6 +1925,9 @@ def deploy(
     image: ghcr.io/anjallll/localgate:latest
     restart: unless-stopped
     env_file: localgate.env
+    # Behind Caddy every request comes from Caddy's address; trusting its
+    # X-Forwarded-For is what lets the gateway see — and restrict — real clients.
+    command: ["localgate", "serve", "--proxy-headers", "--forwarded-allow-ips", "*"]
     volumes:
       - localgate_data:/data
     ports:
@@ -1887,7 +1964,7 @@ After=network.target
 Type=simple
 User=localgate
 EnvironmentFile=/etc/localgate/localgate.env
-ExecStart=/usr/local/bin/localgate serve
+ExecStart=/usr/local/bin/localgate serve --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=on-failure
 RuntimeDirectory=localgate
 StateDirectory=localgate
