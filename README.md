@@ -61,10 +61,13 @@ ollama serve                     # your inference backend
 ollama pull llama3
 ollama pull nomic-embed-text     # enables RAG memory
 
-localgate init                   # set up config dir, generate admin key, run migrations
-localgate keys create --name my-app      # prints your key, once
-localgate serve
+localgate serve                  # first run: create your dashboard login (email + password)
+localgate keys create --name my-app      # an API key for your app, printed once
 ```
+
+Then open <http://localhost:8000> for a getting-started page and the dashboard. More
+accounts: `localgate users create`. Scripts that manage the gateway use its admin key
+(`localgate admin-key`).
 
 Developing localgate itself, instead of just using it:
 

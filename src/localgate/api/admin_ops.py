@@ -24,16 +24,18 @@ from localgate.backends.base import InferenceBackend
 from localgate.core.auth import (
     ADMIN_COOKIE,
     ADMIN_SESSION_SECONDS,
+    admin_session_subject,
     constant_time_equals,
     issue_admin_session,
 )
-from localgate.core.errors import AuthenticationError, LocalgateError
+from localgate.core.errors import AuthenticationError, LocalgateError, RateLimitError
 from localgate.db.repositories.conversations import ConversationRepository, SummaryRepository
 from localgate.db.repositories.embeddings import EmbeddingRepository
 from localgate.db.repositories.keys import APIKeyRepository
 from localgate.db.repositories.ledgers import LedgerRepository
 from localgate.db.repositories.tool_calls import ToolCallRepository
 from localgate.db.repositories.usage import UsageRepository
+from localgate.db.repositories.users import UserRepository
 from localgate.memory.retriever import retrieve_relevant_context
 from localgate.web.search import WebSearchError, chain_from_settings
 
@@ -47,18 +49,64 @@ class NotFound(LocalgateError):
 
 
 class SignIn(BaseModel):
-    admin_key: str = Field(..., min_length=1)
+    """Either an account's email and password, or the admin key."""
+
+    email: str | None = Field(default=None, max_length=320)
+    password: str | None = Field(default=None, max_length=1024)
+    admin_key: str | None = Field(default=None, max_length=1024)
+
+
+#: Failed sign-ins allowed per client address inside the window before refusing.
+_MAX_FAILED_SIGN_INS = 10
+_FAILED_SIGN_IN_WINDOW = 10 * 60
+_failed_sign_ins: dict[str, list[float]] = defaultdict(list)
+
+
+def _too_many_failures(client: str, now: float) -> bool:
+    recent = [t for t in _failed_sign_ins[client] if now - t < _FAILED_SIGN_IN_WINDOW]
+    _failed_sign_ins[client] = recent
+    return len(recent) >= _MAX_FAILED_SIGN_INS
+
+
+@session_router.get("/session/methods")
+async def sign_in_methods(session: AsyncSession = Depends(get_session)) -> dict[str, bool]:
+    """Public: whether any dashboard account exists, so the sign-in page can say
+    how to create the first one. Reveals nothing else."""
+    return {"accounts": await UserRepository(session).count() > 0}
 
 
 @session_router.post("/session", status_code=204)
-async def sign_in(body: SignIn, request: Request, response: Response) -> Response:
-    """Exchange the admin key for an httpOnly session cookie (the dashboard's login)."""
+async def sign_in(
+    body: SignIn,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Exchange an email and password (or the admin key) for an httpOnly session
+    cookie — the dashboard's login."""
     settings = request.app.state.settings
-    if not constant_time_equals(body.admin_key, settings.admin_key):
+    now = time.time()
+    client = request.client.host if request.client else "unknown"
+    if _too_many_failures(client, now):
+        raise RateLimitError(
+            "Too many failed sign-ins. Wait a few minutes and try again.",
+            code="too_many_attempts",
+        )
+    subject: str | None = None
+    if body.email and body.password:
+        user = await UserRepository(session).authenticate(body.email, body.password)
+        subject = user.email if user is not None else None
+    elif body.admin_key and constant_time_equals(body.admin_key, settings.admin_key):
+        subject = ""
+    if subject is None:
+        _failed_sign_ins[client].append(now)
+        if body.email:
+            raise AuthenticationError("Wrong email or password.", code="invalid_credentials")
         raise AuthenticationError("Invalid admin key.", code="invalid_admin_key")
+    _failed_sign_ins.pop(client, None)
     response.set_cookie(
         ADMIN_COOKIE,
-        issue_admin_session(settings.admin_key, time.time()),
+        issue_admin_session(settings.admin_key, now, subject=subject),
         max_age=ADMIN_SESSION_SECONDS,
         httponly=True,
         samesite="strict",
@@ -77,9 +125,16 @@ async def sign_out(response: Response) -> Response:
 
 
 @router.get("/session")
-async def whoami() -> dict[str, bool]:
-    """200 when the caller is signed in — the dashboard's session check."""
-    return {"admin": True}
+async def whoami(request: Request) -> dict[str, Any]:
+    """200 when the caller is signed in — the dashboard's session check — with the
+    account's email when it signed in with one."""
+    cookie = request.cookies.get(ADMIN_COOKIE)
+    subject = (
+        admin_session_subject(cookie, request.app.state.settings.admin_key, time.time())
+        if cookie
+        else None
+    )
+    return {"admin": True, "email": subject or None}
 
 
 @router.get("/overview")
