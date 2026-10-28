@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localgate"
-version = "0.14.0"
+version = "1.0.0"
 description = "A local-first API gateway for open-source LLMs: auth, RAG memory extension, DB connectors, token accounting, and a built-in coding agent."
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,7 +22,7 @@ keywords = [
     "coding-agent",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
