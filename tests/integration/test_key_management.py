@@ -144,6 +144,9 @@ def test_every_route_is_guarded(settings, tmp_path):
         # cookie. GET on the same path is guarded and is asserted separately below.
         "/admin/session",
         "/session",  # the same route as route discovery reports it, without the prefix
+        # Whether any dashboard account exists, so the sign-in page can explain how to
+        # create the first one. Exposes a single boolean.
+        "/session/methods",
     }
 
     unguarded = []

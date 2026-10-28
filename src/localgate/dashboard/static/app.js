@@ -103,7 +103,7 @@ const prefs = {
   set speak(v) { storage.set("localStorage", "lg_speak", v ? "1" : "0"); },
   get webSearch() { return storage.get("localStorage", "lg_web") === "1"; },
   set webSearch(v) { storage.set("localStorage", "lg_web", v ? "1" : "0"); },
-  get palette() { return storage.get("localStorage", "lg_palette") || "jade"; },
+  get palette() { return storage.get("localStorage", "lg_palette") || "sunrise"; },
   set palette(v) { storage.set("localStorage", "lg_palette", v); },
   get theme() { return storage.get("localStorage", "lg_theme") || "system"; },
   set theme(v) { storage.set("localStorage", "lg_theme", v); },
@@ -206,7 +206,7 @@ const PALETTES = [
 ];
 
 function applyPalette(id) {
-  const known = PALETTES.some((p) => p.id === id) ? id : "jade";
+  const known = PALETTES.some((p) => p.id === id) ? id : "sunrise";
   document.documentElement.dataset.palette = known;
 }
 
@@ -224,12 +224,35 @@ function applyTheme(theme) {
 
 // ---------------------------------------------------------------- auth screens
 
-function showLogin(message = "") {
+// Sign in with an account (email + password) by default; the admin key stays
+// available for whoever runs the server, and is the only option until an account exists.
+let loginWithAdminKey = false;
+
+function setLoginMode(adminKey) {
+  loginWithAdminKey = adminKey;
+  $("#login-account").hidden = adminKey;
+  $("#login-admin").hidden = !adminKey;
+  $("#login-email").required = !adminKey;
+  $("#login-password").required = !adminKey;
+  $("#login-key").required = adminKey;
+  $("#login-mode").textContent = adminKey ? "Sign in with email instead" : "Use the admin key instead";
+  (adminKey ? $("#login-key") : $("#login-email")).focus();
+}
+
+async function showLogin(message = "") {
   $("#app").hidden = true;
   $("#login").hidden = false;
   $("#login-error").textContent = message;
   $("#login-key").value = "";
-  $("#login-key").focus();
+  $("#login-password").value = "";
+  let accounts = true;
+  try {
+    accounts = (await (await fetch("/admin/session/methods")).json()).accounts;
+  } catch { /* assume accounts; the admin key option is still there */ }
+  $("#login-intro").textContent = accounts
+    ? "Your local models, memory and agents in one place."
+    : "No dashboard account yet. Create one on the server with `localgate users create`, or sign in with the admin key.";
+  setLoginMode(!accounts);
 }
 
 function showApp() {
@@ -241,8 +264,11 @@ function showApp() {
 async function checkSession() {
   try {
     const resp = await fetch("/admin/session", { credentials: "same-origin" });
-    if (resp.ok) showApp();
-    else showLogin();
+    if (resp.ok) {
+      const who = await resp.json().catch(() => ({}));
+      $("#sign-out").title = who.email ? `Sign out (${who.email})` : "Sign out";
+      showApp();
+    } else showLogin();
   } catch {
     showLogin("Couldn't reach the server.");
   }
@@ -258,11 +284,16 @@ async function signIn(event) {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ admin_key: $("#login-key").value }),
+      body: JSON.stringify(
+        loginWithAdminKey
+          ? { admin_key: $("#login-key").value }
+          : { email: $("#login-email").value, password: $("#login-password").value },
+      ),
     });
     if (!resp.ok) throw new Error(errorMessage(await resp.json().catch(() => null), resp));
     $("#login-key").value = "";
-    showApp();
+    $("#login-password").value = "";
+    checkSession();
   } catch (err) {
     $("#login-error").textContent = err.message;
   } finally {
@@ -2124,6 +2155,7 @@ function init() {
   $("#history").addEventListener("click", (e) => { if (e.target.closest("a")) closeMenu(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
   $("#login-form").addEventListener("submit", signIn);
+  $("#login-mode").addEventListener("click", () => setLoginMode(!loginWithAdminKey));
   $("#sign-out").addEventListener("click", signOut);
   window.addEventListener("hashchange", route);
   renderHistory();

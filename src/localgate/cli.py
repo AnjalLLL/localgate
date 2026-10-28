@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import secrets
+import sys
 from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any, TypeVar
@@ -31,9 +32,11 @@ from localgate.core.db_config_store import (
     redact_database_url,
     save_database_url,
 )
+from localgate.core.passwords import password_problem
 from localgate.db.engine import current_revision, init_models, make_engine, make_session_factory
 from localgate.db.repositories.keys import APIKeyRepository
 from localgate.db.repositories.usage import UsageRepository
+from localgate.db.repositories.users import UserRepository, normalize_email
 
 app = typer.Typer(
     help="localgate — a local-first API gateway for open-source LLMs.",
@@ -41,8 +44,12 @@ app = typer.Typer(
 )
 keys_app = typer.Typer(help="Create, inspect and revoke API keys.", no_args_is_help=True)
 db_app = typer.Typer(help="Initialize and migrate the database.", no_args_is_help=True)
+users_app = typer.Typer(
+    help="Dashboard accounts: sign in with email and password.", no_args_is_help=True
+)
 app.add_typer(keys_app, name="keys")
 app.add_typer(db_app, name="db")
+app.add_typer(users_app, name="users")
 bench_app = typer.Typer(help="Measure how reliably models drive the agent.", no_args_is_help=True)
 app.add_typer(bench_app, name="bench")
 voice_app = typer.Typer(
@@ -199,12 +206,22 @@ def serve(
     """Start the gateway."""
     new_admin_key = _ensure_admin_key()
     settings = _settings()
-    if new_admin_key is not None:
-        dashboard = f"http://{host or settings.host}:{port or settings.port}/dashboard/"
+    dashboard = f"http://{host or settings.host}:{port or settings.port}/dashboard/"
+    account = _first_account_setup(settings)
+    if account is not None:
+        typer.secho(f"  Sign in at {dashboard} as {account}.", fg=typer.colors.GREEN)
+        if new_admin_key is not None:
+            typer.echo(
+                f"  An admin key for scripts was saved to {paths.user_env_file()} "
+                "(`localgate admin-key` shows it)."
+            )
+        typer.echo()
+    elif new_admin_key is not None:
         typer.secho("First run: generated an admin key for this gateway.", fg=typer.colors.GREEN)
         typer.echo(f"  admin key   {new_admin_key}")
         typer.echo(f"  saved to    {paths.user_env_file()}")
         typer.echo(f"  sign in at  {dashboard}   (show the key again: localgate admin-key)")
+        typer.echo("  Or create an email/password login: localgate users create")
         typer.echo()
     common: dict = {
         "host": host or settings.host,
@@ -437,6 +454,149 @@ def admin_key(
             fg=typer.colors.YELLOW,
             err=True,
         )
+
+
+# ------------------------------------------------------------------------ users
+
+
+async def _migrate(settings: Settings) -> None:
+    engine = make_engine(resolve_database_url(settings))
+    try:
+        await init_models(engine)
+    finally:
+        await engine.dispose()
+
+
+def _prompt_password() -> str:
+    while True:
+        password = typer.prompt("  Password", hide_input=True, confirmation_prompt="  Repeat it")
+        problem = password_problem(password)
+        if problem is None:
+            return str(password)
+        typer.secho(f"  {problem}", fg=typer.colors.RED)
+
+
+def _prompt_email(prompt: str = "  Email") -> str:
+    while True:
+        email = str(typer.prompt(prompt, default="", show_default=False)).strip()
+        if not email or ("@" in email and "." in email.rsplit("@", 1)[-1]):
+            return email
+        typer.secho("  That doesn't look like an email address.", fg=typer.colors.RED)
+
+
+def _first_account_setup(settings: Settings) -> str | None:
+    """First `localgate serve` with no dashboard account: create one right here,
+    in the terminal of whoever runs the server — the only person who should be
+    able to claim it. Returns the new account's email, or ``None`` when one
+    already exists, the setup was skipped, or there is no terminal to ask in."""
+
+    async def existing_accounts() -> int:
+        await _migrate(settings)
+        return await _with_session(settings, lambda s: UserRepository(s).count())
+
+    try:
+        if _run(existing_accounts()) > 0:
+            return None
+    except Exception:  # noqa: BLE001 — the server reports database problems itself
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.secho(
+            "No dashboard account yet — create one with: localgate users create",
+            fg=typer.colors.YELLOW,
+        )
+        return None
+    typer.secho("Create your dashboard login", fg=typer.colors.GREEN, bold=True)
+    typer.echo("  Used to sign in at the dashboard. Leave the email blank to skip.")
+    email = _prompt_email()
+    if not email:
+        return None
+    password = _prompt_password()
+    _run(_with_session(settings, lambda s: UserRepository(s).create(email, password)))
+    return normalize_email(email)
+
+
+@users_app.command("create")
+def users_create(
+    email: str | None = typer.Option(None, "--email", help="Sign-in email."),
+) -> None:
+    """Create a dashboard account. The password is asked for, never passed as a flag."""
+    settings = _settings()
+    email = email or _prompt_email("  Email")
+    if not email:
+        raise typer.Exit(code=2)
+    password = _prompt_password()
+
+    async def create() -> bool:
+        await _migrate(settings)
+
+        async def go(session: Any) -> bool:
+            repo = UserRepository(session)
+            if await repo.get(email) is not None:
+                return False
+            await repo.create(email, password)
+            return True
+
+        return await _with_session(settings, go)
+
+    if not _run(create()):
+        typer.secho(f"An account for {normalize_email(email)} already exists.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.secho(
+        f"Created {normalize_email(email)} — sign in at /dashboard/.", fg=typer.colors.GREEN
+    )
+
+
+@users_app.command("list")
+def users_list() -> None:
+    """List dashboard accounts."""
+    settings = _settings()
+    users = _run(_with_session(settings, lambda s: UserRepository(s).list_all()))
+    if not users:
+        typer.echo("No accounts yet. Create one: localgate users create")
+        return
+    for user in users:
+        last = user.last_login_at.strftime("%Y-%m-%d %H:%M") if user.last_login_at else "never"
+        typer.echo(f"  {user.email:<40} last sign-in {last}")
+
+
+@users_app.command("passwd")
+def users_passwd(email: str = typer.Argument(..., help="The account's email.")) -> None:
+    """Set a new password for an account."""
+    settings = _settings()
+    password = _prompt_password()
+
+    async def change(session: Any) -> bool:
+        repo = UserRepository(session)
+        user = await repo.get(email)
+        if user is None:
+            return False
+        await repo.set_password(user, password)
+        return True
+
+    if not _run(_with_session(settings, change)):
+        typer.secho(f"No account for {normalize_email(email)}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.secho("Password changed.", fg=typer.colors.GREEN)
+
+
+@users_app.command("delete")
+def users_delete(email: str = typer.Argument(..., help="The account's email.")) -> None:
+    """Delete an account. Its open dashboard sessions end when they expire (12 h),
+    or immediately with `localgate admin-key --rotate`."""
+    settings = _settings()
+
+    async def remove(session: Any) -> bool:
+        repo = UserRepository(session)
+        user = await repo.get(email)
+        if user is None:
+            return False
+        await repo.delete(user)
+        return True
+
+    if not _run(_with_session(settings, remove)):
+        typer.secho(f"No account for {normalize_email(email)}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.secho(f"Deleted {normalize_email(email)}.", fg=typer.colors.GREEN)
 
 
 # ---------------------------------------------------------------------------- doctor

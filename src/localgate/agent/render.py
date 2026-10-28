@@ -152,13 +152,17 @@ class DraftView:
     overflowing a transient live display (which can't erase lines that
     scrolled off the screen)."""
 
-    def __init__(self, code_theme: str) -> None:
+    def __init__(self, code_theme: str, reserve: int = 4) -> None:
         self.text = ""
         self.code_theme = code_theme
+        #: Screen rows kept free below the draft (for a footer drawn under it).
+        self.reserve = reserve
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        if not self.text:
+            return
         lines = collapse_code(self.text, streaming=True)[0].splitlines()
-        room = max(3, console.size.height - 4)
+        room = max(3, console.size.height - self.reserve)
         head, tail = lines[:-room], lines[-room:]
         # Cutting inside a code block would turn its tail into prose; reopen it.
         if sum(line.lstrip().startswith("```") for line in head) % 2:

@@ -350,3 +350,66 @@ def test_an_unfinished_block_is_summarized_while_streaming():
 
     shown, hidden = collapse_code("Writing:\n```html\n<div>\n<p>", streaming=True)
     assert hidden == 1 and "writing html… 2 lines" in shown and "<div>" not in shown
+
+
+# ------------------------------------------------- typing while a turn runs
+
+
+def test_footer_keys_type_queue_cycle_and_interrupt():
+    from prompt_toolkit.keys import Keys
+
+    from localgate.agent.interrupt import InterruptWatcher
+
+    submitted: list[str] = []
+    cycled: list[bool] = []
+    watcher = InterruptWatcher(
+        on_submit=submitted.append, on_cycle_mode=lambda: cycled.append(True)
+    )
+    for ch in "add tests":
+        watcher.handle_key(ch)
+    watcher.handle_key(Keys.Backspace)
+    watcher.handle_key(Keys.ControlM)
+    assert submitted == ["add test"] and watcher.buffer == ""
+
+    watcher.handle_key(Keys.BackTab)
+    assert cycled == [True]
+
+    watcher.handle_key("x")
+    watcher.handle_key(Keys.Escape)  # first Esc clears the half-typed line…
+    assert watcher.buffer == "" and not watcher.interrupted
+    watcher.handle_key(Keys.Escape)  # …the next one interrupts
+    assert watcher.interrupted
+
+
+async def test_messages_typed_during_a_turn_run_next_in_order(project, monkeypatch):
+    """Simulate typing into the footer mid-turn: both messages queue, then run
+    as their own turns before the prompt asks for anything new."""
+
+    def type_two_messages(self, task):
+        self.on_submit("second request")
+        self.on_submit("third request")
+
+    started = {"done": False}
+    original_start = repl.InterruptWatcher.start
+
+    def start_once(self, task):
+        if not started["done"]:
+            started["done"] = True
+            type_two_messages(self, task)
+        return original_start(self, task)
+
+    monkeypatch.setattr(repl.InterruptWatcher, "start", start_once)
+    inputs = iter(["first request", "/exit"])
+    monkeypatch.setattr(Console, "input", lambda self, *a, **k: next(inputs))
+    backend = ScriptedBackend([final_text("one"), final_text("two"), final_text("three")])
+    await repl.run_repl(backend, "scripted-model", project, auto_approve=True)
+
+    asked = [
+        [m for m in request["messages"] if m["role"] == "user"][-1]["content"]
+        for request in backend.requests
+    ]
+    assert [a.rsplit("User request: ", 1)[-1] for a in asked] == [
+        "first request",
+        "second request",
+        "third request",
+    ]

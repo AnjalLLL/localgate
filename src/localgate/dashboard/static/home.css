@@ -1,13 +1,13 @@
 /* The landing page at `/`. Same tokens and bundled fonts as the dashboard
-   (app.css, jade palette), kept separate so the page stays light. */
+   (app.css, sunrise palette), kept separate so the page stays light. */
 
 @font-face { font-family: "Inter"; src: url("font-inter.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
 @font-face { font-family: "Source Serif 4"; src: url("font-serif.woff2") format("woff2"); font-weight: 200 900; font-style: normal; font-display: swap; }
 @font-face { font-family: "JetBrains Mono"; src: url("font-mono.woff2") format("woff2"); font-weight: 100 800; font-style: normal; font-display: swap; }
 
 :root {
-  --accent: #0d7a62;
-  --accent-hover: #0a664f;
+  --accent: #a8590e;
+  --accent-hover: #8d4a0b;
   --accent-fg: #ffffff;
   --accent-soft: color-mix(in srgb, var(--accent) 12%, #ffffff);
   --bg: color-mix(in srgb, var(--accent) 3%, #f6f6f4);
@@ -31,8 +31,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --accent: #3ad2a5;
-    --accent-hover: #5fe0b9;
+    --accent: #ffb454;
+    --accent-hover: #ffc477;
     --accent-fg: #0a0d0e;
     --accent-soft: color-mix(in srgb, var(--accent) 17%, #0e1112);
     --bg: color-mix(in srgb, var(--accent) 3%, #0e1112);

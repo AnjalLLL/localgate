@@ -6,7 +6,7 @@
   <meta name="referrer" content="no-referrer" />
   <title>localgate</title>
   <meta name="description" content="localgate turns a local LLM server into a managed, OpenAI-compatible API with keys, usage tracking, memory and a coding agent." />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d7a62'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 25V14a8 8 0 0 1 16 0v11'/%3E%3Cpath d='M13 25v-6a3 3 0 0 1 6 0v6'/%3E%3Cpath d='M6.5 25h19'/%3E%3C/g%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23a8590e'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 25V14a8 8 0 0 1 16 0v11'/%3E%3Cpath d='M13 25v-6a3 3 0 0 1 6 0v6'/%3E%3Cpath d='M6.5 25h19'/%3E%3C/g%3E%3C/svg%3E" />
   <link rel="preload" href="/dashboard/font-inter.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/dashboard/home.css" />
   <script type="module" src="/dashboard/home.js"></script>
@@ -21,7 +21,6 @@
       </a>
       <nav class="top-links" aria-label="Main">
         <a href="#start">Get started</a>
-        <a href="/docs">API reference</a>
         <a href="https://github.com/AnjalLLL/localgate" rel="noopener">GitHub</a>
         <a class="btn primary sm" href="/dashboard/">Dashboard</a>
       </nav>
@@ -65,9 +64,9 @@ ollama pull nomic-embed-text   # optional: enables memory</code></pre>
         </li>
         <li>
           <h3>Sign in to the dashboard</h3>
-          <p>The first <code>localgate serve</code> generated an admin key and printed it. Show it again any time:</p>
-          <pre><code>localgate admin-key</code></pre>
-          <p>Use it at <a href="/dashboard/">the dashboard</a>. It's the owner's key: keep it to yourself and never put it in an app.</p>
+          <p>The first <code>localgate serve</code> asked you to create a login. Use that email and password at <a href="/dashboard/">the dashboard</a>. Skipped it, or need another account?</p>
+          <pre><code>localgate users create</code></pre>
+          <p>Scripts can use the server's admin key instead (<code>localgate admin-key</code> shows it); keep it to yourself and never put it in an app.</p>
         </li>
         <li>
           <h3>Create an API key for each app or person</h3>
@@ -121,7 +120,6 @@ localgate code --remote</code></pre>
 
   <footer class="wrap foot">
     <span>localgate <span id="foot-version"></span></span>
-    <span class="sep">·</span><a href="/docs">API reference</a>
     <span class="sep">·</span><a href="/health">Health</a>
     <span class="sep">·</span><a href="https://github.com/AnjalLLL/localgate#readme" rel="noopener">Documentation</a>
   </footer>

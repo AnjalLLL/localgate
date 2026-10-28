@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
   <title>Localgate</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d7a62'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 25V14a8 8 0 0 1 16 0v11'/%3E%3Cpath d='M13 25v-6a3 3 0 0 1 6 0v6'/%3E%3Cpath d='M6.5 25h19'/%3E%3C/g%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23a8590e'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 25V14a8 8 0 0 1 16 0v11'/%3E%3Cpath d='M13 25v-6a3 3 0 0 1 6 0v6'/%3E%3Cpath d='M6.5 25h19'/%3E%3C/g%3E%3C/svg%3E" />
   <link rel="preload" href="font-inter.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="preload" href="font-serif.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="app.css" />
@@ -20,13 +20,27 @@
         <span>localgate</span>
       </div>
       <h1>Welcome back</h1>
-      <p class="muted">Your local models, memory and agents in one place. Sign in with the server's admin key — run <code>localgate admin-key</code> on the server to see it. It becomes a session cookie and is never stored in this browser.</p>
-      <label class="field">
-        <span>Admin key</span>
-        <input type="password" id="login-key" required autocomplete="current-password" aria-describedby="login-error" />
-      </label>
+      <p class="muted" id="login-intro">Your local models, memory and agents in one place.</p>
+      <div id="login-account">
+        <label class="field">
+          <span>Email</span>
+          <input type="email" id="login-email" autocomplete="username" aria-describedby="login-error" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" id="login-password" autocomplete="current-password" aria-describedby="login-error" />
+        </label>
+      </div>
+      <div id="login-admin" hidden>
+        <label class="field">
+          <span>Admin key</span>
+          <input type="password" id="login-key" autocomplete="off" aria-describedby="login-error" />
+        </label>
+        <p class="muted small">Run <code>localgate admin-key</code> on the server to see it. It becomes a session cookie and is never stored in this browser.</p>
+      </div>
       <p id="login-error" class="form-error" role="alert"></p>
       <button type="submit" class="btn primary block lg" id="login-submit">Continue</button>
+      <button type="button" class="btn ghost block" id="login-mode">Use the admin key instead</button>
     </form>
   </main>
 

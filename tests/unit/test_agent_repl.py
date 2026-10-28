@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest
 from rich.console import Console
-from rich.status import Status
+from rich.live import Live
 
 from localgate.agent import gitutil, userconfig
 from localgate.agent.gitutil import AGENT_COMMIT_PREFIX
@@ -785,25 +785,36 @@ async def test_repl_persists_history_across_turns(repo, monkeypatch):
     assert len(backend._responses) == 0
 
 
-async def test_run_turn_restarts_the_spinner_after_a_tool_call(repo, monkeypatch):
-    """A tool call shouldn't leave a dead gap with no activity indicator — the
-    status spinner should be started again (relabeled) after the tool-call log
-    line, not just stopped once and left dead until the final answer.
-    """
-    starts = 0
-    orig_start = Status.start
+async def test_run_turn_keeps_the_footer_up_through_tool_calls(repo, monkeypatch):
+    """The input box and its activity indicator stay on screen for the whole turn
+    — every model call after a tool call happens with the live footer showing,
+    not after a gap where it was torn down."""
+    active = False
+    original_start, original_stop = Live.start, Live.stop
 
-    def counting_start(self):
-        nonlocal starts
-        starts += 1
-        return orig_start(self)
+    def tracked_start(self, *args, **kwargs):
+        nonlocal active
+        active = True
+        return original_start(self, *args, **kwargs)
 
-    monkeypatch.setattr(Status, "start", counting_start)
+    def tracked_stop(self, *args, **kwargs):
+        nonlocal active
+        active = False
+        return original_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(Live, "start", tracked_start)
+    monkeypatch.setattr(Live, "stop", tracked_stop)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
 
-    backend = ScriptedBackend(
-        [read_call("app.py"), write_call("app.py", "content\n"), final_text("done")]
-    )
+    class Watching(ScriptedBackend):
+        seen: list[bool] = []
+
+        async def chat_stream(self, request):
+            self.seen.append(active)
+            async for chunk in super().chat_stream(request):
+                yield chunk
+
+    backend = Watching([read_call("app.py"), write_call("app.py", "content\n"), final_text("done")])
     out = console()
     gate = WriteGate(out, repo, auto_approve=True)
     session = AgentSession(
@@ -813,33 +824,32 @@ async def test_run_turn_restarts_the_spinner_after_a_tool_call(repo, monkeypatch
         confirm_write=gate.confirm_write,
         tool_executor=gate.tracking_executor,
     )
-    result = await run_turn(out, session, gate, "update app.py")
-    assert result == "done"
-    # once for the initial "thinking..." spinner, once more after the tool-call event
-    assert starts >= 2
+    assert await run_turn(out, session, gate, "update app.py") == "done"
+    assert Watching.seen == [True, True, True]
+    assert active is False  # torn down once the turn is over
 
 
 async def test_run_turn_stops_spinner_while_confirmation_is_visible(repo, monkeypatch):
     active = False
-    original_start = Status.start
-    original_stop = Status.stop
+    original_start = Live.start
+    original_stop = Live.stop
 
-    def tracked_start(self):
+    def tracked_start(self, *args, **kwargs):
         nonlocal active
         active = True
-        return original_start(self)
+        return original_start(self, *args, **kwargs)
 
-    def tracked_stop(self):
+    def tracked_stop(self, *args, **kwargs):
         nonlocal active
         active = False
-        return original_stop(self)
+        return original_stop(self, *args, **kwargs)
 
     def confirm(*_args, **_kwargs):
         assert active is False
         return True
 
-    monkeypatch.setattr(Status, "start", tracked_start)
-    monkeypatch.setattr(Status, "stop", tracked_stop)
+    monkeypatch.setattr(Live, "start", tracked_start)
+    monkeypatch.setattr(Live, "stop", tracked_stop)
     monkeypatch.setattr("typer.confirm", confirm)
     (repo / "app.py").write_text("human edit\n")
 
@@ -1018,18 +1028,18 @@ async def test_run_turn_stops_spinner_while_a_command_confirmation_is_visible(re
     from localgate.agent.sandbox import RUN_COMMAND_SCHEMA
 
     active = False
-    original_start = Status.start
-    original_stop = Status.stop
+    original_start = Live.start
+    original_stop = Live.stop
 
-    def tracked_start(self):
+    def tracked_start(self, *args, **kwargs):
         nonlocal active
         active = True
-        return original_start(self)
+        return original_start(self, *args, **kwargs)
 
-    def tracked_stop(self):
+    def tracked_stop(self, *args, **kwargs):
         nonlocal active
         active = False
-        return original_stop(self)
+        return original_stop(self, *args, **kwargs)
 
     seen_while_prompting: list[bool] = []
 
@@ -1037,8 +1047,8 @@ async def test_run_turn_stops_spinner_while_a_command_confirmation_is_visible(re
         seen_while_prompting.append(active)
         return True
 
-    monkeypatch.setattr(Status, "start", tracked_start)
-    monkeypatch.setattr(Status, "stop", tracked_stop)
+    monkeypatch.setattr(Live, "start", tracked_start)
+    monkeypatch.setattr(Live, "stop", tracked_stop)
     monkeypatch.setattr("typer.confirm", confirm)
 
     async def run_command(_arguments: dict[str, Any]) -> str:

@@ -27,11 +27,12 @@ from prompt_toolkit.history import FileHistory, History, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.layout import BufferControl, HSplit, VerticalAlign
 from rich import box
-from rich.console import Console, Group
+from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -1086,6 +1087,49 @@ async def _read_line(console: Console, prompt_session: PromptSession[str] | None
     return console.input("[bold green]❯ [/bold green]")
 
 
+class _TurnFooter:
+    """The input box, kept on screen while a turn runs: a spinner with the
+    elapsed time, the line being typed for the next message, and the same
+    status line the idle prompt shows (model, write mode, queued messages)."""
+
+    def __init__(
+        self,
+        session: AgentSession,
+        gate: WriteGate,
+        watcher: InterruptWatcher,
+        queued: list[str],
+    ) -> None:
+        self.session = session
+        self.gate = gate
+        self.watcher = watcher
+        self.queued = queued
+        self.started = time.monotonic()
+        self.spinner = Spinner("dots", style="bold green")
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        elapsed = time.monotonic() - self.started
+        status = Table.grid(padding=(0, 1))
+        status.add_row(
+            self.spinner, Text(f"working… {elapsed:.0f}s · esc to interrupt", style="dim")
+        )
+        yield status
+        rule = Text("─" * options.max_width, style="dim")
+        yield rule
+        room = max(10, options.max_width - 4)
+        typed = self.watcher.buffer[-room:]
+        if typed:
+            yield Text.assemble(("❯ ", "bold green"), typed, ("▌", "dim"))
+        else:
+            yield Text.assemble(("❯ ", "bold green"), ("type your next message…", "dim"))
+        yield rule
+        parts = [f"{mode_label(self.gate.mode())} (shift+tab)"]
+        if self.queued:
+            parts.append(f"{len(self.queued)} queued")
+        yield Text.assemble(
+            (f" {self.session.model}", "bold green"), (" · " + " · ".join(parts), "dim")
+        )
+
+
 async def run_turn(
     console: Console,
     session: AgentSession,
@@ -1094,50 +1138,50 @@ async def run_turn(
     memory: AgentMemory | None = None,
     usage: SessionUsage | None = None,
     attachments: Sequence[str] = (),
+    queued: list[str] | None = None,
 ) -> str:
-    """Run one turn with a spinner that clears the moment the model streams
-    real output, but otherwise stays visible (relabeled "working...") between
-    tool calls — a slow one (a web search, a delegated sub-task, an MCP call)
-    would otherwise leave a dead gap with no sign anything is still happening.
-    While a reply streams in it is shown live, then replaced by the tool call
-    or the final answer it turned out to be. Esc/Ctrl+C interrupts the turn.
+    """Run one turn under a live footer that keeps the input box on screen: a
+    spinner, a line to type the next message into (queued to run after this
+    turn), and the status line with the write mode (Shift+Tab still cycles it).
+    While a reply streams in it is shown above the footer, then replaced by the
+    tool call or the final answer it turned out to be. Esc/Ctrl+C interrupts.
     Auto-commits afterward, and records the turn into conversation
     history/memory if a session is attached.
     """
-    status = console.status("[dim]thinking...[/dim]", spinner="dots")
-    status.start()
-    stopped = False
     started = time.monotonic()
     tool_calls = 0
     hidden_code = 0
     code_theme = theme_mod.syntax_theme_for(gate.theme_name)
-    draft = DraftView(code_theme)
-    draft_live: Live | None = None
-    watcher = InterruptWatcher()
+    queue = queued if queued is not None else []
+    # Room for the footer below a streaming draft.
+    draft = DraftView(code_theme, reserve=10)
+    live_on = False
+
+    def submit(text: str) -> None:
+        queue.append(text)
+        console.print(f"  [dim]↳ queued: {escape(text)}[/dim]")
+
+    def refresh() -> None:
+        if live_on:
+            live.refresh()
+
+    watcher = InterruptWatcher(on_change=refresh, on_submit=submit, on_cycle_mode=gate.cycle_mode)
+    footer = _TurnFooter(session, gate, watcher, queue)
+    live = Live(Group(draft, footer), console=console, transient=True, refresh_per_second=10)
 
     def stop() -> None:
-        nonlocal stopped, draft_live
-        if draft_live is not None:
-            draft_live.stop()  # transient: the draft disappears
-            draft_live = None
-        if not stopped:
-            status.stop()
-            stopped = True
+        nonlocal live_on
+        if live_on:
+            live.stop()  # transient: the footer and any draft disappear
+            live_on = False
 
     def restart() -> None:
-        nonlocal stopped
-        status.update("[dim]working...[/dim]")
-        status.start()
-        stopped = False
+        nonlocal live_on
+        if not live_on:
+            live.start()
+            live_on = True
 
     def on_draft(text: str) -> None:
-        nonlocal stopped, draft_live
-        if draft_live is None:
-            if not stopped:
-                status.stop()
-                stopped = True
-            draft_live = Live(draft, console=console, transient=True, refresh_per_second=8)
-            draft_live.start()
         draft.text = text
 
     def on_token(text: str) -> None:
@@ -1145,14 +1189,14 @@ async def run_turn(
         # out as Markdown — headings, lists, highlighted code — not raw ``###``.
         # Long code blocks are summarized; `/last` prints the reply in full.
         nonlocal hidden_code
-        stop()
+        draft.text = ""
         shown, hidden_code = collapse_code(text)
         console.print()
         console.print(Markdown(shown, code_theme=code_theme))
 
     def on_event(line: str) -> None:
         nonlocal tool_calls
-        stop()
+        draft.text = ""
         name, paren, args = line.partition("(")
         if paren and name.isidentifier():
             tool_calls += 1
@@ -1163,7 +1207,6 @@ async def run_turn(
             )
         else:
             console.print(f"  [dim]● {escape(line)}[/dim]")
-        restart()
 
     original_confirm_write = session.confirm_write
     original_confirm_search = session.confirm_search
@@ -1206,6 +1249,7 @@ async def run_turn(
     history_before = len(session.messages)
     interrupted = False
     task = asyncio.ensure_future(session.send(user_input, attachments))
+    restart()
     watcher.start(task)
     try:
         result = await task
@@ -1461,13 +1505,22 @@ async def run_repl(
     shell_notes: list[str] = []
     #: The last full reply, for `/last` (the chat shows it with long code collapsed).
     last_reply = ""
+    #: Messages typed into the footer while a turn ran; each runs in order before
+    #: the prompt asks for anything new.
+    queued: list[str] = []
 
     while True:
-        try:
-            line = await _read_line(console, prompt_session)
-        except EOFError:
-            console.print()
-            break
+        if queued:
+            line = queued.pop(0)
+            console.print(f"[bold green]❯[/bold green] {escape(line)}")
+            if prompt_session is not None:
+                prompt_session.history.append_string(line)
+        else:
+            try:
+                line = await _read_line(console, prompt_session)
+            except EOFError:
+                console.print()
+                break
         line = line.strip()
         if not line:
             continue
@@ -1672,6 +1725,7 @@ async def run_repl(
                 memory=memory,
                 usage=usage,
                 attachments=attachments,
+                queued=queued,
             )
             if reply:
                 last_reply = reply

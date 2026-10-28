@@ -187,3 +187,17 @@ class SessionLedgerRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     __table_args__ = (Index("ux_ledger_owner_session", "api_key_id", "session_id", unique=True),)
+
+
+class User(Base):
+    """A dashboard account (0007): signs in with email and password instead of the
+    admin key. Only a scrypt hash of the password is stored (core/passwords.py)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    #: Stored lowercased, so sign-in is case-insensitive on the email.
+    email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
