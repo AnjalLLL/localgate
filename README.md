@@ -7,10 +7,15 @@ that makes a small model remember far more than its context window holds.**
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-![The localgate dashboard: request and token totals, tokens per day, and a per-model breakdown](docs/images/dashboard-overview.png)
+![localgate in 90 seconds: localgate code fixes failing tests in a real session, then the dashboard shows the chat, that agent run step by step, its memory ledger, and the themes](docs/images/localgate-demo.gif)
 
-<sub>The built-in dashboard at <code>/dashboard/</code> — token spend, latency, and per-model
-usage across every key. Shown with sample data.</sub>
+<sub>A real session: <code>localgate code</code> with <b>qwen2.5-coder:7b</b> on Ollama runs
+the tests, fixes two bugs and re-runs them. The agent's part is replayed from its recorded
+terminal output (about 1.15× speed); the <code>pytest</code> lines before and after reproduce the
+actual results. Then the live dashboard shows a streamed chat answer, that same agent run as a
+timeline, its memory ledger, and the colour themes. A 7B model doesn't solve every task on the
+first try; <code>localgate bench agent</code> measures how often yours does.
+<a href="docs/media/localgate-demo.mp4">Watch the MP4</a> for full quality.</sub>
 
 ---
 
@@ -133,14 +138,80 @@ part of it. See **[RAG Memory](docs/rag-memory.md)**.
 
 ## Dashboard
 
-Served at `/dashboard/` — no build step, no separate deploy. It talks to the same `/admin`
-API the CLI does, so anything it can do is equally scriptable.
+Served at `/dashboard/` — no build step, no separate deploy, and it works offline (fonts are
+bundled). It talks to the same `/admin` API the CLI does, so anything it can do is equally
+scriptable. Sign in once with the admin key; it becomes an httpOnly session cookie and is never
+stored in the browser.
 
-![Key management: prefixes, per-key rate limits, last use, and revocation](docs/images/dashboard-keys.png)
+### Chat
 
-Create and revoke keys, watch token spend per model, browse stored conversations with their
-rolling summaries, and point the gateway at a new database — with the connection tested
-before it is saved.
+A reading-first chat on your own models: answers render as Markdown with copyable code blocks,
+the composer holds the model picker, **Web search** (answers cite their sources) and **Voice**
+(local Piper speech and Whisper dictation), and every conversation gets its own URL under
+**Recents**. Recent turns go with each message, and the gateway's memory recalls older ones.
+
+![Chat: a Python answer with a copyable code block, Recents in the sidebar, and the composer with web search, voice and the model picker](docs/images/chat.png)
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/chat-new.png" alt="A new chat: greeting, composer and quick-start suggestions"></td>
+<td width="50%"><img src="docs/images/chat-dark.png" alt="The same chat UI in dark mode"></td>
+</tr>
+<tr>
+<td><sub>New chat — greeting, composer and starters.</sub></td>
+<td><sub>Dark mode.</sub></td>
+</tr>
+</table>
+
+### Agent runs
+
+Every task `localgate code` works on, as a timeline of tool calls — what it read, edited and
+ran, how long each step took, which failed and why — plus reliability per model and per tool,
+so you can see which local models actually call tools well.
+
+![Agent runs: a real localgate code run — run_command pytest, edit_file todo.py, pytest, edit_file, pytest — with durations](docs/images/agent-runs.png)
+
+### Memory & sessions
+
+Every stored conversation with its rolling summary and the agent's **session ledger** — the
+original goal, files changed and read, decisions and open to-dos that survive context
+compaction — and a memory inspector that shows what retrieval would recall, with scores.
+
+![Memory & sessions: a localgate code session with its messages and ledger — goal, todo.py modified, files read](docs/images/memory.png)
+
+### Overview, models and keys
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/overview.png" alt="Overview: requests, tokens, latency, active keys, agent success rate, backend health and tokens per day"></td>
+<td width="50%"><img src="docs/images/models.png" alt="Models: parameters, quantization, size, tool-calling support and context window"></td>
+</tr>
+<tr>
+<td><sub><b>Overview</b> — usage, latency, agent success rate, backend health.</sub></td>
+<td><sub><b>Models</b> — size, quantization, tool calling (native, JSON mode or embedding-only) and context window.</sub></td>
+</tr>
+</table>
+
+![API keys: per-key rate limits, last use, show key, revoke, and per-key usage](docs/images/keys.png)
+
+Create, rate-limit and revoke keys; **Show key** reveals a key again later (encrypted with the
+admin key — see [Configuration](docs/configuration.md)).
+
+### Settings and themes
+
+Six themes — **Jade**, **Lagoon**, **Iris**, **Rose**, **Sunrise** and **Graphite** — each in
+light and dark, plus the chat API key (with a **Test key** button), chat defaults, a readable
+view of the server's configuration, database switching with a connection test, a web-search
+provider test, export and sign-out.
+
+![Settings: theme cards in dark mode with Iris selected, and the chat API key section](docs/images/settings.png)
+
+<img align="right" width="230" src="docs/images/phone.png" alt="The chat on a phone">
+
+It works on phones too: the sidebar becomes a slide-in menu and the composer stays within
+reach.
+
+<br clear="right">
 
 ## CLI
 
@@ -180,6 +251,9 @@ Shell completion: `localgate --install-completion` (bash/zsh/fish/PowerShell, vi
 
 ## `localgate code`
 
+![A real localgate code session: it runs pytest, shows each edit to todo.py as a diff, re-runs the tests and finishes with 3 passed](docs/images/terminal.png)
+
+
 A minimal coding agent that reads and edits files in the current project, backed by whatever
 model `localgate` is already pointed at — no separate API key needed, since it talks to the
 backend directly rather than through the gateway.
@@ -207,40 +281,79 @@ localgate code --plan                              # writes are queued and revie
 - `/theme [dark|light|none]`, `--no-color`/`NO_COLOR`, and `/config` for persisted preferences
   (`~/.config/localgate/config.toml`: theme, default model, auto-approve, max-turns — precedence
   is flags > env vars > that file > built-in defaults).
-- `/usage` (session token/request totals), `/context` (how full the conversation is vs. the
-  model's context window), `/resume` (pick a past session for this project to continue), `/tools`
+- `/usage` (session token/request totals), `/context` (where the context window goes: system
+  prompt, session ledger, history, tool schemas), `/compact [focus]`, `/ledger`, `/todos`,
+  `/agents`, `/resume` (pick a past session for this project to continue), `/tools`
   (everything available this session, and what's off and why).
-- Tools: `read_file`, `create_file`, `update_file`, `delete_file`, `write_file`, `list_directory`,
-  `search_files` (grep-like), `git_status`, and `git_diff`. All are confined to the selected
-  project directory; symlink traversal is rejected, atomic replacement prevents partial writes,
-  and `.gitignore`/`.localgateignore` hide excluded content from reads, searches, status, and diffs.
-  There is no shell/`run_command` tool: it stays disabled until a strong OS sandbox is available.
-- **What decides when the agent searches, delegates, or writes?** The model does — there's no
-  separate routing logic. Each tool's own description is the primary steering (e.g. `write_file`'s
-  says to read a file first; `web_search`'s says to only use it for things not in the project or
-  training data). `delegate_task`/`web_search` also get a couple of extra sentences appended to
-  the system prompt, but only when that tool is actually enabled for the session — see
-  `AgentSession.system_prompt()` in `agent/loop.py`. In **manual** write-mode (the default —
-  `/mode`, shift+tab), a search or delegation asks for confirmation first, same as a write;
-  auto/plan mode run both without asking. Web search is available by default through DuckDuckGo
-  unless another provider is configured.
-- **Sub-agents** (`--allow-delegation`, off by default): the agent can hand off a self-contained
-  sub-task to a fresh, isolated sub-agent and get back only its summary. Read-only tools unless
-  the delegating call explicitly grants more; a sub-agent cannot itself delegate (depth 1). Test
-  this against your own model before relying on it — a small local model may not reliably judge
-  *when* delegating actually helps.
-- **Web search** (opt-in, off unless `LOCALGATE_SEARCH_PROVIDER` is set — the tool doesn't exist
-  at all otherwise, not just disabled). Two providers:
-  - `openserp` (**recommended**) — a free, self-hosted, no-API-key search API
-    ([karust/openserp](https://github.com/karust/openserp)): `docker run -p 127.0.0.1:7000:7000
-    karust/openserp:latest serve -a 0.0.0.0 -p 7000`, then `LOCALGATE_SEARCH_PROVIDER=openserp`.
-    Runs on your own machine, so this doesn't actually leave your network — the closest fit to
-    localgate's local-first stance. Override the URL with `LOCALGATE_SEARCH_BASE_URL` if it's not
-    on the default `http://localhost:7000`.
-  - `tavily` — a hosted, paid API; needs `LOCALGATE_SEARCH_API_KEY` too. Kept for anyone who
-    already has a key. This one genuinely sends query text to a third party.
+- **Tools:** `read_file` (paged: long files come back 400 lines at a time), `edit_file` (replace
+  an exact snippet — far cheaper and safer than rewriting whole files), `create_file`,
+  `update_file`, `write_file`, `delete_file`, `list_directory`, `search_files` (grep-like),
+  `git_status`, `git_diff`, `todo_write` (a visible step-by-step plan; opt-in with
+  `LOCALGATE_AGENT_TODO_TOOL=true`, as it distracted 7B models in testing), plus `web_search`,
+  `fetch_url` and `run_command` below. File tools are confined to the project directory: symlink
+  traversal is rejected, writes are atomic and keep each file's existing line endings on every
+  OS, and `.gitignore`/`.localgateignore` hide excluded content from every tool. Arguments are
+  checked against each tool's schema, and a bad call gets a precise one-line error back.
+- **Context that doesn't lose the plot.** On Ollama the agent requests a real context window
+  (`num_ctx`, default 16K, capped at the model's maximum, `LOCALGATE_AGENT_NUM_CTX`) via the
+  native API. Without it, Ollama runs at a small default and silently drops the *oldest* tokens
+  first: the system prompt and your original request. A **session ledger** is pinned after the
+  system prompt on every turn: your original goal and current request word for word, files
+  read and changed, decisions, constraints, open to-dos and the last tool error. File activity
+  is recorded from tool events, not paraphrased by the model. When the prompt passes 75% of the
+  window, history is compacted cheapest step first: old tool output is elided, then large file
+  contents in old write calls, then the oldest exchanges are folded into the ledger. Your own
+  messages are kept word for word. The ledger is stored in the database and comes back with
+  `/resume`.
+- **Models without native tool calling** (on Ollama) still work: replies are grammar-constrained
+  to a JSON tool call or final answer. A tool-capable model is faster and more reliable.
+- **What decides when the agent searches, delegates, or writes?** The model does, from each
+  tool's description and a sentence or two of system-prompt guidance for optional tools. In
+  **manual** mode (the default) a search, fetch, delegation or command asks first. Auto mode runs
+  searches and fetches without asking, but still asks before commands that aren't on the
+  allowlist. Plan mode never runs commands.
+- **Sub-agents** (`--allow-delegation`, off by default): the agent hands a self-contained
+  sub-task to a fresh sub-agent and gets back only its summary. Built-in roles: `explorer`
+  (read-only code search), `researcher` (web search + fetch), `reviewer` (reviews the
+  uncommitted diff). Add your own as Markdown files in `~/.config/localgate/agents/` or
+  `.localgate/agents/` in the project:
 
-  Either way, results are title + short snippet + URL, never full page content.
+  ```markdown
+  ---
+  name: tester
+  description: Writes and runs focused tests for a change.
+  tools: read_file, search_files, create_file, edit_file, run_command
+  model: qwen2.5-coder:7b      # optional: run this role on a different (e.g. smaller) model
+  max_turns: 12
+  ---
+  You write minimal, focused tests...
+  ```
+
+  Sub-agents inherit timeouts, tool logging, search and confirmations; they cannot delegate
+  further (depth 1). Small local models can over-delegate, so measure with `localgate bench agent`.
+- **Web search and fetch.** `web_search` is on by default through DuckDuckGo. Set
+  `LOCALGATE_SEARCH_PROVIDER` to one provider or a fallback chain, tried in order:
+  - `searxng` (**recommended**): self-hosted metasearch with a JSON API. Run
+    `docker run -d -p 127.0.0.1:8888:8080 searxng/searxng`, enable `json` under
+    `search.formats` in its `settings.yml`, then `LOCALGATE_SEARCH_PROVIDER=searxng,duckduckgo`.
+  - `openserp`: self-hosted, no key (`LOCALGATE_SEARCH_BASE_URL`, default `:7000`).
+  - `brave`: Brave Search API (`LOCALGATE_SEARCH_BRAVE_API_KEY`); `tavily` (`LOCALGATE_SEARCH_API_KEY`).
+  - `duckduckgo`: zero-config fallback.
+
+  `fetch_url` reads a page as clean text. It only fetches public http(s) addresses (loopback,
+  private, link-local and cloud-metadata IPs are refused on every redirect hop), respects
+  robots.txt, and caps size and time.
+- **`run_command`, only inside a sandbox.** The agent can run tests, linters and type checkers,
+  but never through a bare shell. It uses the strongest sandbox available on your OS:
+  `sandbox-exec` on macOS, bubblewrap on Linux, or Docker/Podman on any OS including Windows.
+  Inside the sandbox there is no network, writes are limited to the project and temp
+  directories, and secrets are removed from the environment. If no sandbox is found, the tool is
+  simply not offered (`/tools` says why). Set `LOCALGATE_AGENT_SANDBOX=off` or pass
+  `--no-commands` to disable it.
+- **Measure it:** `localgate bench agent -m qwen2.5-coder:7b -m llama3.1:8b` runs 11 small
+  tasks in throwaway directories (read, fix, create, multi-file rename, large-file edit, delete,
+  multi-step, stay-in-project) and checks the result on disk. Every tool call is also logged
+  (redacted) and shown per model in the dashboard's **Agent runs** page.
 - **MCP servers** (config-driven, stdio only): list servers in
   `~/.config/localgate/mcp_servers.json` (`[{"name": "...", "command": "...", "args": [...]}]`)
   and their tools are connected at startup and offered to the model as `mcp__<server>__<tool>`.
@@ -253,8 +366,38 @@ localgate code --plan                              # writes are queued and revie
   `4` a write was declined, `5` the backend rejected the request, `6` the backend was
   unreachable, `130` interrupted.
 
-Tool-calling quality depends entirely on the model — verify yours actually returns structured
-tool calls (not JSON printed as text) before relying on this day to day.
+Tool-calling quality depends heavily on the model. Run `localgate bench agent` on yours before
+relying on it day to day.
+
+## Voice (local)
+
+Talk to your models and hear them answer. Everything runs on your machine: speech
+synthesis with [Piper](https://github.com/OHF-Voice/piper1-gpl) and transcription with
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper). Prebuilt wheels exist for macOS,
+Linux and Windows, so no compiler is needed.
+
+```bash
+pip install 'localgate[voice]'          # or: uv sync --extra voice
+localgate voice status                  # what's installed
+localgate voice download en_US-lessac-medium   # optional: voices download on first use
+localgate voice say "Hello from localgate"
+localgate voice listen                  # speak, press Enter, get the text
+localgate code --voice                  # replies are read aloud; /voice toggles, /listen dictates
+```
+
+- **Dashboard chat:** 🎙 records from the microphone (browsers allow this on `localhost` or
+  https), and **Speak replies** reads answers aloud. If the server has no voice extra, the
+  dashboard falls back to the browser's built-in speech.
+- **API:** OpenAI-compatible `POST /v1/audio/speech` (returns WAV) and
+  `POST /v1/audio/transcriptions` (multipart `file`, or a raw audio body), plus
+  `GET /v1/audio/voices`. Audio is never stored.
+- **Voices:** browse them at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+  Set the default with `LOCALGATE_VOICE_TTS_VOICE`. The Whisper model (`LOCALGATE_VOICE_STT_MODEL`,
+  default `base`) is multilingual. Use `small` for better accuracy, or `base.en` for English-only
+  speed.
+- **No Python package?** If a standalone `piper` executable is on your PATH, it is used instead
+  (put the voice's `.onnx` and `.onnx.json` files in the voices folder).
+- **License:** Piper is GPL-3.0. It is an optional extra and is never bundled with localgate.
 
 ## Self-hosting with automatic HTTPS
 

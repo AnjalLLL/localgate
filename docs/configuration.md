@@ -101,6 +101,45 @@ the bookkeeping.
 The cache is per-process. Multiple workers means multiple independent caches — correct,
 just less effective.
 
+## Coding agent
+
+| Setting | Default | Description |
+|---|---|---|
+| `LOCALGATE_AGENT_NUM_CTX` | `16384` | Context window the agent requests from Ollama (`num_ctx`), capped at the model's maximum. Larger windows use more VRAM. |
+| `LOCALGATE_AGENT_TEMPERATURE` | `0.2` | Sampling temperature for the agent. Low values make tool calls and exact edit snippets more reliable. |
+| `LOCALGATE_AGENT_TODO_TOOL` | `false` | Offer the `todo_write` planning tool. Helpful with larger models; in testing it pulled 7B models into planning prose instead of acting. |
+| `LOCALGATE_AGENT_SANDBOX` | `auto` | `auto` picks the strongest available sandbox for `run_command` (`seatbelt` on macOS, `bubblewrap` on Linux, then `docker`/`podman`). Name one to require it, or `off`. |
+| `LOCALGATE_AGENT_SANDBOX_IMAGE` | `python:3.12-slim` | Image for the Docker/Podman sandbox. Use one with your project's toolchain. |
+| `LOCALGATE_TOOL_TIMEOUT_COMMAND` | `120` | Default seconds before a sandboxed command is stopped. |
+| `LOCALGATE_TOOL_TIMEOUT_SEARCH` / `_READ` / `_WRITE` / `_DELEGATE` | `20` / `30` / `60` / `180` | Per-tool timeouts. |
+| `LOCALGATE_TOOL_LOGGING_ENABLED` | `true` | Store a redacted log of every agent tool call (shown in the dashboard's Agent runs page). |
+
+## Web search
+
+| Setting | Default | Description |
+|---|---|---|
+| `LOCALGATE_SEARCH_PROVIDER` | `duckduckgo` | One provider or a comma-separated fallback chain: `searxng`, `openserp`, `brave`, `tavily`, `duckduckgo`. |
+| `LOCALGATE_SEARCH_SEARXNG_URL` | `http://localhost:8888` | Your SearXNG instance (JSON format must be enabled). |
+| `LOCALGATE_SEARCH_BASE_URL` | `http://localhost:7000` | OpenSERP URL (also used for SearXNG if the specific setting is unset). |
+| `LOCALGATE_SEARCH_BRAVE_API_KEY` | — | Brave Search API key. |
+| `LOCALGATE_SEARCH_API_KEY` | — | Tavily API key. |
+| `LOCALGATE_WEB_SEARCH_ENABLED` | `true` | Allow chat requests to ask for web search (`"localgate": {"web_search": true}`). |
+| `LOCALGATE_WEB_SEARCH_MAX_SOURCES` | `4` | Sources fetched and cited per chat answer. |
+| `LOCALGATE_FETCH_ALLOW_PRIVATE` | `false` | Let `fetch_url` and chat search reach loopback/private-network hosts. Leave off unless you need it. |
+
+## Voice
+
+Needs `pip install 'localgate[voice]'`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `LOCALGATE_VOICE_ENABLED` | `true` | Serve `/v1/audio/*` and allow `/voice`/`/listen` in `localgate code`. |
+| `LOCALGATE_VOICE_TTS_VOICE` | `en_US-lessac-medium` | Default Piper voice. |
+| `LOCALGATE_VOICE_DIR` | `<data dir>/voices` | Where Piper voices (`.onnx` + `.onnx.json`) live. |
+| `LOCALGATE_VOICE_AUTO_DOWNLOAD` | `true` | Download a missing voice on first use. |
+| `LOCALGATE_VOICE_STT_MODEL` | `base` | faster-whisper model: `tiny`, `base`, `small`, `medium`, `turbo`, or a `.en` variant. |
+| `LOCALGATE_VOICE_STT_DEVICE` | `auto` | `auto`, `cpu` or `cuda`. |
+
 ## Auth and limits
 
 | Setting | Default | Description |
