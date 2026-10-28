@@ -404,17 +404,27 @@ def read_file(root: Path, path: str) -> str:
 _TEXT_ARGUMENTS = ("content", "new_string", "old_string")
 
 
+#: File types where a literal backslash-n is never meant: markup, styles, prose.
+_NO_ESCAPES_SUFFIXES = (".html", ".htm", ".css", ".scss", ".md", ".txt", ".xml", ".svg", ".vue")
+
+
 def unescape_text_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     """Undo a common small-model mistake: file text sent JSON-escaped twice, so it
-    arrives as one line full of literal ``\\n`` sequences instead of newlines.
+    arrives with literal ``\\n`` sequences instead of newlines.
 
-    Only applied when a value has no real newline at all but several literal ones —
-    a single ``\\n`` inside a string literal in code is left alone.
+    In code, applied only when a value has no real newline at all but several
+    literal ones — a ``\\n`` inside a string literal is left alone. In markup,
+    style and prose files a literal ``\\n`` is never meant, so there it is undone
+    even when the text also has real newlines (a model that escaped half the file).
     """
     fixed = dict(arguments)
+    path = str(fixed.get("path") or "").lower()
+    markup = path.endswith(_NO_ESCAPES_SUFFIXES)
     for key in _TEXT_ARGUMENTS:
         value = fixed.get(key)
-        if isinstance(value, str) and "\n" not in value and value.count("\\n") >= 2:
+        if not isinstance(value, str) or value.count("\\n") < 2:
+            continue
+        if markup or "\n" not in value:
             fixed[key] = (
                 value.replace("\\r\\n", "\n")
                 .replace("\\n", "\n")

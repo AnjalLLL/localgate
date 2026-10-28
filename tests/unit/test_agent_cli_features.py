@@ -413,3 +413,86 @@ async def test_messages_typed_during_a_turn_run_next_in_order(project, monkeypat
         "second request",
         "third request",
     ]
+
+
+# ------------------------------------- small context windows (seen with llama3)
+
+
+def _write(path: str, content: str) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": f"w{abs(hash(content)) % 10_000}",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": path, "content": content}),
+                },
+            }
+        ],
+    }
+
+
+async def test_a_compaction_placeholder_is_never_written_and_never_asked_about(project):
+    asked: list[str] = []
+    # After the refusal nothing has changed, so the loop also nudges once more.
+    backend = ScriptedBackend(
+        [_write("app.py", "<500 chars elided>"), final_text("done"), final_text("left it alone")]
+    )
+    session = AgentSession(
+        backend,
+        "scripted-model",
+        project,
+        confirm_write=lambda path, _c: asked.append(path) or True,
+    )
+    await session.send("rewrite app.py")
+    assert (project / "app.py").read_text() == "print('hi')\n"
+    assert asked == []  # the user never saw a prompt for it
+    tool_reply = [m for m in backend.requests[1]["messages"] if m["role"] == "tool"][-1]
+    assert "placeholder" in tool_reply["content"]
+
+
+async def test_rewriting_one_file_over_and_over_is_stopped(project):
+    asked: list[str] = []
+    backend = ScriptedBackend(
+        [
+            _write("app.py", "v1 = 1\n"),
+            _write("app.py", "v2 = 2\n"),
+            _write("app.py", "v3 = 3\n"),
+            final_text("done"),
+        ]
+    )
+    session = AgentSession(
+        backend,
+        "scripted-model",
+        project,
+        confirm_write=lambda path, _c: asked.append(path) or True,
+    )
+    await session.send("update app.py")
+    assert asked == ["app.py", "app.py"]  # the third rewrite was refused without asking
+    assert (project / "app.py").read_text() == "v2 = 2\n"
+    tool_reply = [m for m in backend.requests[-1]["messages"] if m["role"] == "tool"][-1]
+    assert "already rewritten 2 times" in tool_reply["content"]
+
+
+def test_the_reply_budget_scales_with_the_window():
+    from localgate.agent.loop import reply_budget
+
+    assert reply_budget(8192) == 2048  # llama3: ~6K left for context, not ~4K
+    assert reply_budget(32768) == 4096
+    assert reply_budget(2048) == 1024
+
+
+def test_half_escaped_html_is_repaired_but_code_strings_are_not():
+    from localgate.agent.tools import unescape_text_arguments
+
+    html = (
+        "<html>\n<body>\n<div class='nav'>\\n<a href='#'>Home</a>\\n<a href='#a'>About</a>\\n</div>"
+    )
+    fixed = unescape_text_arguments({"path": "src/index.html", "content": html})["content"]
+    assert "\\n" not in fixed and fixed.count("\n") == 5
+
+    code = 'import sys\nprint("a\\nb")\nprint("c\\nd")\n'
+    assert unescape_text_arguments({"path": "app.py", "content": code})["content"] == code
