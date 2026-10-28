@@ -54,6 +54,8 @@ async def test_rate_limit_can_be_updated_without_reissuing_the_key(client, admin
     )
     assert limited.status_code == 429
     assert limited.json()["error"]["type"] == "rate_limit_error"
+    # It says when to come back, so a client can wait instead of hammering.
+    assert 1 <= int(limited.headers["retry-after"]) <= 60
 
 
 async def test_revoked_key_cannot_authenticate(client, admin_headers, api_key):
