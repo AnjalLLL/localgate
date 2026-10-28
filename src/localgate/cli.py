@@ -25,7 +25,7 @@ from sqlalchemy.exc import OperationalError
 from localgate import __version__, paths
 from localgate.app import resolve_database_url
 from localgate.backends import available_backends, get_backend
-from localgate.config import INSECURE_ADMIN_KEY, Settings, load_settings
+from localgate.config import INSECURE_ADMIN_KEY, Settings, env_file_chain, load_settings
 from localgate.core.db_config_store import (
     _default_config_path,
     redact_database_url,
@@ -91,6 +91,53 @@ def _settings() -> Settings:
         raise typer.Exit(code=2) from exc
 
 
+# --------------------------------------------------------------------- admin key
+
+_ADMIN_KEY_VAR = "LOCALGATE_ADMIN_KEY"
+
+
+def _admin_key_source() -> str | None:
+    """Where LOCALGATE_ADMIN_KEY is set, highest precedence first, or ``None``."""
+    if os.environ.get(_ADMIN_KEY_VAR):
+        return "the LOCALGATE_ADMIN_KEY environment variable"
+    # `env_file_chain` lists files lowest precedence first; the last one wins.
+    for env_file in reversed(env_file_chain()):
+        try:
+            lines = env_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        if any(line.strip().startswith(f"{_ADMIN_KEY_VAR}=") for line in lines):
+            return str(env_file.resolve())
+    return None
+
+
+def _write_admin_key(admin_key: str) -> Path:
+    """Store ``admin_key`` in the per-user env file (owner-only), keeping its other lines."""
+    env_file = paths.user_env_file()
+    try:
+        kept = [
+            line
+            for line in env_file.read_text(encoding="utf-8").splitlines()
+            if not line.strip().startswith(f"{_ADMIN_KEY_VAR}=")
+        ]
+    except OSError:
+        kept = ["# Add other LOCALGATE_* vars here — see localgate --help for options."]
+    paths.write_secret_text(env_file, "\n".join([f"{_ADMIN_KEY_VAR}={admin_key}", *kept]) + "\n")
+    return env_file
+
+
+def _ensure_admin_key() -> str | None:
+    """First run of a pip-installed gateway: nothing sets an admin key, so the
+    public placeholder would guard /admin. Generate a real one instead and save
+    it where `load_settings` finds it. Returns the new key, or ``None`` when one
+    was already configured (even if it is the placeholder — that was a choice)."""
+    if _admin_key_source() is not None:
+        return None
+    admin_key = secrets.token_urlsafe(32)
+    _write_admin_key(admin_key)
+    return admin_key
+
+
 def _run(coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
 
@@ -150,7 +197,15 @@ def serve(
     ),
 ) -> None:
     """Start the gateway."""
+    new_admin_key = _ensure_admin_key()
     settings = _settings()
+    if new_admin_key is not None:
+        dashboard = f"http://{host or settings.host}:{port or settings.port}/dashboard/"
+        typer.secho("First run: generated an admin key for this gateway.", fg=typer.colors.GREEN)
+        typer.echo(f"  admin key   {new_admin_key}")
+        typer.echo(f"  saved to    {paths.user_env_file()}")
+        typer.echo(f"  sign in at  {dashboard}   (show the key again: localgate admin-key)")
+        typer.echo()
     common: dict = {
         "host": host or settings.host,
         "port": port or settings.port,
@@ -289,17 +344,13 @@ def init(
         typer.echo("[dry-run] Would write admin key to env file (0600).")
         return
 
-    # Generate a new admin key only when the env file is absent or --force.
-    wrote_key = False
-    if force or not env_file.exists():
-        admin_key = secrets.token_urlsafe(32)
-        # Include bare minimum so the file is immediately usable.
-        content = (
-            f"LOCALGATE_ADMIN_KEY={admin_key}\n"
-            "# Add other LOCALGATE_* vars here — see localgate --help for options.\n"
-        )
-        paths.write_secret_text(env_file, content)
-        wrote_key = True
+    # Generate a new admin key only when none is configured yet, or with --force.
+    new_admin_key: str | None = None
+    if force:
+        new_admin_key = secrets.token_urlsafe(32)
+        _write_admin_key(new_admin_key)
+    else:
+        new_admin_key = _ensure_admin_key()
 
     # Run migrations against the default database.
     settings = _settings()
@@ -322,15 +373,70 @@ def init(
     typer.secho("localgate init complete.", fg=typer.colors.GREEN, bold=True)
     typer.echo(f"  config dir  {config_dir}")
     typer.echo(f"  data dir    {data_dir}")
-    if wrote_key:
+    if new_admin_key is not None:
         typer.secho(f"  env file    {env_file}  (admin key written — 0600)", fg=typer.colors.GREEN)
+        typer.echo(f"  admin key   {new_admin_key}")
         typer.secho(
-            "  Run `localgate serve` to start. The admin key is in the env file above.",
+            "  Run `localgate serve` and sign in to the dashboard with it "
+            "(`localgate admin-key` shows it again).",
             fg=typer.colors.YELLOW,
         )
     else:
-        typer.echo(f"  env file    {env_file}  (exists — use --force to regenerate)")
+        typer.echo(
+            f"  admin key   already set in {_admin_key_source()} "
+            "(`localgate admin-key` shows it; --force regenerates)"
+        )
     typer.echo(f"  database    {redact_database_url(db_url)}  (revision {revision})")
+
+
+@app.command("admin-key")
+def admin_key(
+    rotate: bool = typer.Option(
+        False, "--rotate", help="Replace it with a new random key (signs out dashboard sessions)."
+    ),
+) -> None:
+    """Show this gateway's admin key, used to sign in to the dashboard and the /admin API.
+
+    It's created on the first `localgate serve` (or `localgate init`) and kept in
+    the per-user env file, unless LOCALGATE_ADMIN_KEY is set elsewhere.
+    """
+    if rotate:
+        source = _admin_key_source()
+        if source is not None and source != str(paths.user_env_file().resolve()):
+            typer.secho(
+                f"The admin key comes from {source}; change it there instead.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        new_key = secrets.token_urlsafe(32)
+        env_file = _write_admin_key(new_key)
+        typer.secho(f"New admin key saved to {env_file}", fg=typer.colors.GREEN)
+        typer.echo(new_key)
+        typer.secho(
+            "Restart `localgate serve` to use it. Keys created with reveal enabled can no "
+            "longer be revealed (they still work).",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    source = _admin_key_source()
+    if source is None:
+        typer.secho(
+            "No admin key yet — `localgate serve` or `localgate init` creates one.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=1)
+    settings = _settings()
+    typer.echo(settings.admin_key)
+    typer.secho(f"from {source}", fg=typer.colors.BRIGHT_BLACK, err=True)
+    if settings.uses_insecure_admin_key:
+        typer.secho(
+            "This is the public placeholder — anyone can use it. Set a real key there, "
+            "or remove the line and run `localgate admin-key --rotate`.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
 
 
 # ---------------------------------------------------------------------------- doctor
@@ -467,7 +573,11 @@ def login(
         help="An API key (not the admin key) minted on that gateway.",
     ),
 ) -> None:
-    """Save credentials for a remote localgate gateway.
+    """Connect this machine to a localgate gateway running somewhere else.
+
+    Only needed for a *remote* gateway: `localgate code` and `localgate serve` on
+    this machine need no login. The API key comes from whoever runs the gateway —
+    on that machine, `localgate keys create --name <you>` or Dashboard → API keys.
 
     Verifies the key is valid by hitting /v1/usage (pure DB, no backend needed),
     and checks the gateway version via /health/live.
@@ -497,7 +607,13 @@ def login(
             # Probe with the API key — /v1/usage never calls the backend.
             resp = await client.get("/v1/usage", headers={"Authorization": f"Bearer {api_key}"})
             if resp.status_code == 401:
-                typer.secho("Invalid or revoked API key.", fg=typer.colors.RED, err=True)
+                typer.secho(
+                    "Invalid or revoked API key. Ask the gateway's admin for one: "
+                    "`localgate keys create --name <you>` on that machine, or "
+                    f"{base}/dashboard/ → API keys.",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
                 raise typer.Exit(code=1)
             resp.raise_for_status()
 

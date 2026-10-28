@@ -171,10 +171,10 @@ def create_app(
 
     @app.middleware("http")
     async def security_headers(request: Any, call_next: Any) -> Any:
-        """Strict headers on the dashboard: scripts and styles only from this
+        """Strict headers on the dashboard and landing page: scripts and styles only from this
         origin (no inline script), no framing, no referrer leakage."""
         response = await call_next(request)
-        if request.url.path.startswith("/dashboard"):
+        if request.url.path == "/" or request.url.path.startswith("/dashboard"):
             response.headers.setdefault("Content-Security-Policy", DASHBOARD_CSP)
             response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -195,7 +195,7 @@ def create_app(
         models,
         usage,
     )
-    from localgate.dashboard.routes import mount_dashboard
+    from localgate.dashboard.routes import mount_dashboard, mount_home
 
     app.include_router(health.router)
     app.include_router(chat.router)
@@ -213,5 +213,6 @@ def create_app(
     app.include_router(admin_ops.router, prefix="/admin")
 
     mount_dashboard(app)
+    mount_home(app)
 
     return app

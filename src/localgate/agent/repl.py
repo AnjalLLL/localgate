@@ -20,9 +20,12 @@ from typing import Any, NamedTuple
 import httpx
 import typer
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application.current import get_app
+from prompt_toolkit.filters import to_filter
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory, History, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.layout import BufferControl, HSplit, VerticalAlign
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
@@ -36,7 +39,12 @@ from localgate import __version__, paths
 from localgate.agent import gitutil
 from localgate.agent import theme as theme_mod
 from localgate.agent.commands import command_dirs, load_commands
-from localgate.agent.input import AgentCompleter, input_key_bindings, mentioned_files
+from localgate.agent.input import (
+    AgentCompleter,
+    completing_command_or_path,
+    input_key_bindings,
+    mentioned_files,
+)
 from localgate.agent.instructions import (
     INIT_PROMPT,
     INSTRUCTION_FILES,
@@ -46,7 +54,7 @@ from localgate.agent.interrupt import InterruptWatcher
 from localgate.agent.loop import AgentSession, AgentTurnLimitExceeded, AsyncTool
 from localgate.agent.mcp import McpRegistry
 from localgate.agent.memory import AgentMemory, list_project_sessions, set_current_project_session
-from localgate.agent.render import DraftView, print_diff, todo_checklist
+from localgate.agent.render import DraftView, collapse_code, print_diff, todo_checklist
 from localgate.agent.roles import AgentRole
 from localgate.agent.sandbox import (
     RUN_COMMAND_GUIDANCE,
@@ -82,7 +90,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/exit", "End the session."),
     ("/clear", "Clear conversation history (keep model/settings)."),
     ("/model [name]", "Show a picker, or switch directly to <name>."),
-    ("/theme [name]", "Show or set the color theme: dark, light, none."),
+    ("/theme [name]", "Show or set the color theme: sunrise, dark, light, none."),
     ("/mode [name]", "Show or set the write mode: manual, auto, plan (or shift+tab)."),
     ("/usage", "Request/token totals for this session."),
     ("/context", "How full the conversation is vs. the model's context window."),
@@ -94,6 +102,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/listen", "Dictate your next message: speak, then press Enter (local Whisper)."),
     ("/config [key value]", "View, or set and persist, a preference."),
     ("/resume", "Pick a past session for this project to resume."),
+    ("/last", "Show the last reply in full, including code hidden from the chat."),
     ("/undo", "Revert the most recent write."),
     ("/rewind [n]", "Step back through the last n writes (default 1)."),
     ("/mcp", "List connected MCP servers and their tools."),
@@ -208,7 +217,7 @@ class WriteGate:
         auto_approve: bool = False,
         force: bool = False,
         auto_commit: bool = False,
-        theme_name: str = "dark",
+        theme_name: str = theme_mod.DEFAULT_THEME,
         plan_mode: bool = False,
     ) -> None:
         self.console = console
@@ -648,14 +657,38 @@ async def _model_picker(
     await _switch_model(console, session, target, models, caniollama_client)
 
 
+_THEME_NOTES = {
+    "sunrise": "warm amber, for a dark terminal (default)",
+    "dark": "classic green, for a dark terminal",
+    "light": "deeper colors, for a light-background terminal",
+    "none": "no colors",
+}
+
+
+def _apply_theme(
+    theme_name: str,
+    no_color: bool,
+    gate: WriteGate,
+    prompt_session: PromptSession[str] | None,
+) -> Console:
+    """Switch every part of the UI to ``theme_name``; returns the new console."""
+    console = theme_mod.make_console(theme_name, no_color=no_color)
+    gate.console = console
+    gate.theme_name = theme_name
+    if prompt_session is not None:
+        prompt_session.style = theme_mod.prompt_style(theme_name, no_color=no_color)
+    return console
+
+
 def _theme_picker(console: Console, current: str) -> str | None:
     """`/theme` with no argument: show available themes and let user pick."""
-    console.print(f"[dim]current theme: {current}[/dim]")
     for i, name in enumerate(THEMES, start=1):
-        marker = "*" if name == current else " "
-        console.print(f"  {marker}{i}. {name}")
+        marker = "[bold green]●[/bold green]" if name == current else " "
+        swatch = "" if name == "none" else _theme_swatch(name)
+        note = _THEME_NOTES.get(name, "")
+        console.print(f" {marker} {i}. [bold]{name:<8}[/bold] {swatch} [dim]{note}[/dim]")
     choice = console.input(
-        "[bold green]select a theme (number or name, blank to cancel): [/bold green]"
+        "[bold green]❯ pick a theme[/bold green] [dim](number or name, blank to cancel)[/dim] "
     ).strip()
     if not choice:
         return None
@@ -665,6 +698,12 @@ def _theme_picker(console: Console, current: str) -> str | None:
         return choice.lower()
     console.print(f"[red]invalid choice: {choice!r}[/red]")
     return None
+
+
+def _theme_swatch(theme_name: str) -> str:
+    """Three colored blocks previewing a theme's accent, secondary and success."""
+    p = theme_mod.palette_for(theme_name)
+    return "".join(f"[{c}]■[/{c}]" for c in (p.accent, p.secondary, p.success))
 
 
 def _set_config_value(cfg: UserConfig, key: str, raw_value: str) -> UserConfig:
@@ -969,9 +1008,13 @@ def _make_prompt_session(
     # The toolbar redraws on every keystroke; recount tokens only when history changes.
     usage_cache: dict[int, int] = {}
 
-    def _bottom_toolbar() -> str:
-        parts = [f" {session.model}"] if session is not None else []
-        parts.append(f"{mode_label(gate.mode())} (shift+tab)")
+    def _bottom_toolbar() -> FormattedText:
+        # The rule closes the input frame opened by `_prompt_message`, so the
+        # prompt reads as one compact box with the status line right under it.
+        fragments: list[tuple[str, str]] = [("class:frame", _rule() + "\n")]
+        if session is not None:
+            fragments.append(("class:bottom-toolbar.model", f" {session.model}"))
+        parts = [f"{mode_label(gate.mode())} (shift+tab)"]
         if session is not None and session.num_ctx:
             key = len(session.messages)
             if key not in usage_cache:
@@ -979,7 +1022,8 @@ def _make_prompt_session(
                 usage_cache[key] = session.context_usage()
             parts.append(f"context {usage_cache[key] / session.num_ctx:.0%}")
         parts.append("@ file · ! shell · /help")
-        return " · ".join(parts)
+        fragments.append(("", " · " + " · ".join(parts)))
+        return FormattedText(fragments)
 
     completer = None
     if session is not None:
@@ -994,22 +1038,51 @@ def _make_prompt_session(
         history: History = FileHistory(str(paths.ensure_data_dir() / "prompt_history"))
     except OSError:
         history = InMemoryHistory()
-    return PromptSession(
+    prompt_session: PromptSession[str] = PromptSession(
         key_bindings=merge_key_bindings([bindings, input_key_bindings()]),
         bottom_toolbar=_bottom_toolbar,
         completer=completer,
-        complete_while_typing=True,
+        # Completion pops up only for a `/command` or an `@path`. That also decides
+        # when prompt_toolkit holds blank lines open under the input for the menu:
+        # always reserving them left a big gap between the prompt and the toolbar.
+        complete_while_typing=completing_command_or_path,
         history=history,
         multiline=False,
+        style=theme_mod.prompt_style(gate.theme_name),
     )
+    _keep_toolbar_under_input(prompt_session)
+    return prompt_session
 
 
-_PROMPT = FormattedText([("ansigreen bold", "❯ ")])
+def _keep_toolbar_under_input(prompt_session: PromptSession[str]) -> None:
+    """Once prompt_toolkit learns the cursor position it stretches the input
+    window over the rest of the screen, pinning the toolbar to the bottom row
+    with a block of blank lines above it. Stop the input window from stretching
+    and let the layout end right after the toolbar instead."""
+    for window in prompt_session.layout.find_all_windows():
+        control = window.content
+        if isinstance(control, BufferControl) and control.buffer is prompt_session.default_buffer:
+            window.dont_extend_height = to_filter(True)
+    root = prompt_session.layout.container
+    if isinstance(root, HSplit):
+        root.align = VerticalAlign.TOP
+
+
+def _rule() -> str:
+    try:
+        width = get_app().output.get_size().columns
+    except Exception:  # noqa: BLE001 — no running app: fall back to a sane width
+        width = 80
+    return "─" * max(10, width)
+
+
+def _prompt_message() -> FormattedText:
+    return FormattedText([("class:frame", _rule() + "\n"), ("class:prompt", "❯ ")])
 
 
 async def _read_line(console: Console, prompt_session: PromptSession[str] | None) -> str:
     if prompt_session is not None:
-        return await prompt_session.prompt_async(_PROMPT)
+        return await prompt_session.prompt_async(_prompt_message)
     return console.input("[bold green]❯ [/bold green]")
 
 
@@ -1036,6 +1109,7 @@ async def run_turn(
     stopped = False
     started = time.monotonic()
     tool_calls = 0
+    hidden_code = 0
     code_theme = theme_mod.syntax_theme_for(gate.theme_name)
     draft = DraftView(code_theme)
     draft_live: Live | None = None
@@ -1069,9 +1143,12 @@ async def run_turn(
     def on_token(text: str) -> None:
         # The loop hands over the final answer in one piece, so it can be laid
         # out as Markdown — headings, lists, highlighted code — not raw ``###``.
+        # Long code blocks are summarized; `/last` prints the reply in full.
+        nonlocal hidden_code
         stop()
+        shown, hidden_code = collapse_code(text)
         console.print()
-        console.print(Markdown(text, code_theme=code_theme))
+        console.print(Markdown(shown, code_theme=code_theme))
 
     def on_event(line: str) -> None:
         nonlocal tool_calls
@@ -1159,6 +1236,11 @@ async def run_turn(
     if gate.writes_this_turn:
         names = ", ".join(escape(n) for n in dict.fromkeys(gate.writes_this_turn))
         summary.append(f"[bold green]✓ wrote {names}[/bold green]")
+    elif hidden_code:
+        # Say it plainly: code in the chat is not code in the project.
+        summary.append("[yellow]⚠ no files changed — the code above is only in the reply[/yellow]")
+    else:
+        summary.append("[dim]no files changed[/dim]")
     if tool_calls:
         summary.append(f"[dim]{tool_calls} tool call{'s' if tool_calls != 1 else ''}[/dim]")
     summary.append(f"[dim]{time.monotonic() - started:.1f}s[/dim]")
@@ -1293,7 +1375,7 @@ async def build_agent_session(
     def show_todos(current: TodoList) -> None:
         session.ledger.open_todos = current.pending()
         if current.items:
-            console.print(todo_checklist(current.items))
+            gate.console.print(todo_checklist(current.items))  # follows /theme
 
     todos.on_change = show_todos
     if memory is not None:
@@ -1312,7 +1394,7 @@ async def run_repl(
     force: bool = False,
     auto_commit: bool = False,
     memory: AgentMemory | None = None,
-    theme: str = "dark",
+    theme: str = theme_mod.DEFAULT_THEME,
     no_color: bool = False,
     max_turns: int = 20,
     user_config: UserConfig | None = None,
@@ -1359,6 +1441,8 @@ async def run_repl(
         native_tools=native_tools,
     )
     prompt_session = _make_prompt_session(gate, session)
+    if prompt_session is not None and no_color:
+        prompt_session.style = theme_mod.prompt_style(theme_name, no_color=True)
 
     # Initialize caniollama client if settings are available
     caniollama_client = None
@@ -1375,6 +1459,8 @@ async def run_repl(
     console.print(banner)
     #: `!command` results waiting to be shown to the model with the next message.
     shell_notes: list[str] = []
+    #: The last full reply, for `/last` (the chat shows it with long code collapsed).
+    last_reply = ""
 
     while True:
         try:
@@ -1421,22 +1507,18 @@ async def run_repl(
                     )
                 else:
                     theme_name = requested
-                    console = theme_mod.make_console(theme_name, no_color=no_color)
-                    gate.console = console
-                    gate.theme_name = theme_name
-                    cfg = cfg.with_override(theme=theme_name)
-                    cfg.save()
-                    console.print(f"[dim]theme set to {theme_name}[/dim]")
             else:
-                picked = _theme_picker(console, theme_name)
-                if picked is not None:
-                    theme_name = picked
-                    console = theme_mod.make_console(theme_name, no_color=no_color)
-                    gate.console = console
-                    gate.theme_name = theme_name
-                    cfg = cfg.with_override(theme=theme_name)
-                    cfg.save()
-                    console.print(f"[dim]theme set to {theme_name}[/dim]")
+                theme_name = _theme_picker(console, theme_name) or theme_name
+            if theme_name != cfg.theme:
+                console = _apply_theme(theme_name, no_color, gate, prompt_session)
+                cfg = cfg.with_override(theme=theme_name)
+                cfg.save()
+                console.print(f"[green]theme set to {theme_name}[/green]")
+                if theme_name == "light":
+                    console.print(
+                        "[dim]Colors for a light-background terminal. The background itself "
+                        "is set in your terminal app's settings.[/dim]"
+                    )
             continue
         if line.startswith("/mode"):
             parts = line.split(maxsplit=1)
@@ -1465,6 +1547,14 @@ async def run_repl(
                     continue
                 steps = int(parts[1].strip())
             console.print(f"[yellow]{gate.rewind(steps)}[/yellow]")
+            continue
+        if line == "/last":
+            if last_reply:
+                console.print(
+                    Markdown(last_reply, code_theme=theme_mod.syntax_theme_for(theme_name))
+                )
+            else:
+                console.print("[dim]no reply yet[/dim]")
             continue
         if line == "/help":
             _print_help(console, root)
@@ -1520,9 +1610,7 @@ async def run_repl(
                     cfg.save()
                     if parts[1] == "theme":
                         theme_name = cfg.theme
-                        console = theme_mod.make_console(theme_name, no_color=no_color)
-                        gate.console = console
-                        gate.theme_name = theme_name
+                        console = _apply_theme(theme_name, no_color, gate, prompt_session)
                     console.print(f"[dim]{parts[1]} = {getattr(cfg, parts[1])}[/dim]")
             else:
                 console.print("[dim]usage: /config [key value][/dim]")
@@ -1585,6 +1673,8 @@ async def run_repl(
                 usage=usage,
                 attachments=attachments,
             )
+            if reply:
+                last_reply = reply
             if voice is not None and voice.speak_enabled and reply:
                 await voice.say(reply)
         except AgentTurnLimitExceeded as exc:
@@ -1614,7 +1704,7 @@ async def run_single_shot(
     force: bool = False,
     auto_commit: bool = False,
     memory: AgentMemory | None = None,
-    theme: str = "dark",
+    theme: str = theme_mod.DEFAULT_THEME,
     no_color: bool = False,
     max_turns: int = 20,
     plan_mode: bool = False,

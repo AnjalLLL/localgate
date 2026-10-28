@@ -156,3 +156,83 @@ def test_a_bad_config_is_a_readable_message_not_a_traceback(env, monkeypatch):
     assert result.exit_code == 2
     assert "Configuration error" in result.output
     assert "Traceback" not in result.output
+
+
+# ---------------------------------------------------------------- admin key
+
+
+@pytest.fixture
+def fresh(tmp_path, monkeypatch):
+    """A pip install's first run: no LOCALGATE_ADMIN_KEY anywhere."""
+    monkeypatch.setenv("LOCALGATE_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/cli.db")
+    monkeypatch.setenv("LOCALGATE_BACKEND_TYPE", "fake")
+    monkeypatch.chdir(tmp_path)
+
+
+def test_first_serve_generates_and_saves_a_private_admin_key(fresh, monkeypatch):
+    from localgate import paths
+    from localgate.config import INSECURE_ADMIN_KEY
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        "uvicorn.run", lambda app, **kwargs: started.append(app.state.settings.admin_key)
+    )
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.output
+    assert "generated an admin key" in result.stdout
+    saved = paths.user_env_file().read_text()
+    (key,) = [
+        line.split("=", 1)[1]
+        for line in saved.splitlines()
+        if line.startswith("LOCALGATE_ADMIN_KEY=")
+    ]
+    assert key in result.stdout
+    assert started == [key] and key != INSECURE_ADMIN_KEY
+
+    # Second run: the saved key is reused, not replaced or printed again.
+    result = runner.invoke(app, ["serve"])
+    assert "generated an admin key" not in result.stdout
+    assert started == [key, key]
+
+
+def test_serve_leaves_an_explicitly_configured_key_alone(fresh, monkeypatch):
+    from localgate import paths
+
+    monkeypatch.setenv("LOCALGATE_ADMIN_KEY", "chosen-by-the-operator")
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+    result = runner.invoke(app, ["serve"])
+    assert "generated an admin key" not in result.stdout
+    assert not paths.user_env_file().exists()
+
+
+def test_admin_key_shows_the_key_and_where_it_comes_from(fresh, monkeypatch):
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+    runner.invoke(app, ["serve"])
+    result = runner.invoke(app, ["admin-key"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() and "localgate.env" in result.stderr
+
+
+def test_admin_key_before_any_setup_says_how_to_create_one(fresh):
+    result = runner.invoke(app, ["admin-key"])
+    assert result.exit_code == 1
+    assert "localgate serve" in result.stdout
+
+
+def test_admin_key_rotate_replaces_the_saved_key(fresh, monkeypatch):
+    from localgate import paths
+
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+    runner.invoke(app, ["serve"])
+    before = paths.user_env_file().read_text()
+    result = runner.invoke(app, ["admin-key", "--rotate"])
+    assert result.exit_code == 0
+    after = paths.user_env_file().read_text()
+    assert before != after and after.count("LOCALGATE_ADMIN_KEY=") == 1
+
+
+def test_admin_key_rotate_refuses_when_the_key_is_set_elsewhere(fresh, monkeypatch):
+    monkeypatch.setenv("LOCALGATE_ADMIN_KEY", "from-the-environment")
+    result = runner.invoke(app, ["admin-key", "--rotate"])
+    assert result.exit_code == 2
+    assert "environment variable" in result.stderr

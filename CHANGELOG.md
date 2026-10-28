@@ -4,6 +4,49 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-10-28 — onboarding, landing page and agent output
+
+Getting started from `pip install` no longer needs a `.env`: the first `localgate serve` makes a
+private admin key, and `http://localhost:8000` explains the rest. `localgate code` gets a compact
+input box, full themes (new default: sunrise), and stops dumping code into the chat — while making
+sure code the model writes actually reaches your files.
+
+### Added
+
+- **A landing page at `/`** instead of a JSON 404: what localgate is, live backend/database/admin-key
+  status, and a step-by-step guide (model server → admin key → API keys → calling it like OpenAI →
+  coding agent → using it from another machine). API clients asking for JSON get a short pointer
+  document.
+- **`localgate admin-key`** prints the admin key and where it's set; `--rotate` replaces it.
+- **`sunrise` terminal theme** (the dashboard's amber palette), now the default for `localgate code`.
+
+### Fixed
+
+- **Code the model wrote into chat now reaches the files.** Blocks labelled by a comment on their
+  first line (`<!-- index.html -->`, `/* styles.css */`, `// app.js`, `# main.py`) are applied as
+  writes, like blocks with the filename above them already were. A label naming a file that doesn't
+  exist (`src/index.html`) goes to the one project file with that name instead of creating a copy.
+- If a reply still holds file-sized code in the project's languages and nothing was changed, the
+  model is sent back once to apply it — whatever words the request used.
+- Removed the "Window too small..." lines in short terminals (see the input box change below).
+
+### Changed
+
+- **Less code in the chat:** code blocks over 12 lines are collapsed to one line, both while the
+  reply streams and in the final answer; `/last` shows the full reply. Write previews (diffs and new
+  files) stop at 40 lines with a count of the rest, and the diff header shows `+added -removed`.
+- **Every turn says whether files changed:** `✓ wrote …`, `no files changed`, or a warning when the
+  reply contains code that wasn't applied.
+- **First `localgate serve` creates a private admin key** when none is configured, saves it to the
+  per-user env file and prints it once, instead of running with the public placeholder.
+  `localgate init` prints the key too. A key you set yourself (env var or `.env`) is never touched.
+- `localgate login` explains that it's only for a remote gateway and where its API key comes from.
+- **Themes now cover the whole terminal UI:** the prompt, input frame, completion menu, toolbar,
+  Markdown answers, tables and spinner, not just a few text colors. `/theme` shows a preview of each.
+- **A compact input box:** the prompt sits between two rules with the status line right under it.
+  The blank space prompt_toolkit used to reserve for the completion menu (and the toolbar pinned to
+  the bottom of the screen) is gone; space is made only while typing a `/command` or `@path`.
+
 ## [0.12.0] — 2026-10-28 — the Claude Code-style CLI release
 
 `localgate code` now works like a modern coding-agent CLI: tab completion, `@file`

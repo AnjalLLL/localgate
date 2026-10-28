@@ -24,7 +24,7 @@ from typing import Literal
 
 from localgate import paths
 
-Theme = Literal["dark", "light", "none"]
+Theme = Literal["sunrise", "dark", "light", "none"]
 
 
 def config_path() -> Path:
@@ -40,7 +40,7 @@ def config_path() -> Path:
 
 @dataclass(frozen=True)
 class UserConfig:
-    theme: Theme = "dark"
+    theme: Theme = "sunrise"
     default_model: str | None = None
     auto_approve: bool = False
     max_turns: int = 20
