@@ -8,6 +8,11 @@ The pipeline, in order:
 4. Serve from the prompt cache, or forward to the configured backend.
 5. Persist the turn as history and as embedded memory; summarize if the session is long.
 6. Record token usage against the calling key.
+
+Optional, per request: ``"localgate": {"web_search": true}`` searches the web for the
+latest user message, adds the numbered sources to the prompt (framed as reference
+material, like recalled memory) and returns them as ``localgate.citations`` — on the
+response body, or as a final ``choices: []`` chunk when streaming.
 """
 
 from __future__ import annotations
@@ -41,6 +46,8 @@ from localgate.memory.context_builder import build_augmented_messages
 from localgate.memory.embedder import embed_text
 from localgate.memory.retriever import retrieve_relevant_context
 from localgate.memory.summarizer import maybe_summarize
+from localgate.web.research import Source, research, sources_message
+from localgate.web.search import WebSearchError, chain_from_settings
 
 router = APIRouter(tags=["chat"])
 logger = get_logger(__name__)
@@ -73,9 +80,20 @@ async def chat_completions(
     model = settings.resolve_model(body.model)
     user_text = body.latest_user_text()
 
+    extension = _pop_extension(body)
     messages = await _augment_with_memory(
         session, backend, settings, session_id, api_key.id, user_text, body.messages
     )
+    web: dict[str, Any] | None = None
+    if extension.get("web_search"):
+        sources, error = await _web_sources(request, settings, backend, user_text)
+        web = {"citations": [s.to_dict() for s in sources]}
+        if error:
+            web["web_search_error"] = error
+        if sources:
+            messages = _insert_after_system(
+                messages, ChatMessage(role="system", content=sources_message(sources)["content"])
+            )
     payload = body.to_backend_payload(messages, model)
 
     # Cache entries are tenant-scoped even when two keys submit identical prompts.
@@ -129,6 +147,7 @@ async def chat_completions(
                 user_text=user_text,
                 started=started,
                 session_factory=session_factory,
+                web=web,
             ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
@@ -163,7 +182,52 @@ async def chat_completions(
         completion_tokens=_reported(response, "completion_tokens", count_tokens(assistant_text)),
         latency_ms=latency_ms,
     )
+    if web is not None:
+        response = {**response, "localgate": web}
     return response
+
+
+def _pop_extension(body: ChatCompletionRequest) -> dict[str, Any]:
+    """Remove Localgate's own request options so they never reach the backend."""
+    extra = body.model_extra if body.model_extra is not None else {}
+    value = extra.pop("localgate", None)
+    return value if isinstance(value, dict) else {}
+
+
+def _insert_after_system(messages: list[ChatMessage], message: ChatMessage) -> list[ChatMessage]:
+    leading = 0
+    for item in messages:
+        if item.role != "system":
+            break
+        leading += 1
+    return [*messages[:leading], message, *messages[leading:]]
+
+
+async def _web_sources(
+    request: Request, settings: Settings, backend: InferenceBackend, question: str
+) -> tuple[list[Source], str | None]:
+    """Search the web for ``question``. Never raises: chat still answers, just
+    without sources, and the reason is reported alongside the response."""
+    if not settings.web_search_enabled:
+        return [], "web search is disabled on this server (LOCALGATE_WEB_SEARCH_ENABLED)"
+    chain = getattr(request.app.state, "search_chain", None)
+    try:
+        if chain is None:
+            chain = chain_from_settings(settings)
+            request.app.state.search_chain = chain
+        sources = await research(
+            question,
+            chain,
+            backend=backend,
+            embedding_model=settings.embedding_model,
+            max_sources=settings.web_search_max_sources,
+            allow_private=settings.fetch_allow_private,
+        )
+    except (WebSearchError, ValueError) as exc:
+        logger.warning("web_search_failed", error=str(exc))
+        return [], str(exc)
+    logger.info("web_search_sources", count=len(sources))
+    return sources, None
 
 
 async def _augment_with_memory(
@@ -233,6 +297,7 @@ async def _stream_and_record(
     user_text: str,
     started: float,
     session_factory: async_sessionmaker[AsyncSession],
+    web: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
     """Relay the backend's stream to the client, then persist the completed turn."""
     assistant_text = ""
@@ -249,6 +314,8 @@ async def _stream_and_record(
         yield DONE
         return
 
+    if web is not None:
+        yield sse_event({"object": "chat.completion.chunk", "choices": [], "localgate": web})
     yield DONE
 
     latency_ms = int((time.perf_counter() - started) * 1000)

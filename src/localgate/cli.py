@@ -43,6 +43,12 @@ keys_app = typer.Typer(help="Create, inspect and revoke API keys.", no_args_is_h
 db_app = typer.Typer(help="Initialize and migrate the database.", no_args_is_help=True)
 app.add_typer(keys_app, name="keys")
 app.add_typer(db_app, name="db")
+bench_app = typer.Typer(help="Measure how reliably models drive the agent.", no_args_is_help=True)
+app.add_typer(bench_app, name="bench")
+voice_app = typer.Typer(
+    help="Local voice: Piper text-to-speech and Whisper speech-to-text.", no_args_is_help=True
+)
+app.add_typer(voice_app, name="voice")
 
 #: `localgate code`'s exit codes — distinct on purpose, so a script can tell
 #: "the agent gave up" apart from "the backend was unreachable" apart from
@@ -617,6 +623,17 @@ def code(
         "--max-turns",
         help="Tool-call turns before giving up on a task. Defaults to the config file, else 20.",
     ),
+    voice: bool = typer.Option(
+        False,
+        "--voice",
+        help="Read the agent's replies aloud with Piper (local). Toggle with /voice; "
+        "dictate with /listen. Needs: pip install 'localgate[voice]'.",
+    ),
+    no_commands: bool = typer.Option(
+        False,
+        "--no-commands",
+        help="Don't offer the sandboxed run_command tool, even if a sandbox is available.",
+    ),
     remote: bool | None = typer.Option(
         None,
         "--remote/--local",
@@ -651,6 +668,8 @@ def code(
     (e.g. the model doesn't support tool calling), 6 the backend was
     unreachable, 130 interrupted (Ctrl+C).
     """
+    from rich import console as rich_console  # noqa: PLC0415
+
     from localgate.agent.loop import AgentToolUseRequired, AgentTurnLimitExceeded  # noqa: PLC0415
     from localgate.agent.mcp import McpRegistry, load_mcp_servers  # noqa: PLC0415
     from localgate.agent.memory import (  # noqa: PLC0415
@@ -663,9 +682,13 @@ def code(
         run_repl,
         run_single_shot,
     )
+    from localgate.agent.roles import load_roles  # noqa: PLC0415
+    from localgate.agent.sandbox import detect_sandbox  # noqa: PLC0415
     from localgate.agent.theme import THEMES  # noqa: PLC0415
     from localgate.agent.userconfig import UserConfig  # noqa: PLC0415
     from localgate.agent.websearch import make_search_fn  # noqa: PLC0415
+    from localgate.voice.terminal import VoiceIO  # noqa: PLC0415
+    from localgate.web.search import chain_from_settings  # noqa: PLC0415
 
     settings = _settings()
     root = directory.resolve()
@@ -696,13 +719,8 @@ def code(
     model_candidate = model or env_model or user_config.default_model
     resolved_model = settings.resolve_model(model_candidate)
 
-    search_provider = settings.search_provider or "duckduckgo"
     try:
-        search_fn: Any = make_search_fn(
-            search_provider,
-            api_key=settings.search_api_key,
-            base_url=settings.search_base_url,
-        )
+        search_fn: Any = make_search_fn("", chain=chain_from_settings(settings))
     except ValueError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
@@ -754,7 +772,19 @@ def code(
         mcp_registry = McpRegistry()
         try:
             supports_tools = await backend.check_tool_support(resolved_model)
-            if supports_tools is False:
+            native_tools = True
+            if supports_tools is False and backend.name == "ollama":
+                # Ollama can grammar-constrain replies, so a model without native
+                # tools still gets a working (if slower) JSON tool protocol.
+                native_tools = False
+                typer.secho(
+                    f"Model {resolved_model!r} does not advertise tool-calling support; "
+                    "using JSON tool mode. A tool-capable model (e.g. qwen2.5-coder) "
+                    "is faster and more reliable.",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+            elif supports_tools is False:
                 message = (
                     f"Model {resolved_model!r} does not advertise tool-calling support; "
                     "select a tool-capable model with --model."
@@ -766,6 +796,17 @@ def code(
                     fg=typer.colors.YELLOW,
                     err=True,
                 )
+            sandbox = (
+                None
+                if no_commands
+                else detect_sandbox(settings.agent_sandbox, settings.agent_sandbox_image)
+            )
+            voice_io = (
+                VoiceIO(settings, rich_console.Console(stderr=True), speak=voice)
+                if settings.voice_enabled
+                else None
+            )
+            agent_roles = load_roles(paths.config_dir() / "agents", root / ".localgate" / "agents")
             if not no_mcp:
                 configured_servers = load_mcp_servers()
                 if configured_servers:
@@ -808,6 +849,10 @@ def code(
                     mcp_registry=mcp_registry,
                     settings=settings,
                     session_id=project_session_id(root) if memory else None,
+                    sandbox=sandbox,
+                    agent_roles=agent_roles,
+                    native_tools=native_tools,
+                    voice=voice_io,
                 )
                 return False
             result = await run_single_shot(
@@ -828,6 +873,10 @@ def code(
                 max_turns=resolved_max_turns,
                 settings=settings,
                 session_id=project_session_id(root) if memory else None,
+                sandbox=sandbox,
+                agent_roles=agent_roles,
+                native_tools=native_tools,
+                voice=voice_io,
             )
             return result.declined_a_write
         finally:
@@ -880,6 +929,171 @@ def code(
 # ----------------------------------------------------------------------------- keys
 
 
+@bench_app.command("agent")
+def bench_agent(
+    models: list[str] = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="Model to test; repeat for several. Defaults to LOCALGATE_DEFAULT_MODEL.",
+    ),
+    task_filter: str | None = typer.Option(
+        None, "--task", help="Run only the task (or category) with this name."
+    ),
+    json_out: Path | None = typer.Option(None, "--json", help="Also write results as JSON here."),
+) -> None:
+    """Run the agent benchmark: small throwaway projects, checked on disk.
+
+    Writes happen only in temporary directories and are auto-approved there.
+    Use it before and after changing prompts, tools or models.
+    """
+    from localgate.agent.bench import TASKS, TaskResult, run_bench  # noqa: PLC0415
+
+    settings = _settings()
+    targets = list(models) if models else [settings.resolve_model(None)]
+    backend = get_backend(
+        settings.backend_type,
+        settings.backend_url,
+        timeout=settings.backend_timeout,
+        api_key=settings.backend_api_key,
+    )
+    count = sum(1 for t in TASKS if not task_filter or task_filter in (t.name, t.category))
+    if count == 0:
+        typer.secho(f"No task named {task_filter!r}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    typer.echo(f"{count} task(s) × {len(targets)} model(s)")
+
+    def show(model: str, result: TaskResult) -> None:
+        mark = (
+            typer.style("PASS", fg=typer.colors.GREEN)
+            if result.passed
+            else typer.style("FAIL", fg=typer.colors.RED)
+        )
+        detail = f"  {result.error[:80]}" if result.error else ""
+        typer.echo(
+            f"  {mark} {model:<24} {result.task:<20} {result.seconds:>6.1f}s "
+            f"tools={result.tool_calls} failed={result.failed_tool_calls}{detail}"
+        )
+
+    async def go() -> list[Any]:
+        try:
+            return await run_bench(
+                backend, targets, settings=settings, task_filter=task_filter, on_result=show
+            )
+        finally:
+            await backend.aclose()
+
+    try:
+        reports = _run(go())
+    except httpx.HTTPError as exc:
+        typer.secho(f"Couldn't reach the backend: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_BACKEND_UNREACHABLE) from exc
+
+    typer.echo("")
+    for report in reports:
+        typer.echo(f"{report.model}: {report.passed}/{len(report.results)} ({report.rate:.0%})")
+    if json_out is not None:
+        json_out.write_text(json.dumps([r.to_dict() for r in reports], indent=2), encoding="utf-8")
+        typer.echo(f"wrote {json_out}")
+
+
+@voice_app.command("status")
+def voice_status() -> None:
+    """What voice support is installed, and which voices are downloaded."""
+    from localgate.voice import INSTALL_HINT, stt  # noqa: PLC0415
+    from localgate.voice.tts import engine_name, installed_voices, voices_dir  # noqa: PLC0415
+
+    settings = _settings()
+    directory = voices_dir(settings)
+    engine = engine_name()
+    typer.echo(f"text-to-speech  {engine or 'not installed'} (Piper)")
+    typer.echo(f"speech-to-text  {'faster-whisper' if stt.available() else 'not installed'}")
+    typer.echo(f"default voice   {settings.voice_tts_voice}")
+    typer.echo(f"whisper model   {settings.voice_stt_model} ({settings.voice_stt_device})")
+    typer.echo(f"voices folder   {directory}")
+    voices = installed_voices(directory)
+    typer.echo(f"installed       {', '.join(voices) if voices else '(none yet)'}")
+    if engine is None or not stt.available():
+        typer.secho(INSTALL_HINT, fg=typer.colors.YELLOW)
+
+
+@voice_app.command("download")
+def voice_download(
+    name: str = typer.Argument(
+        None, help="Voice such as en_US-lessac-medium. Defaults to LOCALGATE_VOICE_TTS_VOICE."
+    ),
+) -> None:
+    """Download a Piper voice (list them at huggingface.co/rhasspy/piper-voices)."""
+    from localgate.voice import VoiceUnavailable  # noqa: PLC0415
+    from localgate.voice.tts import ensure_voice, voices_dir  # noqa: PLC0415
+
+    settings = _settings()
+    voice = name or settings.voice_tts_voice
+    try:
+        model = ensure_voice(voice, voices_dir(settings), download=True)
+    except VoiceUnavailable as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"ready: {model}")
+
+
+@voice_app.command("say")
+def voice_say(
+    text: str = typer.Argument(..., help="What to say."),
+    voice: str | None = typer.Option(None, "--voice", "-v", help="Piper voice name."),
+    out: Path | None = typer.Option(
+        None, "--out", "-o", help="Write a WAV file instead of playing."
+    ),
+) -> None:
+    """Speak text with Piper (or save it as a WAV file)."""
+    from localgate.voice import VoiceUnavailable  # noqa: PLC0415
+    from localgate.voice.audio import play_wav  # noqa: PLC0415
+    from localgate.voice.tts import PiperTTS, voices_dir  # noqa: PLC0415
+
+    settings = _settings()
+    engine = PiperTTS(
+        voices_dir(settings), settings.voice_tts_voice, download=settings.voice_auto_download
+    )
+    try:
+        audio = engine.synthesize_sync(text, voice)
+        if out is not None:
+            out.write_bytes(audio)
+            typer.echo(f"wrote {out}")
+        else:
+            play_wav(audio)
+    except (VoiceUnavailable, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@voice_app.command("listen")
+def voice_listen(
+    file: Path | None = typer.Argument(
+        None, help="Transcribe this audio file instead of the microphone."
+    ),
+    language: str | None = typer.Option(None, "--language", "-l", help="e.g. en, ne, hi."),
+) -> None:
+    """Transcribe speech with Whisper: from the microphone (press Enter to stop) or a file."""
+    from localgate.voice import VoiceUnavailable  # noqa: PLC0415
+    from localgate.voice.stt import WhisperSTT  # noqa: PLC0415
+
+    settings = _settings()
+    engine = WhisperSTT(settings.voice_stt_model, settings.voice_stt_device)
+    try:
+        if file is not None:
+            result = engine.transcribe_sync(file.read_bytes(), language)
+        else:
+            from localgate.voice.audio import record_until_enter  # noqa: PLC0415
+
+            typer.secho("● listening — press Enter to stop", fg=typer.colors.CYAN, err=True)
+            samples = record_until_enter()
+            result = engine.transcribe_samples(samples, language)
+    except (VoiceUnavailable, ValueError, OSError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(result.text)
+
+
 @keys_app.command("create")
 def keys_create(
     name: str = typer.Option(..., "--name", "-n", help="A label, e.g. the app that will use it."),
@@ -894,7 +1108,8 @@ def keys_create(
     limit = rate_limit or settings.default_rate_limit_per_min
 
     async def create(session: Any) -> tuple[str, str]:
-        key, raw = await APIKeyRepository(session).create(name, limit)
+        vault_key = settings.admin_key if settings.api_key_reveal_enabled else None
+        key, raw = await APIKeyRepository(session).create(name, limit, admin_key=vault_key)
         return key.id, raw
 
     async def migrate_then_create() -> tuple[str, str]:

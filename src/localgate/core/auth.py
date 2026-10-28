@@ -44,3 +44,34 @@ def constant_time_equals(a: str, b: str) -> bool:
     the standard defence.
     """
     return hmac.compare_digest(a.encode(), b.encode())
+
+
+#: Name of the dashboard's admin session cookie.
+ADMIN_COOKIE = "lg_admin"
+ADMIN_SESSION_SECONDS = 12 * 60 * 60
+
+
+def _admin_signature(admin_key: str, expires: int) -> str:
+    return hmac.new(
+        admin_key.encode(), f"localgate-admin-session:{expires}".encode(), "sha256"
+    ).hexdigest()
+
+
+def issue_admin_session(admin_key: str, now: float, lifetime: int = ADMIN_SESSION_SECONDS) -> str:
+    """A stateless admin session token: ``<expiry>.<HMAC(admin key, expiry)>``.
+
+    Signed with the admin key itself, so rotating the key logs every dashboard
+    session out, and the key never has to be stored in the browser.
+    """
+    expires = int(now) + lifetime
+    return f"{expires}.{_admin_signature(admin_key, expires)}"
+
+
+def verify_admin_session(token: str, admin_key: str, now: float) -> bool:
+    expires_text, _, signature = token.partition(".")
+    if not expires_text.isdigit() or not signature:
+        return False
+    expires = int(expires_text)
+    if expires < now:
+        return False
+    return constant_time_equals(signature, _admin_signature(admin_key, expires))

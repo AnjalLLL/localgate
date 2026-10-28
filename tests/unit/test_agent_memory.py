@@ -265,3 +265,36 @@ async def test_load_history_returns_stored_turns_oldest_first(session_factory, s
         "second question",
         "second answer",
     ]
+
+
+# ------------------------------------------------------- ledger and tool-call log
+
+
+async def test_ledger_round_trips_and_is_scoped_by_owner(session_factory, backend, settings):
+    from localgate.agent.context import SessionLedger  # noqa: PLC0415
+
+    mine = AgentMemory(session_factory, backend, settings, "s1", "owner-a")
+    theirs = AgentMemory(session_factory, backend, settings, "s1", "owner-b")
+    ledger = SessionLedger(goal="ship it", files_changed={"a.py": "modified"})
+    await mine.save_ledger(ledger)
+    ledger.decisions.append("use sqlite")
+    await mine.save_ledger(ledger)
+    assert await mine.load_ledger() == ledger
+    assert (await theirs.load_ledger()).goal == ""
+
+
+async def test_tool_calls_are_logged_with_owner_run_and_model(session_factory, backend, settings):
+    from localgate.agent.loop import ToolLogEntry  # noqa: PLC0415
+    from localgate.db.repositories.tool_calls import ToolCallRepository  # noqa: PLC0415
+
+    memory = AgentMemory(session_factory, backend, settings, "s1", "owner-a")
+    await memory.record_tool_call(
+        ToolLogEntry("run-1", "s1", "qwen", "read_file", {"path": "a.py"}, True, 12)
+    )
+    async with session_factory() as db:
+        rows = await ToolCallRepository(db).recent_for_owner("owner-a")
+        other = await ToolCallRepository(db).recent_for_owner("owner-b")
+    assert [(r.tool_name, r.run_id, r.model, r.duration_ms) for r in rows] == [
+        ("read_file", "run-1", "qwen", 12)
+    ]
+    assert other == []

@@ -1,0 +1,8 @@
+Fonts bundled with the localgate dashboard (latin subsets, variable weight, woff2,
+from the Fontsource builds). All are licensed under the SIL Open Font License 1.1:
+https://openfontlicense.org
+
+- font-inter.woff2           Inter — Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)
+- font-serif.woff2           Source Serif 4 — Copyright 2014-2021 Adobe (https://github.com/adobe-fonts/source-serif)
+- font-serif-italic.woff2    Source Serif 4 Italic — Copyright 2014-2021 Adobe
+- font-mono.woff2            JetBrains Mono — Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)

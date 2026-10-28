@@ -5,18 +5,10 @@ beyond the user's own inference backend: it sends query text off the user's
 machine. The CLI uses DuckDuckGo when `LOCALGATE_SEARCH_PROVIDER` is unset;
 that setting can select a different provider.
 
-Three providers:
-
-- **`duckduckgo`** (default) — zero-config HTML search. Query text leaves the
-  machine, and manual mode asks before each search.
-
-- **`openserp`** (recommended default) — a self-hosted, MIT-licensed, no-API-key
-  search API (github.com/karust/openserp). Runs on the user's own machine/network,
-  so enabling it doesn't actually send anything to a *third party* — the closest
-  fit to this project's local-first stance. `LOCALGATE_SEARCH_BASE_URL` points at
-  wherever it's running; defaults to `http://localhost:7000`.
-- **`tavily`** — a hosted, paid, API-key-gated service. Kept for anyone who
-  already has a key; genuinely leaves the user's machine, unlike `openserp`.
+Providers live in `localgate.web.search` (SearXNG, OpenSERP, Brave, Tavily,
+DuckDuckGo); `LOCALGATE_SEARCH_PROVIDER` may name one or a comma-separated
+fallback chain such as ``searxng,duckduckgo``. This module is the agent-facing
+layer: the tool schema and the ``query -> formatted text`` function.
 
 Results are returned as title + short snippet + URL, never raw page content:
 the same paraphrase-not-reproduce discipline applies here as anywhere else web
@@ -25,11 +17,23 @@ content enters the model's context.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
+from localgate.web import search as _search
+from localgate.web.search import SearchChain, WebSearchError
+
+__all__ = [
+    "SUPPORTED_PROVIDERS",
+    "WEB_SEARCH_SCHEMA",
+    "SearchChain",
+    "SearchFn",
+    "WebSearchError",
+    "duckduckgo_search",
+    "make_search_fn",
+    "openserp_search",
+    "tavily_search",
+]
 
 #: Kept out of `TOOL_SCHEMAS`/`TOOL_NAMES` deliberately, same reasoning as
 #: `DELEGATE_TASK_SCHEMA` in `tools.py` — only appended to a session's own
@@ -52,113 +56,18 @@ WEB_SEARCH_SCHEMA: dict[str, Any] = {
     },
 }
 
-SUPPORTED_PROVIDERS = ("duckduckgo", "openserp", "tavily")
+SUPPORTED_PROVIDERS = _search.SUPPORTED_PROVIDERS
 
 #: The self-hosted OpenSERP server's default port (its own documented default).
-DEFAULT_OPENSERP_BASE_URL = "http://localhost:7000"
+DEFAULT_OPENSERP_BASE_URL = _search.DEFAULT_OPENSERP_URL
 
 SearchFn = Callable[[str], Awaitable[str]]
 
-_SNIPPET_MAX_CHARS = 240
 
-
-class WebSearchError(RuntimeError):
-    """The search request itself failed — network error or a non-2xx response."""
-
-
-def _truncate(text: str) -> str:
-    text = text.strip()
-    if len(text) > _SNIPPET_MAX_CHARS:
-        return text[: _SNIPPET_MAX_CHARS - 3] + "..."
-    return text
-
-
-def _format_results(
-    results: list[dict[str, Any]],
-    *,
-    title_keys: tuple[str, ...],
-    snippet_keys: tuple[str, ...],
-    url_keys: tuple[str, ...],
-    max_results: int,
-) -> str:
-    """Shared title + snippet + URL formatting, tolerant of the small key-naming
-    differences between providers (`content` vs `snippet`/`description`, `url`
-    vs `link`) rather than assuming one exact response shape.
-    """
-    if not results:
-        return "No results."
-    lines: list[str] = []
-    for result in results[:max_results]:
-        title = next((result[k] for k in title_keys if result.get(k)), "")
-        snippet = next((result[k] for k in snippet_keys if result.get(k)), "")
-        url = next((result[k] for k in url_keys if result.get(k)), "")
-        lines.append(f"- {title.strip()}\n  {_truncate(snippet)}\n  {url}")
-    return "\n".join(lines)
-
-
-async def duckduckgo_search(
-    query: str,
-    *,
-    max_results: int = 5,
-    timeout: float = 10.0,
-) -> str:
-    """Free, zero-config web search via DuckDuckGo's HTML lite endpoint.
-
-    No API key or self-hosted server required — works out of the box for any user.
-    Parses the lightweight HTML response for result titles, snippets, and URLs.
-    """
-    url = "https://lite.duckduckgo.com/lite/"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-    }
-    # Use explicit timeout for all phases to prevent hanging
-    timeout_config = httpx.Timeout(timeout, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout_config, follow_redirects=True) as client:
-        try:
-            resp = await client.post(url, data={"q": query}, headers=headers)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise WebSearchError(f"web search failed (DuckDuckGo): {exc}") from exc
-
-    html = resp.text
-    results: list[dict[str, Any]] = []
-    # DuckDuckGo lite returns results as links with class="result-link"
-    # or as table rows with result snippets. Parse both formats.
-    link_pattern = re.compile(
-        r'<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
-    )
-    snippet_pattern = re.compile(r'<td class="result-snippet">(.*?)</td>', re.DOTALL)
-
-    links = link_pattern.findall(html)
-    snippets = snippet_pattern.findall(html)
-
-    # Fallback: try a more generic pattern if the above didn't match
-    if not links:
-        link_pattern2 = re.compile(
-            r'<a[^>]+rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL
-        )
-        links = link_pattern2.findall(html)
-
-    for i, (href, title) in enumerate(links[:max_results]):
-        clean_title = re.sub(r"<[^>]+>", "", title).strip()
-        snippet = ""
-        if i < len(snippets):
-            snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
-        if clean_title and href:
-            results.append({"title": clean_title, "snippet": snippet, "url": href})
-
-    if not results:
-        return "No results."
-    return _format_results(
-        results,
-        title_keys=("title",),
-        snippet_keys=("snippet",),
-        url_keys=("url",),
-        max_results=max_results,
-    )
+async def duckduckgo_search(query: str, *, max_results: int = 5, timeout: float = 10.0) -> str:
+    """Free, zero-config web search via DuckDuckGo's HTML lite endpoint."""
+    results = await _search.duckduckgo_results(query, max_results=max_results, timeout=timeout)
+    return _search.format_results(results, max_results)
 
 
 async def openserp_search(
@@ -169,102 +78,54 @@ async def openserp_search(
     max_results: int = 5,
     timeout: float = 10.0,
 ) -> str:
-    """One OpenSERP search against a self-hosted instance — no API key, no
-    third party involved once the server is running on the user's own machine.
-    """
-    url = f"{base_url.rstrip('/')}/{engine}/search"
-    timeout_config = httpx.Timeout(timeout, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout_config) as client:
-        try:
-            resp = await client.get(
-                url, params={"text": query, "limit": max_results, "format": "json"}
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise WebSearchError(
-                f"web search failed ({base_url}): {exc} — is OpenSERP running there?"
-            ) from exc
-
-    body = resp.json()
-    results = body.get("results") if isinstance(body, dict) else None
-    if not isinstance(results, list):
-        return "No results."
-    return _format_results(
-        results,
-        title_keys=("title",),
-        snippet_keys=("snippet", "description"),
-        url_keys=("url", "link"),
-        max_results=max_results,
+    """One OpenSERP search against a self-hosted instance."""
+    results = await _search.openserp_results(
+        query, base_url, engine=engine, max_results=max_results, timeout=timeout
     )
+    return _search.format_results(results, max_results)
 
 
 async def tavily_search(
     query: str, api_key: str, *, max_results: int = 5, timeout: float = 10.0
 ) -> str:
     """One Tavily search, formatted as title + short snippet + URL per result."""
-    timeout_config = httpx.Timeout(timeout, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout_config) as client:
-        try:
-            resp = await client.post(
-                "https://api.tavily.com/search",
-                json={"api_key": api_key, "query": query, "max_results": max_results},
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise WebSearchError(f"web search failed: {exc}") from exc
-
-    results = resp.json().get("results") or []
-    return _format_results(
-        results,
-        title_keys=("title",),
-        snippet_keys=("content",),
-        url_keys=("url",),
-        max_results=max_results,
-    )
+    results = await _search.tavily_results(query, api_key, max_results=max_results, timeout=timeout)
+    return _search.format_results(results, max_results)
 
 
 def make_search_fn(
-    provider: str, *, api_key: str | None = None, base_url: str | None = None
+    provider: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    brave_api_key: str | None = None,
+    searxng_url: str | None = None,
+    chain: SearchChain | None = None,
 ) -> SearchFn:
-    """Build the tool's execution function for `provider`. Raises `ValueError`
-    for an unsupported provider, or a provider that's missing what it needs
-    (Tavily's key) — an explicitly-misconfigured feature should fail loudly at
-    startup, not silently disable itself.
+    """Build the tool's execution function. ``provider`` may be one name or a
+    comma-separated fallback chain (``"searxng,duckduckgo"``). Raises
+    `ValueError` for an unsupported provider, or one missing what it needs
+    (Tavily's or Brave's key) — an explicitly-misconfigured feature should fail
+    loudly at startup, not silently disable itself.
     """
-    if provider not in SUPPORTED_PROVIDERS:
-        raise ValueError(
-            f"unsupported LOCALGATE_SEARCH_PROVIDER {provider!r} — "
-            f"choose from {', '.join(SUPPORTED_PROVIDERS)}"
+    if chain is None:
+        names = _search.parse_provider_list(provider)
+        # LOCALGATE_SEARCH_BASE_URL / _API_KEY are the generic settings; the
+        # provider-specific ones win when a chain needs both kinds.
+        config = _search.ProviderConfig(
+            searxng_url=searxng_url or base_url,
+            openserp_url=base_url,
+            brave_api_key=brave_api_key or api_key,
+            tavily_api_key=api_key,
         )
+        chain = _search.build_chain(names, config)
+    resolved = chain
 
-    if provider == "duckduckgo":
-
-        async def _search_duckduckgo(query: str) -> str:
-            try:
-                return await duckduckgo_search(query)
-            except WebSearchError as exc:
-                return str(exc)
-
-        return _search_duckduckgo
-
-    if provider == "tavily":
-        if not api_key:
-            raise ValueError("LOCALGATE_SEARCH_API_KEY is required when using tavily")
-
-        async def _search_tavily(query: str) -> str:
-            try:
-                return await tavily_search(query, api_key)
-            except WebSearchError as exc:
-                return str(exc)
-
-        return _search_tavily
-
-    resolved_base_url = base_url or DEFAULT_OPENSERP_BASE_URL
-
-    async def _search_openserp(query: str) -> str:
+    async def _search_fn(query: str) -> str:
         try:
-            return await openserp_search(query, resolved_base_url)
+            return _search.format_results(await resolved.search(query))
         except WebSearchError as exc:
             return str(exc)
 
-    return _search_openserp
+    _search_fn.chain = resolved  # type: ignore[attr-defined]
+    return _search_fn

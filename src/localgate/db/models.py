@@ -46,6 +46,10 @@ class APIKey(Base):
     #: recoverable, so without this there is no way to tell which key on a listing
     #: corresponds to the one an operator is holding.
     key_prefix: Mapped[str] = mapped_column(String, default="")
+    #: Encrypted copy of the raw key so an admin can reveal it later (0006; see
+    #: core/key_vault.py). NULL for keys created before that, or while the admin
+    #: key was the insecure default — those can never be shown again.
+    key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     rate_limit_per_min: Mapped[int] = mapped_column(Integer, default=60)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -156,6 +160,30 @@ class ToolCallLog(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     timed_out: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: Owner, agent run and model — added in 0005. Nullable so rows logged before
+    #: the upgrade stay valid; every new row sets them.
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
-    __table_args__ = (Index("ix_toolcall_session_created", "session_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_toolcall_session_created", "session_id", "created_at"),
+        Index("ix_toolcall_owner_created", "api_key_id", "created_at"),
+    )
+
+
+class SessionLedgerRecord(Base):
+    """The agent's structured session ledger (`agent/context.py`), one row per
+    owner + session, so a resumed session keeps its goal and file history even
+    after the messages that established them were compacted away."""
+
+    __tablename__ = "session_ledgers"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    api_key_id: Mapped[str] = mapped_column(String, index=True)
+    session_id: Mapped[str] = mapped_column(String, index=True)
+    data: Mapped[dict] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (Index("ux_ledger_owner_session", "api_key_id", "session_id", unique=True),)

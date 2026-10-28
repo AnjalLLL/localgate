@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from localgate.core import key_vault
 from localgate.core.auth import generate_key, hash_key, key_prefix
 from localgate.db.models import APIKey
 
@@ -16,15 +18,25 @@ class APIKeyRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, name: str, rate_limit_per_min: int = 60) -> tuple[APIKey, str]:
-        """Create a key. Returns ``(record, raw_key)``; the raw key is never recoverable again."""
+    async def create(
+        self, name: str, rate_limit_per_min: int = 60, *, admin_key: str | None = None
+    ) -> tuple[APIKey, str]:
+        """Create a key. Returns ``(record, raw_key)``.
+
+        With ``admin_key``, an encrypted copy is stored so an admin can reveal the
+        key later (see core/key_vault.py); without it the raw key is never
+        recoverable again.
+        """
         raw_key = generate_key()
         key = APIKey(
+            id=str(uuid.uuid4()),
             name=name,
             key_hash=hash_key(raw_key),
             key_prefix=key_prefix(raw_key),
             rate_limit_per_min=rate_limit_per_min,
         )
+        if admin_key is not None:
+            key.key_ciphertext = key_vault.seal(raw_key, key.id, admin_key)
         self.session.add(key)
         await self.session.commit()
         await self.session.refresh(key)
@@ -39,6 +51,17 @@ class APIKeyRepository:
         stmt = select(APIKey).where(APIKey.key_hash == hash_key(raw_key), APIKey.revoked.is_(False))
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def reveal(self, key_id: str, admin_key: str) -> str | None:
+        """The raw key if an encrypted copy exists and still decrypts to *this*
+        key (the hash is re-checked), else None."""
+        key = await self.get(key_id)
+        if key is None or not key.key_ciphertext:
+            return None
+        raw = key_vault.unseal(key.key_ciphertext, key.id, admin_key)
+        if raw is None or hash_key(raw) != key.key_hash:
+            return None
+        return raw
 
     async def get(self, key_id: str) -> APIKey | None:
         return await self.session.get(APIKey, key_id)

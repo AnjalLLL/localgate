@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,7 @@ def test_reading_a_path_creates_nothing(monkeypatch, tmp_path):
     assert not target.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits; Windows uses ACLs")
 def test_ensure_creates_owner_only_dirs(monkeypatch, tmp_path):
     monkeypatch.setenv(paths.ENV_CONFIG_DIR, str(tmp_path / "cfg" / "nested"))
     created = paths.ensure_config_dir()
@@ -98,6 +100,7 @@ def test_ensure_is_idempotent(monkeypatch, tmp_path):
 # ------------------------------------------------------------------ secret files
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits; Windows uses ACLs")
 def test_write_secret_text_is_owner_only(tmp_path):
     target = tmp_path / "sub" / "secret.env"
     paths.write_secret_text(target, "LOCALGATE_ADMIN_KEY=abc\n")
@@ -105,6 +108,7 @@ def test_write_secret_text_is_owner_only(tmp_path):
     assert stat.S_IMODE(target.stat().st_mode) == paths.SECRET_FILE_MODE
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits; Windows uses ACLs")
 def test_write_secret_text_tightens_a_loose_existing_file(tmp_path):
     """The mode passed to os.open is ignored for an existing file, so the
     trailing chmod is what protects a file that was already world-readable."""
@@ -123,6 +127,7 @@ def test_write_secret_text_truncates(tmp_path):
     assert target.read_text() == "short\n"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits; Windows uses ACLs")
 def test_describe_mode(tmp_path):
     target = tmp_path / "secret.env"
     assert paths.describe_mode(target) == "missing"

@@ -252,3 +252,51 @@ Prometheus metrics: `localgate_requests_total`, `localgate_request_duration_seco
 Paths are labelled with the route *template* (`/v1/conversations/{session_id}`), never the
 concrete path — the raw path would mint a new time series per session id and blow up
 cardinality.
+
+
+## Web search in chat
+
+Add a `localgate` object to a chat request to have the gateway search the web for the latest
+user message and answer with sources:
+
+```json
+{
+  "model": "llama3.1",
+  "messages": [{"role": "user", "content": "What changed in Python 3.13?"}],
+  "localgate": {"web_search": true}
+}
+```
+
+The gateway searches with the configured provider chain, fetches the top pages, keeps the
+passages most relevant to the question, and adds them to the prompt as numbered reference
+material. Web text is never treated as instructions. The `localgate` object is removed before
+the request reaches the backend. The response gains:
+
+```json
+"localgate": {
+  "citations": [{"index": 1, "title": "...", "url": "https://...", "excerpt": "..."}],
+  "web_search_error": "only present if every provider failed"
+}
+```
+
+When streaming, the citations arrive as one final chunk with `"choices": []` just before
+`data: [DONE]`. A failed search never fails the request: the model answers without sources and
+`web_search_error` says why.
+
+## Admin: dashboard session and operator endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/admin/session` | Body `{"admin_key": "..."}`. Sets an httpOnly, `SameSite=Strict` session cookie (12 h), signed with the admin key. Rotating the key signs every session out. |
+| `GET` / `DELETE` | `/admin/session` | Check / end the session. |
+| `GET` | `/admin/overview` | Usage totals, 14-day series, key counts, backend health, agent tool-call success rate. |
+| `GET` | `/admin/models` | Backend models with tool support and context window. |
+| `GET` | `/admin/sessions` | Every owner's sessions (`api_key_id`, `session_id`, count, last activity). |
+| `GET` | `/admin/sessions/{api_key_id}/{session_id}` | Messages, rolling summary, agent session ledger, memory chunk count. |
+| `GET` | `/admin/tool-calls` | Recent agent tool calls plus success rates by tool and by model. |
+| `POST` | `/admin/memory/search` | `{api_key_id, session_id, query}` → what retrieval would recall, with scores. |
+| `POST` | `/admin/search/test` | `{query}` → run the configured search chain once. |
+
+Every `/admin` route also accepts the `X-Admin-Key` header. A request authenticated by the
+cookie that changes something (anything but GET/HEAD/OPTIONS) must also send
+`X-Localgate-Csrf: 1`, which a cross-site page cannot set.
