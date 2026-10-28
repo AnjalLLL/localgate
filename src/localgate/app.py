@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +42,13 @@ window.
 **Authentication.** Client routes (`/v1/*`) take `Authorization: Bearer <api-key>`.
 Admin routes (`/admin/*`) take `X-Admin-Key: <admin-key>`.
 """
+
+
+DASHBOARD_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; "
+    "form-action 'self'"
+)
 
 
 def resolve_database_url(settings: Settings, config_path: Path | None = None) -> str:
@@ -161,7 +169,21 @@ def create_app(
 
     install_exception_handlers(app)
 
+    @app.middleware("http")
+    async def security_headers(request: Any, call_next: Any) -> Any:
+        """Strict headers on the dashboard: scripts and styles only from this
+        origin (no inline script), no framing, no referrer leakage."""
+        response = await call_next(request)
+        if request.url.path.startswith("/dashboard"):
+            response.headers.setdefault("Content-Security-Policy", DASHBOARD_CSP)
+            response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
     from localgate.api import (
+        admin_ops,
+        audio,
         chat,
         completions,
         config,
@@ -177,6 +199,7 @@ def create_app(
 
     app.include_router(health.router)
     app.include_router(chat.router)
+    app.include_router(audio.router)
     app.include_router(completions.router)
     app.include_router(embeddings.router)
     app.include_router(models.router)
@@ -186,6 +209,8 @@ def create_app(
     app.include_router(usage.router, prefix="/admin")
     app.include_router(config.router, prefix="/admin")
     app.include_router(export.router, prefix="/admin")
+    app.include_router(admin_ops.session_router, prefix="/admin")
+    app.include_router(admin_ops.router, prefix="/admin")
 
     mount_dashboard(app)
 

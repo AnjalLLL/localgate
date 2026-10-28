@@ -681,7 +681,8 @@ async def test_repl_rewind_restores_a_write(repo, monkeypatch):
     inputs = iter(["write it", "/rewind", "/exit"])
     monkeypatch.setattr(Console, "input", lambda self, *a, **k: next(inputs))
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
-    backend = ScriptedBackend([write_call("app.py", "new content\n"), final_text("done")])
+    # Valid Python: an edit that breaks a .py file now triggers a syntax-error check.
+    backend = ScriptedBackend([write_call("app.py", "new_content\n"), final_text("done")])
     await run_repl(backend, "scripted-model", repo, auto_approve=True)
     assert (repo / "app.py").read_text() == "original\n"
 
@@ -864,7 +865,7 @@ async def test_run_turn_streams_and_auto_commits(repo, monkeypatch):
     backend = ScriptedBackend(
         [
             read_call("app.py"),
-            write_call("app.py", "streamed content\n"),
+            write_call("app.py", "streamed_content\n"),
             final_text("done"),
         ]
     )
@@ -879,7 +880,7 @@ async def test_run_turn_streams_and_auto_commits(repo, monkeypatch):
     )
     result = await run_turn(out, session, gate, "update app.py")
     assert result == "done"
-    assert (repo / "app.py").read_text() == "streamed content\n"
+    assert (repo / "app.py").read_text() == "streamed_content\n"
 
     from localgate.agent import gitutil
 
@@ -961,3 +962,50 @@ async def test_repl_survives_a_connection_error(repo, monkeypatch):
         httpx.ConnectError("connection refused", request=request), [final_text("ok")]
     )
     await run_repl(backend, "scripted-model", repo, auto_approve=True)
+
+
+# ------------------------------------------------------------------------- voice
+
+
+class FakeVoice:
+    def __init__(self, heard: str | None = "what files are here") -> None:
+        self.speak_enabled = False
+        self.heard = heard
+        self.spoken: list[str] = []
+
+    async def listen(self) -> str | None:
+        return self.heard
+
+    async def say(self, text: str) -> None:
+        self.spoken.append(text)
+
+
+class RecordingBackend(ScriptedBackend):
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        super().__init__(responses)
+        self.requests: list[dict[str, Any]] = []
+
+    async def chat_stream(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        self.requests.append(request)
+        async for chunk in super().chat_stream(request):
+            yield chunk
+
+
+async def test_repl_listen_sends_the_transcript_and_voice_reads_replies(repo, monkeypatch):
+    inputs = iter(["/voice on", "/listen", "/voice off", "/exit"])
+    monkeypatch.setattr(Console, "input", lambda self, *a, **k: next(inputs))
+    backend = RecordingBackend([final_text("app.py and README.md")])
+    voice = FakeVoice()
+    await run_repl(backend, "scripted-model", repo, voice=voice)
+    sent = [m for m in backend.requests[0]["messages"] if m["role"] == "user"]
+    assert sent[-1]["content"].endswith("what files are here")
+    assert voice.spoken == ["app.py and README.md"]
+    assert voice.speak_enabled is False
+
+
+async def test_repl_listen_with_nothing_heard_sends_nothing(repo, monkeypatch):
+    inputs = iter(["/listen", "/exit"])
+    monkeypatch.setattr(Console, "input", lambda self, *a, **k: next(inputs))
+    backend = RecordingBackend([])
+    await run_repl(backend, "scripted-model", repo, voice=FakeVoice(heard=None))
+    assert backend.requests == []
