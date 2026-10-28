@@ -5,6 +5,7 @@ import asyncio
 import os
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from localgate.cli import app
@@ -41,7 +42,7 @@ def test_login_accepts_a_discovered_name(two_gateways, monkeypatch):
 def test_an_unknown_name_is_explained(two_gateways):
     from localgate import cli
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(typer.Exit):
         cli._resolve_gateway_url("nope")
 
 
