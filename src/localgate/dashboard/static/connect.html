@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Connect to localgate</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23a8590e'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 25V14a8 8 0 0 1 16 0v11'/%3E%3Cpath d='M13 25v-6a3 3 0 0 1 6 0v6'/%3E%3Cpath d='M6.5 25h19'/%3E%3C/g%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/dashboard/home.css" />
+  <script type="module" src="/dashboard/connect.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <a class="brand" href="/">
+        <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V10a8 8 0 0 1 16 0v11"/><path d="M9 21v-7a3 3 0 0 1 6 0v7"/><path d="M3 21h18"/></svg></span>
+        <span>localgate</span>
+      </a>
+    </div>
+  </header>
+
+  <main class="wrap connect">
+    <section class="hero">
+      <p class="eyebrow">You've been given access</p>
+      <h1>Connect to this gateway</h1>
+      <p class="lede">Someone shared their local models with you. Use the address and key below in any OpenAI-compatible app, or with the <code>localgate</code> command line.</p>
+    </section>
+
+    <div id="missing" class="card pad" hidden>
+      <h2>No access details in this link</h2>
+      <p class="muted">Open the exact link (or scan the QR code) you were given. It carries the gateway address and your API key after the <code>#</code>.</p>
+    </div>
+
+    <div id="details" hidden>
+      <div class="card pad creds">
+        <div class="cred">
+          <span class="label">Base URL</span>
+          <code id="base-url"></code>
+          <button class="btn sm" type="button" data-copy="base-url">Copy</button>
+        </div>
+        <div class="cred">
+          <span class="label">API key</span>
+          <code id="api-key"></code>
+          <button class="btn sm" type="button" data-copy="api-key">Copy</button>
+        </div>
+        <div class="actions">
+          <button class="btn primary" type="button" id="test">Test connection</button>
+          <span id="test-result" class="muted" role="status"></span>
+        </div>
+      </div>
+
+      <ol class="steps">
+        <li>
+          <h3>Save it now</h3>
+          <p>Keep the key somewhere safe, like a password manager. Anyone with it can use this gateway as you.</p>
+        </li>
+        <li>
+          <h3>Use it in code</h3>
+          <div class="tabs" role="tablist" aria-label="Example language">
+            <button class="tab" role="tab" aria-selected="true" aria-controls="ex-python" id="tab-python">Python</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="ex-curl" id="tab-curl">curl</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="ex-cli" id="tab-cli">localgate CLI</button>
+          </div>
+          <pre id="ex-python" role="tabpanel" aria-labelledby="tab-python"><code></code></pre>
+          <pre id="ex-curl" role="tabpanel" aria-labelledby="tab-curl" hidden><code></code></pre>
+          <pre id="ex-cli" role="tabpanel" aria-labelledby="tab-cli" hidden><code></code></pre>
+        </li>
+      </ol>
+    </div>
+  </main>
+</body>
+</html>

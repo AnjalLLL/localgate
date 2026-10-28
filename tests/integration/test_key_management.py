@@ -142,6 +142,7 @@ def test_every_route_is_guarded(settings, tmp_path):
         "/health/live",
         "/metrics",  # scrapers can't hold per-target bearer tokens; it exposes no secrets
         "/",  # the landing page: static instructions; its status comes from /health
+        "/connect",  # static page; the key it shows lives in the URL fragment, never sent
         # Dashboard sign-in/out: POST checks the admin key itself, DELETE only clears a
         # cookie. GET on the same path is guarded and is asserted separately below.
         "/admin/session",

@@ -52,6 +52,7 @@ dependencies = [
     "mcp>=1.0",
     "caniollama>=0.1.0",
     "cryptography>=42",
+    "segno>=1.6",  # QR codes for the dashboard's Share page (pure Python, no deps)
 ]
 
 [project.optional-dependencies]

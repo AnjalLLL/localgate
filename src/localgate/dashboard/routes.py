@@ -53,3 +53,14 @@ def mount_home(app: FastAPI) -> None:
                 }
             )
         return FileResponse(page, media_type="text/html")
+
+
+def mount_connect(app: FastAPI) -> None:
+    """``/connect``: the page a QR code from the Share page opens on a phone or
+    laptop. Public, like the landing page — it reads the gateway address and API
+    key from the URL fragment, which the browser never sends to any server."""
+    page = STATIC_DIR / "connect.html"
+
+    @app.get("/connect", include_in_schema=False)
+    async def connect() -> Response:
+        return FileResponse(page, media_type="text/html")
