@@ -39,14 +39,14 @@ class OpenAICompatBackend(InferenceBackend):
 
     async def chat(self, request: dict[str, Any]) -> dict[str, Any]:
         resp = await self._client.post(
-            "/v1/chat/completions", json={**_openai_body(request), "stream": False}
+            "/v1/chat/completions", json={**self._body(request), "stream": False}
         )
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
     async def chat_stream(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         async with self._client.stream(
-            "POST", "/v1/chat/completions", json={**_openai_body(request), "stream": True}
+            "POST", "/v1/chat/completions", json={**self._body(request), "stream": True}
         ) as resp:
             await _raise_for_stream_status(resp)
             async for line in resp.aiter_lines():
@@ -63,6 +63,11 @@ class OpenAICompatBackend(InferenceBackend):
                     # One malformed frame shouldn't abort the whole stream: the
                     # caller is better served by the tokens that do parse.
                     continue
+
+    def _body(self, request: dict[str, Any]) -> dict[str, Any]:
+        """The request as sent upstream. Generic servers get Ollama/Localgate-native
+        fields stripped; a backend that understands them overrides this."""
+        return _openai_body(request)
 
     async def embed(self, text: str, model: str) -> list[float]:
         resp = await self._client.post(self.embeddings_path, json={"model": model, "input": text})

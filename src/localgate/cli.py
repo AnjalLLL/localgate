@@ -848,16 +848,13 @@ def login(
                 raise typer.Exit(code=1)
             resp.raise_for_status()
 
-            from localgate import __version__ as local_version  # noqa: PLC0415
-
-            major_mismatch = (
-                remote_version != "unknown"
-                and remote_version.split(".")[0] != local_version.split(".")[0]
-            )
-            if major_mismatch:
+            # 0.x and 1.x speak the same API; a pre-1.0 gateway only lacks the model
+            # details and limits a 1.x client can show. Warn about that, not about
+            # every difference in version numbers.
+            if remote_version != "unknown" and remote_version.split(".")[0] == "0":
                 typer.secho(
-                    f"Warning: local version {local_version} and gateway version {remote_version} "
-                    "have different major versions — some features may not work.",
+                    f"Note: the gateway runs localgate {remote_version}. Upgrading it to 1.x "
+                    "gives `localgate code --remote` model details and context sizing.",
                     fg=typer.colors.YELLOW,
                 )
 
@@ -902,8 +899,28 @@ def whoami() -> None:
         typer.secho(f"Could not reach gateway: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=6) from exc
 
-    typer.echo(f"Gateway: {base}")
-    typer.echo(json.dumps(data, indent=2))
+    typer.echo(f"Gateway   {base}")
+    if data.get("name"):
+        typer.echo(f"Key       {data['name']}")
+    typer.echo(
+        f"Usage     {data.get('request_count', 0):,} requests, "
+        f"{data.get('total_tokens', 0):,} tokens"
+    )
+    limits = data.get("limits") or {}
+    models = limits.get("allowed_models")
+    typer.echo(f"Models    {', '.join(models) if models else 'any'}")
+    quota = limits.get("token_quota")
+    if quota:
+        used = data.get("tokens_this_period") or 0
+        typer.echo(
+            f"Quota     {used:,} / {quota:,} tokens this {limits.get('quota_period', 'month')}"
+        )
+    if limits.get("max_tokens"):
+        typer.echo(f"Replies   up to {limits['max_tokens']:,} tokens")
+    if limits.get("expires_at"):
+        typer.echo(f"Expires   {limits['expires_at'][:10]}")
+    if limits.get("store_conversations") is False:
+        typer.echo("History   not stored on the gateway")
 
 
 # ---------------------------------------------------------------------------- agent
@@ -1091,7 +1108,7 @@ def code(
             raise typer.Exit(code=2)
         gw_url, gw_key = gateway_creds
         backend = get_backend(
-            "openai_compat",
+            "localgate",
             gw_url,
             api_key=gw_key,
             timeout=settings.backend_timeout,
@@ -1123,7 +1140,7 @@ def code(
         try:
             supports_tools = await backend.check_tool_support(resolved_model)
             native_tools = True
-            if supports_tools is False and backend.name == "ollama":
+            if supports_tools is False and backend.accepts_options:
                 # Ollama can grammar-constrain replies, so a model without native
                 # tools still gets a working (if slower) JSON tool protocol.
                 native_tools = False

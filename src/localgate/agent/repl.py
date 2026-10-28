@@ -567,7 +567,7 @@ async def _switch_model(
     supports_tools = await session.backend.check_tool_support(name)
     native = supports_tools is not False
     if not warned and supports_tools is False:
-        if session.backend.name == "ollama":
+        if session.backend.accepts_options:
             console.print(
                 f"[yellow]{name} doesn't advertise tool-calling support — Localgate will use "
                 "JSON tool mode (grammar-constrained replies) for it, which is slower and "
@@ -582,7 +582,7 @@ async def _switch_model(
         if answer not in ("y", "yes"):
             return
 
-    session.switch_model(name, native_tools=native or session.backend.name != "ollama")
+    session.switch_model(name, native_tools=native or not session.backend.accepts_options)
     console.print(f"[dim]model set to {session.model}[/dim]")
 
 
