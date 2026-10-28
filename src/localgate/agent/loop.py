@@ -19,7 +19,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from localgate.agent.context import (
     ledger_message,
     make_llm_ledger_updater,
 )
+from localgate.agent.instructions import load_instructions
 from localgate.agent.mcp import McpRegistry, is_mcp_tool_name
 from localgate.agent.tool_executor import (
     ToolCallTracker,
@@ -116,8 +117,9 @@ _SEARCH_GUIDANCE = (
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 _TAG_RE = re.compile(r"^<(\w+)>\s*(.*?)\s*</\1>$", re.DOTALL)
 _MUTATION_REQUEST_RE = re.compile(
-    r"\b(add|build|change|create|delete|edit|fix|implement|modify|move|refactor|"
-    r"remove|rename|replace|update|write)\b",
+    r"\b(add|build|change|create|delete|edit|enhance|expand|extend|fix|implement|"
+    r"improve|make|modify|move|polish|redesign|refactor|remove|rename|replace|"
+    r"restyle|rewrite|update|upgrade|write)\b",
     re.IGNORECASE,
 )
 #: Matches a JSON object embedded anywhere in prose — used as a fallback when the
@@ -268,6 +270,32 @@ def _as_synthetic_tool_call(content: str, known_names: frozenset[str]) -> dict[s
         if write is not None:
             return write
 
+    return None
+
+
+_TOOL_NAME_FIELD_RE = re.compile(r'"name"\s*:\s*"(\w+)"')
+
+
+def _malformed_tool_call_error(content: str, known_names: frozenset[str]) -> str | None:
+    """A nudge for a reply that tried to call a tool in text but wrote invalid
+    JSON — typically an unescaped ``"`` inside file content. Without it the
+    broken call reads as a final answer and nothing is written."""
+    for match in _TOOL_NAME_FIELD_RE.finditer(content):
+        name = match.group(1)
+        if name not in known_names:
+            continue
+        start = content.rfind("{", 0, match.start())
+        if start == -1:
+            continue
+        candidate = _extract_json_object(content, start) or content[start:]
+        try:
+            json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            return (
+                f"Your {name} call was not valid JSON ({exc.msg} at char {exc.pos}), so it "
+                f"did not run and no file was changed. Call {name} again with valid JSON — "
+                'escape every double quote inside a string value as \\".'
+            )
     return None
 
 
@@ -580,6 +608,9 @@ class AgentSession:
         self.confirm_mcp = confirm_mcp
         self.on_event = on_event
         self.on_token = on_token
+        #: Called with the reply text so far while a reply streams in — before it is
+        #: known whether it ends as a tool call or the final answer.
+        self.on_draft: OnToken | None = None
         self.max_turns = max_turns
         self.tool_schemas = list(tool_schemas) if tool_schemas is not None else list(TOOL_SCHEMAS)
         #: Whether *this* session may call `delegate_task` — never propagated to
@@ -643,6 +674,7 @@ class AgentSession:
             prompt += tool.guidance
         if not self.native_tools:
             prompt += _json_tool_protocol(self.tool_schemas)
+        prompt += load_instructions(self.root)
         return prompt
 
     def reset(self) -> None:
@@ -773,11 +805,14 @@ class AgentSession:
             payload["options"] = options
         return payload
 
-    async def send(self, user_input: str) -> str:
+    async def send(self, user_input: str, attachments: Sequence[str] = ()) -> str:
         """Run one user turn to completion and return the model's final reply.
 
         Output is buffered silently during the tool loop — only tool events
-        (via on_event) are shown. The final answer is streamed at the end.
+        (via on_event) and, when set, the in-progress text (via on_draft) are
+        shown. The final answer goes to on_token at the end. ``attachments``
+        are project files (`@path` in the REPL) whose contents ride along with
+        the message and count as read.
         """
         await self._resolve_context()
         require_tool_evidence = self.auto_read and bool(_MUTATION_REQUEST_RE.search(user_input))
@@ -796,6 +831,10 @@ class AgentSession:
         prose_without_tools = 0
         unverified_claim_nudged = False
         empty_reply_nudged = False
+        malformed_call_nudged = False
+        attached = self._attachment_text(attachments)
+        if attached:
+            user_input = f"{user_input}\n\n{attached}"
         if len(self.messages) == 1:
             context = self._build_project_context()
             if context:
@@ -806,6 +845,18 @@ class AgentSession:
 
         def _noop(_text: str) -> None:
             pass
+
+        def _draft_callback() -> OnToken:
+            on_draft = self.on_draft
+            if on_draft is None:
+                return _noop
+            parts: list[str] = []
+
+            def collect(text: str) -> None:
+                parts.append(text)
+                on_draft("".join(parts))
+
+            return collect
 
         for _ in range(self.max_turns):
             if self.context is not None and self.context.needs_compaction(
@@ -820,7 +871,7 @@ class AgentSession:
             payload = self._payload(outgoing)
             if self.on_token is not None and self.native_tools:
                 message = await _stream_completion(
-                    self.backend, payload, _noop, self._known_tool_names
+                    self.backend, payload, _draft_callback(), self._known_tool_names
                 )
             else:
                 response = await self.backend.chat(payload)
@@ -857,6 +908,11 @@ class AgentSession:
             self.messages.append(message)
 
             if not tool_calls:
+                malformed = _malformed_tool_call_error(content, self._known_tool_names)
+                if malformed and not malformed_call_nudged:
+                    malformed_call_nudged = True
+                    self.messages.append({"role": "user", "content": malformed})
+                    continue
                 if require_tool_evidence and self._task_tool_calls == 0:
                     prose_without_tools += 1
                     if prose_without_tools == 1:
@@ -996,6 +1052,19 @@ class AgentSession:
     def _has_done_work(self) -> bool:
         """Check if any tool calls have been made in this conversation."""
         return self._task_tool_calls > 0
+
+    def _attachment_text(self, attachments: Sequence[str]) -> str:
+        """File contents for the user's `@path` attachments, marked as read."""
+        blocks: list[str] = []
+        for path in attachments:
+            try:
+                content = read_file(self.root, path)
+            except (OSError, ValueError):
+                continue
+            self._read_paths.add(path)
+            self.ledger.observe_tool("read_file", {"path": path}, True, content)
+            blocks.append(f"Contents of {path} (attached by the user):\n```\n{content}\n```")
+        return "\n\n".join(blocks)
 
     def _pick_first_file(self) -> str | None:
         """Pick the most relevant file to auto-read from the project root."""

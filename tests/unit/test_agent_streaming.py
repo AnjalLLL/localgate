@@ -106,3 +106,13 @@ async def test_streaming_and_non_streaming_paths_agree_on_a_plain_text_reply(pro
         streaming_backend, "scripted-model", project, on_token=lambda _: None
     )
     assert await streaming_session.send("go") == "done"
+
+
+async def test_on_draft_sees_the_reply_grow_while_it_streams(project):
+    backend = StreamingScriptedBackend([[content_chunk("Hel"), content_chunk("lo")]])
+    drafts: list[str] = []
+    session = AgentSession(backend, "scripted-model", project, on_token=lambda _: None)
+    session.on_draft = drafts.append
+
+    assert await session.send("say hi") == "Hello"
+    assert drafts == ["Hel", "Hello"]

@@ -288,6 +288,9 @@ async def run_sandboxed(
     except asyncio.TimeoutError:
         await _stop(proc, sandbox, name)
         return CommandResult(None, "", timed_out=True)
+    except asyncio.CancelledError:  # the user interrupted the turn (Esc)
+        await _stop(proc, sandbox, name)
+        raise
     text = stdout.decode("utf-8", errors="replace")
     if len(text) > MAX_OUTPUT_CHARS:
         # Keep the end: test failures and tracebacks are at the bottom.
