@@ -14,10 +14,12 @@ from tests.conftest import TEST_ADMIN_KEY
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(tmp_path) -> Settings:
+    # A real file, not :memory: — these tests finish requests concurrently, and an
+    # in-memory database shares one connection between their transactions.
     return Settings(
         _env_file=None,
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=f"sqlite+aiosqlite:///{tmp_path}/queue.db",
         backend_type="fake",
         backend_url="",
         admin_key=TEST_ADMIN_KEY,
