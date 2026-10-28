@@ -22,7 +22,7 @@ async def test_sign_in_sets_an_httponly_cookie_and_rejects_bad_keys(client):
     assert good.status_code == 204
     cookie = good.headers["set-cookie"]
     assert ADMIN_COOKIE in cookie and "HttpOnly" in cookie and "SameSite=strict" in cookie
-    assert (await client.get("/admin/session")).json() == {"admin": True}
+    assert (await client.get("/admin/session")).json() == {"admin": True, "email": None}
 
     await client.delete("/admin/session")
     client.cookies.clear()
