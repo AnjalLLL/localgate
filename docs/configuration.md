@@ -14,7 +14,7 @@ at startup rather than at the first request — see [Validation](#validation).
 
 | Setting | Default | Description |
 |---|---|---|
-| `LOCALGATE_HOST` | `0.0.0.0` | Interface to bind. |
+| `LOCALGATE_HOST` | `127.0.0.1` | Interface to bind. The default keeps the gateway on this machine; `localgate serve --share` listens on the network (the Docker image sets `0.0.0.0`). |
 | `LOCALGATE_PORT` | `8000` | Port to bind. |
 | `LOCALGATE_CORS_ORIGINS` | *(empty)* | Origins allowed to call the API from a browser. Accepts `http://a,http://b` or a JSON array. Empty means no CORS headers, which is right for server-to-server use. |
 
@@ -144,14 +144,32 @@ Needs `pip install 'localgate[voice]'`.
 
 | Setting | Default | Description |
 |---|---|---|
-| `LOCALGATE_ADMIN_KEY` | `change-me-in-production` | Guards every `/admin` route. |
+| `LOCALGATE_ADMIN_KEY` | *(generated)* | The server's own secret: signs dashboard sessions and authenticates scripts calling `/admin`. The first `localgate serve` generates one and saves it to the per-user env file; `localgate admin-key` shows it, `--rotate` replaces it. |
 | `LOCALGATE_DEFAULT_RATE_LIMIT_PER_MIN` | `60` | Applied to new keys that don't specify one. |
+| `LOCALGATE_API_KEY_REVEAL_ENABLED` | `true` | Keep an encrypted copy of new API keys so an admin can show them again. |
 
-Generate a real admin key with `openssl rand -hex 32`. Per-key limits are stored on the
-key and changed with `localgate keys update` or `PATCH /admin/keys/{id}`.
+People sign in to the dashboard with an email and password (`localgate users create`);
+the admin key is for scripts. Per-key limits — allowed models, reply cap, token quota,
+expiry, concurrency, whether conversations are stored — live on each key and are changed
+with `localgate keys update`, the dashboard, or `PATCH /admin/keys/{id}`.
 
-Rate limits are per-process. Running N workers means the effective limit is N times what
-you configured; see [Deployment](deployment.md).
+Rate limits are per-process unless `LOCALGATE_REDIS_URL` is set (see below).
+
+## Sharing with other devices
+
+| Setting | Default | Description |
+|---|---|---|
+| `LOCALGATE_DEFAULT_NUM_CTX` | `8192` | Context window sent to Ollama for requests that don't set one, capped at the model's own maximum. Ollama's server default is far smaller and silently drops the start of long prompts. |
+| `LOCALGATE_MAX_CONCURRENT_REQUESTS` | `2` | Generations run at once per backend; the rest wait in a fair queue (round-robin across keys). Match it to Ollama's `OLLAMA_NUM_PARALLEL`. |
+| `LOCALGATE_QUEUE_TIMEOUT` | `60` | Seconds a request may wait for a slot before getting `503` with `Retry-After`. |
+| `LOCALGATE_MAX_QUEUE` | `100` | Requests allowed to wait per backend; more get `503` at once. |
+| `LOCALGATE_ADMIN_ALLOWED_NETWORKS` | loopback, private LANs, Tailscale, IPv6 ULA | Who may reach the dashboard, `/admin`, `/docs` and `/metrics` (CIDRs, comma-separated, or `*`). The `/v1` API is reachable wherever the port is. Behind a reverse proxy, run `serve --proxy-headers --forwarded-allow-ips <proxy>` so real client addresses are seen. |
+| `LOCALGATE_PUBLIC_URL` | *(none)* | The address devices use when it isn't this machine's (a tunnel or a domain). Shown first on the Share page. |
+| `LOCALGATE_BACKENDS` | *(empty)* | Several inference servers behind one gateway, as JSON: `[{"name": "big-gpu", "type": "ollama", "url": "http://10.0.0.5:11434", "models": ["llama3:70b"], "max_concurrent": 4}]`. Requests go to a backend that serves the model, least busy first, with failover. Empty: one backend from `BACKEND_TYPE`/`BACKEND_URL`. |
+| `LOCALGATE_REDIS_URL` | *(none)* | Share rate limits and per-key concurrency across worker processes. Needs `pip install 'localgate[redis]'`. |
+| `LOCALGATE_DISCOVERY_ENABLED` | `false` | Announce the gateway on the local network (on with `serve --share`). Needs `pip install 'localgate[discovery]'`. |
+
+See [Sharing your GPU](sharing.md) for the whole setup.
 
 ## Observability
 
@@ -169,7 +187,10 @@ version is the silent one. localgate refuses to start when:
 - `ENVIRONMENT=production` and `ADMIN_KEY` is still the documented placeholder — anyone
   who has read these docs could otherwise mint API keys against your gateway;
 - `CHUNK_OVERLAP >= CHUNK_SIZE` — the chunking window would never advance;
-- `BACKEND_TYPE` names a backend that isn't installed (the error lists the ones that are);
+- `BACKEND_TYPE` (or a `BACKENDS` entry's `type`) names a backend that isn't installed
+  (the error lists the ones that are);
+- the gateway would listen on a non-loopback address with the placeholder admin key;
+- `ADMIN_ALLOWED_NETWORKS` contains something that isn't a network;
 - `PORT` is outside 1–65535.
 
 In development the placeholder admin key is allowed, because local use has to stay
