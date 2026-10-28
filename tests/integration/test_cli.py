@@ -354,3 +354,17 @@ def test_compose_deploy_reaches_the_gateway_from_caddy(env, tmp_path):
     assert "reverse_proxy localgate:8000" in (out / "Caddyfile").read_text()
     assert "LOCALGATE_HOST=0.0.0.0" in (out / "localgate.env").read_text()
     assert "--proxy-headers" in (out / "docker-compose.yml").read_text()
+
+
+def test_account_changes_from_the_cli_are_audited(env):
+    runner.invoke(
+        app,
+        ["users", "create", "--email", "ana@example.com"],
+        input="correct horse\ncorrect horse\n",
+    )
+    runner.invoke(app, ["users", "delete", "ana@example.com"])
+    result = runner.invoke(app, ["audit"])
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert "user.deleted ana@example.com" in lines[0] and "cli" in lines[0]
+    assert "user.created ana@example.com" in lines[1]
