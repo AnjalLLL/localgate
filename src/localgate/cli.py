@@ -687,10 +687,13 @@ def code(
     from localgate.agent.theme import THEMES  # noqa: PLC0415
     from localgate.agent.userconfig import UserConfig  # noqa: PLC0415
     from localgate.agent.websearch import make_search_fn  # noqa: PLC0415
+    from localgate.core.logging import configure_logging  # noqa: PLC0415
     from localgate.voice.terminal import VoiceIO  # noqa: PLC0415
     from localgate.web.search import chain_from_settings  # noqa: PLC0415
 
     settings = _settings()
+    # The REPL is a UI, not a server log: only warnings unless DEBUG was asked for.
+    configure_logging("DEBUG" if settings.log_level == "DEBUG" else "WARNING", settings.log_format)
     root = directory.resolve()
     if not root.is_dir():
         typer.secho(f"Not a directory: {root}", fg=typer.colors.RED, err=True)
@@ -777,13 +780,14 @@ def code(
                 # Ollama can grammar-constrain replies, so a model without native
                 # tools still gets a working (if slower) JSON tool protocol.
                 native_tools = False
-                typer.secho(
-                    f"Model {resolved_model!r} does not advertise tool-calling support; "
-                    "using JSON tool mode. A tool-capable model (e.g. qwen2.5-coder) "
-                    "is faster and more reliable.",
-                    fg=typer.colors.YELLOW,
-                    err=True,
-                )
+                if task is not None:  # the REPL shows this in its startup banner
+                    typer.secho(
+                        f"Model {resolved_model!r} does not advertise tool-calling support; "
+                        "using JSON tool mode. A tool-capable model (e.g. qwen2.5-coder) "
+                        "is faster and more reliable.",
+                        fg=typer.colors.YELLOW,
+                        err=True,
+                    )
             elif supports_tools is False:
                 message = (
                     f"Model {resolved_model!r} does not advertise tool-calling support; "

@@ -8,8 +8,11 @@ and Rich, and is exercised directly in tests without going through the CLI layer
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import sys
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -17,16 +20,33 @@ from typing import Any, NamedTuple
 import httpx
 import typer
 from prompt_toolkit import PromptSession
-from prompt_toolkit.key_binding import KeyBindings
-from rich.console import Console
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.history import FileHistory, History, InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from rich import box
+from rich.console import Console, Group
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
+from localgate import __version__, paths
 from localgate.agent import gitutil
 from localgate.agent import theme as theme_mod
+from localgate.agent.commands import command_dirs, load_commands
+from localgate.agent.input import AgentCompleter, input_key_bindings, mentioned_files
+from localgate.agent.instructions import (
+    INIT_PROMPT,
+    INSTRUCTION_FILES,
+    project_instructions_file,
+)
+from localgate.agent.interrupt import InterruptWatcher
 from localgate.agent.loop import AgentSession, AgentTurnLimitExceeded, AsyncTool
 from localgate.agent.mcp import McpRegistry
 from localgate.agent.memory import AgentMemory, list_project_sessions, set_current_project_session
-from localgate.agent.render import print_diff
+from localgate.agent.render import DraftView, print_diff, todo_checklist
 from localgate.agent.roles import AgentRole
 from localgate.agent.sandbox import (
     RUN_COMMAND_GUIDANCE,
@@ -35,6 +55,7 @@ from localgate.agent.sandbox import (
     is_auto_allowed,
     run_sandboxed,
 )
+from localgate.agent.shell import run_shell, shell_note
 from localgate.agent.theme import THEMES
 from localgate.agent.todo import TODO_GUIDANCE, TODO_WRITE_SCHEMA, TodoList
 from localgate.agent.tools import (
@@ -77,7 +98,19 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/rewind [n]", "Step back through the last n writes (default 1)."),
     ("/mcp", "List connected MCP servers and their tools."),
     ("/tools", "List every tool available this session, and what's off and why."),
+    ("/init", "Have the agent write LOCALGATE.md: standing instructions for this project."),
+    ("/commands", "List custom commands from .localgate/commands/*.md."),
     ("/help", "Show this list."),
+]
+
+#: (keys, what they do) — shown by `/help` under the commands.
+SHORTCUTS: list[tuple[str, str]] = [
+    ("@path", "Attach a file to your message (tab completes paths)."),
+    ("!command", "Run a shell command yourself; the agent sees its output next turn."),
+    ("esc / ctrl+c", "Interrupt the agent mid-turn (the session stays open)."),
+    ("\\ then enter", "Continue on a new line (or esc then enter)."),
+    ("↑ / ↓, ctrl+r", "Recall or search earlier prompts."),
+    ("shift+tab", "Cycle the write mode."),
 ]
 
 _QUICK_COMMANDS = "/model  /theme  /mode  /tools  /help  /exit"
@@ -562,34 +595,44 @@ async def _model_picker(
         model_names = [m["name"] for m in models]
         compat_map = await get_compat_for_models(caniollama_client, model_names)
 
-    console.print(f"[dim]current model: {session.model}[/dim]")
+    table = Table(box=box.SIMPLE_HEAD, pad_edge=False, show_edge=False)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("model")
+    table.add_column("params", justify="right", style="dim")
+    table.add_column("quant", style="dim")
+    table.add_column("size", justify="right", style="dim")
+    if caniollama_client:
+        table.add_column("tool calling")
+    missing_compat = False
     for i, m in enumerate(models, start=1):
-        details = (m.get("parameter_size"), m.get("quantization"), m.get("size_human"))
-        extra = "  ".join(str(v) for v in details if v)
-        marker = "*" if m["name"] == session.model else " "
-
-        # Add caniollama compat annotation if available
-        compat_suffix = ""
+        current = m["name"] == session.model
+        name = f"[bold green]● {escape(m['name'])}[/bold green]" if current else escape(m["name"])
+        if "embed" in m["name"]:
+            name += " [dim](embeddings only)[/dim]"
+        row = [
+            str(i),
+            name,
+            str(m.get("parameter_size") or ""),
+            str(m.get("quantization") or ""),
+            str(m.get("size_human") or ""),
+        ]
         if caniollama_client:
             compat = compat_map.get(m["name"])
             if compat is not None:
                 rate = overall_pass_rate(compat)
-                label = "reliable" if rate >= 0.7 else "unreliable"
                 color = "green" if rate >= 0.7 else "red"
-                compat_suffix = (
-                    f"  [{color}]tool calling: {label} "
-                    f"({rate:.0%}, {compat.total_reports} reports)[/{color}]"
-                )
+                label = "reliable" if rate >= 0.7 else "unreliable"
+                row.append(f"[{color}]{label} {rate:.0%}[/{color}]")
             else:
-                compat_suffix = (
-                    f"  [dim]no compat data yet — run: caniollama check {m['name']}[/dim]"
-                )
-
-        suffix = f"  [dim]{extra}[/dim]" if extra else ""
-        console.print(f"  {marker}{i}. {m['name']}{suffix}{compat_suffix}")
+                missing_compat = True
+                row.append("[dim]unknown[/dim]")
+        table.add_row(*row)
+    console.print(table)
+    if missing_compat:
+        console.print("[dim]  unknown? run: caniollama check <model>[/dim]")
 
     choice = console.input(
-        "[bold green]select a model (number or name, blank to cancel): [/bold green]"
+        "[bold green]❯ pick a model[/bold green] [dim](number or name, blank to cancel)[/dim] "
     ).strip()
     if not choice:
         return
@@ -664,20 +707,29 @@ def _render_startup_banner(
     mcp_registry: Any,
 ) -> Panel:
     """Build a Rich Panel with project info, model, files, tools, and commands."""
-    lines: list[str] = []
-    lines.append(f"[bold]project:[/bold] {root}")
-    lines.append(f"[bold]model:[/bold]   {model}")
-    lines.append(f"[bold]mode:[/bold]    {mode}")
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", no_wrap=True)
+    grid.add_column()
+    grid.add_row("project", f"[bold]{escape(str(root))}[/bold]")
+    grid.add_row("model", f"[cyan]{escape(model)}[/cyan]")
+    if not session.native_tools:
+        grid.add_row(
+            "",
+            "[yellow]no native tool calling — using slower JSON mode; "
+            "try /model qwen2.5-coder[/yellow]",
+        )
+    grid.add_row("mode", f"[bold green]{mode}[/bold green] [dim](shift+tab to cycle)[/dim]")
 
     # Files
     try:
         entries = sorted(root.iterdir())
-        visible = [
+        names = [
             e.name + ("/" if e.is_dir() else "") for e in entries if not e.name.startswith(".")
-        ][:12]
-        if visible:
-            lines.append("")
-            lines.append(f"[dim]files:[/dim] {', '.join(visible)}")
+        ]
+        if names:
+            shown = " · ".join(escape(n) for n in names[:8])
+            more = f" [dim]+{len(names) - 8} more[/dim]" if len(names) > 8 else ""
+            grid.add_row("files", shown + more)
     except OSError:
         pass
 
@@ -692,19 +744,30 @@ def _render_startup_banner(
     if mcp_registry is not None and mcp_registry.servers():
         names = [name for name, _ in mcp_registry.servers()]
         caps.extend(f"mcp:{n}" for n in names)
-    lines.append(f"[dim]tools:[/dim] {', '.join(caps)}")
+    grid.add_row("tools", " · ".join(caps))
+    instructions = project_instructions_file(root)
+    grid.add_row(
+        "memory",
+        f"{instructions.name}"
+        if instructions
+        else "[dim]none — /init to create LOCALGATE.md[/dim]",
+    )
 
-    # Quick command reference
-    lines.append("")
-    lines.append(f"[dim]{_QUICK_COMMANDS}[/dim]")
-    lines.append("[dim]shift+tab cycles mode[/dim]")
-
+    tips = Text.from_markup(
+        "[dim]Ask for a concrete change, e.g. [/dim]"
+        '"add a dark theme to styles.css"\n'
+        "[dim]@ attach a file · ! run a shell command · esc interrupts · "
+        "\\ + enter for a new line[/dim]\n"
+        f"[dim]{_QUICK_COMMANDS}[/dim]"
+    )
     return Panel(
-        "\n".join(lines),
-        title="[bold green]localgate code[/bold green]",
+        Group(grid, Text(""), tips),
+        title=f"[bold green]◆ localgate code[/bold green] [dim]v{__version__}[/dim]",
+        title_align="left",
         subtitle="[dim]github.com/AnjalLLL/localgate[/dim]",
+        subtitle_align="right",
         border_style="green",
-        padding=(0, 1),
+        padding=(1, 2),
     )
 
 
@@ -756,6 +819,65 @@ def _print_tools(console: Console, session: AgentSession) -> None:
         console.print(
             "[dim]mcp: no servers connected — see ~/.config/localgate/mcp_servers.json[/dim]"
         )
+
+
+def _print_help(console: Console, root: Path) -> None:
+    for cmd, desc in SLASH_COMMANDS:
+        console.print(f"  [bold]{cmd:<22}[/bold] [dim]{desc}[/dim]")
+    custom = load_commands(root)
+    if custom:
+        console.print("\n[bold]custom commands[/bold]")
+        for command in custom.values():
+            console.print(
+                f"  [bold]/{command.name:<21}[/bold] [dim]{escape(command.description)}[/dim]"
+            )
+    console.print("\n[bold]shortcuts[/bold]")
+    for keys, desc in SHORTCUTS:
+        console.print(f"  [bold]{escape(keys):<22}[/bold] [dim]{desc}[/dim]")
+
+
+def _print_custom_commands(console: Console, root: Path) -> None:
+    custom = load_commands(root)
+    if not custom:
+        user_dir, project_dir = command_dirs(root)
+        console.print(
+            "[dim]no custom commands — add a Markdown file to "
+            f"{escape(str(project_dir))} (this project) or {escape(str(user_dir))} "
+            "(everywhere); its name becomes the command and its text the prompt, "
+            "with $ARGUMENTS replaced by what you type after it.[/dim]"
+        )
+        return
+    for command in custom.values():
+        console.print(
+            f"  [bold]/{command.name:<21}[/bold] [dim]{escape(command.description)} "
+            f"({escape(str(command.source))})[/dim]"
+        )
+
+
+async def _run_user_shell(console: Console, root: Path, command: str) -> str | None:
+    """`!command`: run it with output streamed, Esc to stop; returns the note
+    for the model, or ``None`` if the command couldn't start."""
+    console.print(f"[bold]$ {escape(command)}[/bold]")
+    watcher = InterruptWatcher()
+    task = asyncio.ensure_future(
+        run_shell(root, command, lambda line: console.print(Text(line), highlight=False))
+    )
+    watcher.start(task)
+    try:
+        code, output = await task
+    except asyncio.CancelledError:
+        if not watcher.interrupted:
+            raise
+        console.print("[yellow]⏹ interrupted[/yellow]")
+        return shell_note(command, None, "")
+    except OSError as exc:
+        console.print(f"[red]couldn't run it: {exc}[/red]")
+        return None
+    finally:
+        watcher.stop()
+    color = "green" if code == 0 else "red"
+    console.print(f"[{color}]exit code {code}[/{color}] [dim]· the agent sees this next turn[/dim]")
+    return shell_note(command, code, output)
 
 
 async def _resume_command(
@@ -823,7 +945,9 @@ async def _print_context(console: Console, session: AgentSession) -> None:
         console.print(f"[dim]  last: {session.last_compaction.describe()}[/dim]")
 
 
-def _make_prompt_session(gate: WriteGate) -> PromptSession[str] | None:
+def _make_prompt_session(
+    gate: WriteGate, session: AgentSession | None = None
+) -> PromptSession[str] | None:
     """A prompt_toolkit session whose Shift+Tab cycles `gate`'s write mode, with
     the current mode always visible in the bottom toolbar.
 
@@ -842,16 +966,51 @@ def _make_prompt_session(gate: WriteGate) -> PromptSession[str] | None:
         gate.cycle_mode()
         event.app.invalidate()
 
-    def _bottom_toolbar() -> str:
-        return f" mode: {mode_label(gate.mode())}  (shift+tab to cycle)"
+    # The toolbar redraws on every keystroke; recount tokens only when history changes.
+    usage_cache: dict[int, int] = {}
 
-    return PromptSession(key_bindings=bindings, bottom_toolbar=_bottom_toolbar)
+    def _bottom_toolbar() -> str:
+        parts = [f" {session.model}"] if session is not None else []
+        parts.append(f"{mode_label(gate.mode())} (shift+tab)")
+        if session is not None and session.num_ctx:
+            key = len(session.messages)
+            if key not in usage_cache:
+                usage_cache.clear()
+                usage_cache[key] = session.context_usage()
+            parts.append(f"context {usage_cache[key] / session.num_ctx:.0%}")
+        parts.append("@ file · ! shell · /help")
+        return " · ".join(parts)
+
+    completer = None
+    if session is not None:
+        root = session.root
+
+        def _all_commands() -> list[tuple[str, str]]:
+            custom = [(f"/{c.name}", c.description) for c in load_commands(root).values()]
+            return [*SLASH_COMMANDS, *custom]
+
+        completer = AgentCompleter(root, _all_commands)
+    try:
+        history: History = FileHistory(str(paths.ensure_data_dir() / "prompt_history"))
+    except OSError:
+        history = InMemoryHistory()
+    return PromptSession(
+        key_bindings=merge_key_bindings([bindings, input_key_bindings()]),
+        bottom_toolbar=_bottom_toolbar,
+        completer=completer,
+        complete_while_typing=True,
+        history=history,
+        multiline=False,
+    )
+
+
+_PROMPT = FormattedText([("ansigreen bold", "❯ ")])
 
 
 async def _read_line(console: Console, prompt_session: PromptSession[str] | None) -> str:
     if prompt_session is not None:
-        return await prompt_session.prompt_async("> ")
-    return console.input("[bold green]> [/bold green]")
+        return await prompt_session.prompt_async(_PROMPT)
+    return console.input("[bold green]❯ [/bold green]")
 
 
 async def run_turn(
@@ -861,20 +1020,32 @@ async def run_turn(
     user_input: str,
     memory: AgentMemory | None = None,
     usage: SessionUsage | None = None,
+    attachments: Sequence[str] = (),
 ) -> str:
     """Run one turn with a spinner that clears the moment the model streams
     real output, but otherwise stays visible (relabeled "working...") between
     tool calls — a slow one (a web search, a delegated sub-task, an MCP call)
     would otherwise leave a dead gap with no sign anything is still happening.
+    While a reply streams in it is shown live, then replaced by the tool call
+    or the final answer it turned out to be. Esc/Ctrl+C interrupts the turn.
     Auto-commits afterward, and records the turn into conversation
     history/memory if a session is attached.
     """
     status = console.status("[dim]thinking...[/dim]", spinner="dots")
     status.start()
     stopped = False
+    started = time.monotonic()
+    tool_calls = 0
+    code_theme = theme_mod.syntax_theme_for(gate.theme_name)
+    draft = DraftView(code_theme)
+    draft_live: Live | None = None
+    watcher = InterruptWatcher()
 
     def stop() -> None:
-        nonlocal stopped
+        nonlocal stopped, draft_live
+        if draft_live is not None:
+            draft_live.stop()  # transient: the draft disappears
+            draft_live = None
         if not stopped:
             status.stop()
             stopped = True
@@ -885,17 +1056,36 @@ async def run_turn(
         status.start()
         stopped = False
 
+    def on_draft(text: str) -> None:
+        nonlocal stopped, draft_live
+        if draft_live is None:
+            if not stopped:
+                status.stop()
+                stopped = True
+            draft_live = Live(draft, console=console, transient=True, refresh_per_second=8)
+            draft_live.start()
+        draft.text = text
+
     def on_token(text: str) -> None:
+        # The loop hands over the final answer in one piece, so it can be laid
+        # out as Markdown — headings, lists, highlighted code — not raw ``###``.
         stop()
-        console.print(text, end="")
+        console.print()
+        console.print(Markdown(text, code_theme=code_theme))
 
     def on_event(line: str) -> None:
-        nonlocal stopped
+        nonlocal tool_calls
         stop()
-        if "wrote " in line or "write_file" in line:
-            console.print(f"[bold green]  ✓ {line}[/bold green]")
+        name, paren, args = line.partition("(")
+        if paren and name.isidentifier():
+            tool_calls += 1
+            color = "bold green" if name in MUTATING_TOOL_NAMES else "cyan"
+            console.print(
+                f"  [{color}]●[/{color}] [bold]{escape(name)}[/bold] "
+                f"[dim]{escape(args.removesuffix(')'))}[/dim]"
+            )
         else:
-            console.print(f"[cyan]  → {line}[/cyan]")
+            console.print(f"  [dim]● {escape(line)}[/dim]")
         restart()
 
     original_confirm_write = session.confirm_write
@@ -907,7 +1097,8 @@ async def run_turn(
         def visible(*args: Any, **kwargs: Any) -> bool:
             stop()
             try:
-                return bool(callback(*args, **kwargs))
+                with watcher.paused():
+                    return bool(callback(*args, **kwargs))
             finally:
                 restart()
 
@@ -921,30 +1112,67 @@ async def run_turn(
         session.confirm_delegate = with_visible_prompt(original_confirm_delegate)
     if original_confirm_mcp is not None:
         session.confirm_mcp = with_visible_prompt(original_confirm_mcp)
+    # run_command and fetch_url ask through their own `confirm` — without this the
+    # spinner redraws over the [y/N] prompt and the turn looks hung.
+    original_tool_confirms = {name: tool.confirm for name, tool in session.extra_tools.items()}
+    for tool in session.extra_tools.values():
+        if tool.confirm is not None:
+            tool.confirm = with_visible_prompt(tool.confirm)
 
     session.on_token = on_token
     session.on_event = on_event
+    session.on_draft = on_draft
     if memory is not None:
         session.augment = memory.augment
+    for path in attachments:
+        console.print(f"  [cyan]●[/cyan] [bold]attached[/bold] [dim]{escape(path)}[/dim]")
+    history_before = len(session.messages)
+    interrupted = False
+    task = asyncio.ensure_future(session.send(user_input, attachments))
+    watcher.start(task)
     try:
-        result = await session.send(user_input)
+        result = await task
+    except asyncio.CancelledError:
+        if not watcher.interrupted:
+            raise
+        interrupted = True
+        result = ""
+        _forget_interrupted_turn(session, history_before, user_input)
     finally:
+        watcher.stop()
         stop()
+        session.on_draft = None
         session.confirm_write = original_confirm_write
         session.confirm_search = original_confirm_search
         session.confirm_delegate = original_confirm_delegate
         session.confirm_mcp = original_confirm_mcp
+        for name, confirm in original_tool_confirms.items():
+            session.extra_tools[name].confirm = confirm
 
     if gate.plan_mode:
         gate.flush_plan()
 
-    # Show a summary of files written this turn
+    # One summary line: what changed, how much work it took, how long.
+    summary: list[str] = []
+    if interrupted:
+        summary.append("[yellow]⏹ interrupted[/yellow]")
     if gate.writes_this_turn:
-        names = ", ".join(dict.fromkeys(gate.writes_this_turn))
-        console.print(f"\n[bold green]  files written: {names}[/bold green]")
+        names = ", ".join(escape(n) for n in dict.fromkeys(gate.writes_this_turn))
+        summary.append(f"[bold green]✓ wrote {names}[/bold green]")
+    if tool_calls:
+        summary.append(f"[dim]{tool_calls} tool call{'s' if tool_calls != 1 else ''}[/dim]")
+    summary.append(f"[dim]{time.monotonic() - started:.1f}s[/dim]")
+    console.print()
+    console.print("  " + " [dim]·[/dim] ".join(summary))
+
+    # A freshly written LOCALGATE.md (by /init or by hand-off) applies from the next turn.
+    if any(Path(path).name in INSTRUCTION_FILES for path in gate.writes_this_turn):
+        session.refresh_tools()
 
     gate.after_turn(user_input)
     console.print()
+    if interrupted:
+        return result
     if usage is not None:
         prompt_tokens = count_message_tokens(session.messages[:-1])
         completion_tokens = count_tokens(result)
@@ -956,6 +1184,20 @@ async def run_turn(
         with contextlib.suppress(Exception):
             await memory.save_ledger(session.ledger)
     return result
+
+
+def _forget_interrupted_turn(session: AgentSession, history_before: int, user_input: str) -> None:
+    """Drop a cancelled turn's half-finished messages — an assistant tool call
+    with no result would make the next request invalid — and leave a short note
+    so the model knows the request was cut off. On the very first turn, roll
+    back completely so the next one still gets the project overview."""
+    del session.messages[history_before:]
+    if history_before <= 1:
+        return
+    session.messages.append({"role": "user", "content": user_input})
+    session.messages.append(
+        {"role": "assistant", "content": "(Interrupted by the user before I finished.)"}
+    )
 
 
 async def build_agent_session(
@@ -1050,7 +1292,8 @@ async def build_agent_session(
 
     def show_todos(current: TodoList) -> None:
         session.ledger.open_todos = current.pending()
-        console.print(f"[cyan]{current.render()}[/cyan]")
+        if current.items:
+            console.print(todo_checklist(current.items))
 
     todos.on_change = show_todos
     if memory is not None:
@@ -1115,7 +1358,7 @@ async def run_repl(
         agent_roles=agent_roles,
         native_tools=native_tools,
     )
-    prompt_session = _make_prompt_session(gate)
+    prompt_session = _make_prompt_session(gate, session)
 
     # Initialize caniollama client if settings are available
     caniollama_client = None
@@ -1130,6 +1373,8 @@ async def run_repl(
         root, model, mode_label(gate.mode()), session, search_fn, mcp_registry
     )
     console.print(banner)
+    #: `!command` results waiting to be shown to the model with the next message.
+    shell_notes: list[str] = []
 
     while True:
         try:
@@ -1222,8 +1467,10 @@ async def run_repl(
             console.print(f"[yellow]{gate.rewind(steps)}[/yellow]")
             continue
         if line == "/help":
-            for cmd, desc in SLASH_COMMANDS:
-                console.print(f"  [bold]{cmd:<22}[/bold] [dim]{desc}[/dim]")
+            _print_help(console, root)
+            continue
+        if line == "/commands":
+            _print_custom_commands(console, root)
             continue
         if line == "/usage":
             console.print(
@@ -1248,7 +1495,10 @@ async def run_repl(
             continue
         if line == "/todos":
             todos = getattr(session, "todos", None)
-            console.print(todos.render() if todos is not None else "[dim]no to-do list[/dim]")
+            if todos is None or not todos.items:
+                console.print("[dim]no to-dos[/dim]")
+            else:
+                console.print(todo_checklist(todos.items))
             continue
         if line == "/agents":
             if not session.allow_delegation:
@@ -1303,12 +1553,38 @@ async def run_repl(
             state = "on — replies are read aloud" if voice.speak_enabled else "off"
             console.print(f"[dim]voice {state}[/dim]")
             continue
-        if line.startswith("/"):
-            console.print(f"[dim]unknown command {line!r} — try /help[/dim]")
+        if line.startswith("!"):
+            command = line[1:].strip()
+            if command:
+                note = await _run_user_shell(console, root, command)
+                if note:
+                    shell_notes.append(note)
             continue
+        if line == "/init":
+            line = INIT_PROMPT
+        elif line.startswith("/"):
+            name, _, arguments = line[1:].partition(" ")
+            custom = load_commands(root).get(name.lower())
+            if custom is None:
+                console.print(f"[dim]unknown command {line!r} — try /help[/dim]")
+                continue
+            console.print(f"[dim]/{custom.name} — {escape(custom.description)}[/dim]")
+            line = custom.expand(arguments.strip())
 
+        attachments = mentioned_files(root, line)
+        if shell_notes:
+            line = "\n\n".join([*shell_notes, line])
+            shell_notes.clear()
         try:
-            reply = await run_turn(console, session, gate, line, memory=memory, usage=usage)
+            reply = await run_turn(
+                console,
+                session,
+                gate,
+                line,
+                memory=memory,
+                usage=usage,
+                attachments=attachments,
+            )
             if voice is not None and voice.speak_enabled and reply:
                 await voice.say(reply)
         except AgentTurnLimitExceeded as exc:

@@ -773,3 +773,48 @@ async def test_multiple_code_blocks_extracted_as_multiple_writes(tmp_path):
     assert (tmp_path / "style.css").exists()
     assert "<html>" in (tmp_path / "index.html").read_text()
     assert "sans-serif" in (tmp_path / "style.css").read_text()
+
+
+async def test_malformed_tool_call_json_is_reported_back_instead_of_ending_the_turn(project):
+    # An unescaped quote inside the content string — seen live from qwen2.5-coder.
+    broken = (
+        "Here is the change:\n```json\n"
+        '{"name": "write_file", "arguments": {"path": "app.py", '
+        '"content": "<a href="#x">x</a>"}}\n```'
+    )
+    backend = ScriptedBackend(
+        [
+            tool_call("read", "read_file", {"path": "app.py"}),
+            final_text(broken),
+            tool_call("c1", "write_file", {"path": "app.py", "content": "new content\n"}),
+            final_text("updated app.py"),
+        ]
+    )
+    result = await run_agent(
+        backend, "scripted-model", project, "update app.py", confirm_write=lambda *_: True
+    )
+    assert result == "updated app.py"
+    assert (project / "app.py").read_text() == "new content\n"
+    nudge = backend.requests[2]["messages"][-1]
+    assert nudge["role"] == "user"
+    assert "not valid JSON" in nudge["content"]
+
+
+async def test_make_request_without_any_change_is_pushed_to_act(project):
+    backend = ScriptedBackend(
+        [
+            tool_call("read", "read_file", {"path": "app.py"}),
+            final_text("Here's a plan: 1. add a contact page 2. add a navbar"),
+            tool_call("c1", "write_file", {"path": "app.py", "content": "new content\n"}),
+            final_text("done"),
+        ]
+    )
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "please make this site more detailed",
+        confirm_write=lambda *_: True,
+    )
+    assert result == "done"
+    assert "no file has been changed yet" in backend.requests[2]["messages"][-1]["content"]
