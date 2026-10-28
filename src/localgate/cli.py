@@ -88,6 +88,7 @@ def _version_callback(show: bool) -> None:
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(  # noqa: ARG001 — read only by _version_callback's side effect
         False,
         "--version",
@@ -97,6 +98,12 @@ def main(
     ),
 ) -> None:
     """localgate — a local-first API gateway for open-source LLMs."""
+    # Commands are for people at a terminal: show warnings, not migration chatter.
+    # `serve` sets up its own server logging; LOCALGATE_LOG_LEVEL=DEBUG shows all.
+    if ctx.invoked_subcommand != "serve" and os.environ.get("LOCALGATE_LOG_LEVEL") != "DEBUG":
+        from localgate.core.logging import configure_logging  # noqa: PLC0415
+
+        configure_logging("WARNING")
 
 
 def _settings() -> Settings:
