@@ -17,6 +17,7 @@ Two things here differ from the stock template, both on purpose:
 from __future__ import annotations
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from alembic import context
@@ -31,7 +32,10 @@ from localgate.db.models import Base
 
 config = context.config
 
-if config.config_file_name is not None:
+# Only the bare `alembic` CLI needs alembic.ini's logging. Inside the app (the server,
+# `localgate code`) logging is already set up, and the ini's INFO level for alembic
+# would print migration chatter into the REPL on every start.
+if config.config_file_name is not None and not logging.getLogger().handlers:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata

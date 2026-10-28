@@ -1009,3 +1009,61 @@ async def test_repl_listen_with_nothing_heard_sends_nothing(repo, monkeypatch):
     backend = RecordingBackend([])
     await run_repl(backend, "scripted-model", repo, voice=FakeVoice(heard=None))
     assert backend.requests == []
+
+
+async def test_run_turn_stops_spinner_while_a_command_confirmation_is_visible(repo, monkeypatch):
+    """run_command confirms through its AsyncTool, not a session callback — the
+    spinner used to redraw over its [y/N] prompt, so the turn looked hung."""
+    from localgate.agent.loop import AsyncTool
+    from localgate.agent.sandbox import RUN_COMMAND_SCHEMA
+
+    active = False
+    original_start = Status.start
+    original_stop = Status.stop
+
+    def tracked_start(self):
+        nonlocal active
+        active = True
+        return original_start(self)
+
+    def tracked_stop(self):
+        nonlocal active
+        active = False
+        return original_stop(self)
+
+    seen_while_prompting: list[bool] = []
+
+    def confirm(*_args, **_kwargs):
+        seen_while_prompting.append(active)
+        return True
+
+    monkeypatch.setattr(Status, "start", tracked_start)
+    monkeypatch.setattr(Status, "stop", tracked_stop)
+    monkeypatch.setattr("typer.confirm", confirm)
+
+    async def run_command(_arguments: dict[str, Any]) -> str:
+        return "exit code 0"
+
+    out = console()
+    gate = WriteGate(out, repo)
+    tool = AsyncTool(RUN_COMMAND_SCHEMA, run_command, confirm=gate.confirm_command, read_only=False)
+    command_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                    "name": "run_command",
+                    "arguments": json.dumps({"command": "npm test"}),
+                },
+            }
+        ],
+    }
+    backend = ScriptedBackend([command_call, final_text("done")])
+    session = AgentSession(backend, "scripted-model", repo, extra_tools=[tool])
+
+    assert await run_turn(out, session, gate, "run the tests") == "done"
+    assert seen_while_prompting == [False]
+    assert tool.confirm == gate.confirm_command  # restored after the turn
