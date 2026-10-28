@@ -162,6 +162,7 @@ async def overview(request: Request, session: AsyncSession = Depends(get_session
             "recent_tool_calls": len(tool_rows),
             "success_rate": round(tool_ok / len(tool_rows), 3) if tool_rows else None,
         },
+        "queue": request.app.state.scheduler.stats(),
     }
 
 

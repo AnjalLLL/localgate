@@ -18,12 +18,14 @@ import time
 
 import httpx
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import enforce_rate_limit, get_session
 from localgate.core.errors import BackendError, describe_backend_failure
 from localgate.core.key_policy import clamp_max_tokens, enforce_key_access
 from localgate.core.model_info import apply_default_num_ctx
+from localgate.core.streaming import ClientGone, until_disconnected
 from localgate.core.token_counter import count_tokens
 from localgate.core.types import CompletionChoice, CompletionRequest, CompletionResponse, Usage
 from localgate.db.models import APIKey
@@ -56,13 +58,18 @@ async def create_completion(
         payload, backend, model, settings.default_num_ctx, request.app.state.model_info
     )
 
+    lease = await request.app.state.scheduler.acquire(api_key.id, api_key.max_concurrent)
     started = time.perf_counter()
     try:
-        response = await backend.chat(payload)
+        response = await until_disconnected(request, backend.chat(payload))
     except httpx.HTTPError as exc:
         raise BackendError(
             describe_backend_failure(exc, settings.backend_url, settings.backend_type)
         ) from exc
+    except ClientGone:
+        return Response(status_code=499)  # type: ignore[return-value]
+    finally:
+        lease.release()
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     text = (response.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""

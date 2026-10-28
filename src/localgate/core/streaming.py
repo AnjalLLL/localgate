@@ -3,13 +3,49 @@
 The wire format is fixed by what OpenAI clients expect: each chunk is a line
 ``data: {json}`` followed by a blank line, and the stream terminates with the
 literal sentinel ``data: [DONE]``. Clients block waiting for that sentinel, so
-every exit path — success, backend failure, cancellation — has to emit it.
+every exit path a client can still see — success, backend failure — has to emit
+it. (When the client itself disconnected there is no one to send it to; the
+stream then closes its upstream request instead, see `api/chat.py`.)
+
+`until_disconnected` does the same for non-streaming calls: a client that gives
+up on a long generation shouldn't keep the GPU busy producing it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, TypeVar
+
+from starlette.requests import Request
+
+T = TypeVar("T")
+
+#: How often a long non-streaming call checks whether its client is still there.
+DISCONNECT_POLL_SECONDS = 0.5
+
+
+class ClientGone(Exception):
+    """The client disconnected before the backend answered."""
+
+
+async def until_disconnected(request: Request, call: Awaitable[T]) -> T:
+    """Await ``call``, cancelling it (and raising `ClientGone`) if the client
+    disconnects first."""
+    task = asyncio.ensure_future(call)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_POLL_SECONDS)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                task.cancel()
+                raise ClientGone
+    finally:
+        if not task.done():
+            task.cancel()
+
 
 DONE = "data: [DONE]\n\n"
 

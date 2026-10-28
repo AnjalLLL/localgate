@@ -29,6 +29,7 @@ from localgate.core.errors import ConfigurationError, install_exception_handlers
 from localgate.core.logging import configure_logging, get_logger
 from localgate.core.model_info import ModelInfoCache
 from localgate.core.rate_limiter import RateLimiter
+from localgate.core.scheduler import InferenceScheduler
 from localgate.db.engine import init_models, make_engine, make_session_factory
 from localgate.middleware import RequestContextMiddleware
 
@@ -111,6 +112,12 @@ def create_app(
         )
         app.state.rate_limiter = RateLimiter()
         app.state.model_info = ModelInfoCache()
+        app.state.scheduler = InferenceScheduler(
+            settings.max_concurrent_requests,
+            settings.queue_timeout,
+            settings.max_queue,
+            name=settings.backend_type,
+        )
         app.state.cache = PromptCache(
             max_entries=settings.cache_max_entries, ttl_seconds=settings.cache_ttl_seconds
         )
