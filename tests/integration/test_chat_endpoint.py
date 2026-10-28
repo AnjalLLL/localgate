@@ -172,3 +172,20 @@ async def test_unknown_fields_are_forwarded_to_the_backend(client, auth_headers,
     forwarded = app.state.backend.calls[-1]
     assert forwarded["top_k"] == 40
     assert forwarded["repeat_penalty"] == 1.1
+
+
+async def test_models_listing_carries_context_window_and_capabilities(client, auth_headers, app):
+    backend = app.state.backend
+
+    async def context_window(model):
+        return 4096
+
+    async def capabilities(model):
+        return ["completion", "tools"]
+
+    backend.context_window = context_window
+    backend.capabilities = capabilities
+    card = (await client.get("/v1/models", headers=auth_headers)).json()["data"][0]
+    assert card["context_window"] == 4096
+    assert card["capabilities"] == ["completion", "tools"]
+    assert "quantization" not in card  # unknown fields are left out, not null

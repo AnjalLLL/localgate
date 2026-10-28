@@ -27,6 +27,7 @@ from localgate.core.db_config_store import (
 )
 from localgate.core.errors import ConfigurationError, install_exception_handlers
 from localgate.core.logging import configure_logging, get_logger
+from localgate.core.model_info import ModelInfoCache
 from localgate.core.rate_limiter import RateLimiter
 from localgate.db.engine import init_models, make_engine, make_session_factory
 from localgate.middleware import RequestContextMiddleware
@@ -109,6 +110,7 @@ def create_app(
             api_key=settings.backend_api_key,
         )
         app.state.rate_limiter = RateLimiter()
+        app.state.model_info = ModelInfoCache()
         app.state.cache = PromptCache(
             max_entries=settings.cache_max_entries, ttl_seconds=settings.cache_ttl_seconds
         )

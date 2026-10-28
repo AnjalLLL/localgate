@@ -170,6 +170,7 @@ def from_native_response(body: dict[str, Any]) -> dict[str, Any]:
 class OllamaBackend(OpenAICompatBackend):
     name = "ollama"
     default_base_url = "http://localhost:11434"
+    accepts_options = True
 
     @staticmethod
     def _wants_native(request: dict[str, Any]) -> bool:
