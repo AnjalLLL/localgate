@@ -119,6 +119,16 @@ def mentioned_files(root: Path, text: str) -> list[str]:
     return found
 
 
+@Condition
+def completing_command_or_path() -> bool:
+    """True while typing a `/command` or an `@path` — the only times the
+    completion menu should pop up (and need room under the input)."""
+    document = get_app().current_buffer.document
+    if document.text.startswith("/") and " " not in document.text_before_cursor:
+        return True
+    return document.get_word_before_cursor(WORD=True).startswith("@")
+
+
 def input_key_bindings() -> KeyBindings:
     """Multi-line editing: a trailing backslash or Esc then Enter adds a newline
     (most terminals send plain Enter for Shift+Enter, so that can't be used)."""
