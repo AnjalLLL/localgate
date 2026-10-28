@@ -35,6 +35,16 @@ async function loadStatus() {
   document.getElementById("version").textContent = version;
   document.getElementById("foot-version").textContent = version;
 
+  // From outside the owner's trusted networks /health only says whether the
+  // gateway is up — so show just that rather than three "unknown" rows.
+  if (!body.backend) {
+    const up = body.status === "ok";
+    setStatus("status-backend", up ? "ok" : "bad", up ? "ready" : "degraded");
+    for (const id of ["status-database", "status-admin"]) document.getElementById(id).hidden = true;
+    document.querySelector("#status-backend .label").textContent = "Gateway";
+    return;
+  }
+
   const backend = body.backend || {};
   if (backend.reachable) {
     setStatus("status-backend", "ok", `${backend.type} connected`);

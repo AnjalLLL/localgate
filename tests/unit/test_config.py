@@ -82,3 +82,30 @@ def test_resolve_model_falls_back_to_the_default_when_none_is_requested():
 def test_an_out_of_range_port_is_rejected():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, port=99999)
+
+
+def test_admin_networks_default_to_private_and_reject_garbage():
+    settings = Settings(_env_file=None)
+    assert settings.is_trusted_address("127.0.0.1")
+    assert settings.is_trusted_address("192.168.1.20")
+    assert settings.is_trusted_address("100.101.102.103")  # Tailscale
+    assert settings.is_trusted_address("::ffff:10.0.0.5")  # IPv4-mapped
+    assert not settings.is_trusted_address("203.0.113.9")
+    assert not settings.is_trusted_address(None)
+
+    narrow = Settings(_env_file=None, admin_allowed_networks="127.0.0.1/32")
+    assert not narrow.is_trusted_address("192.168.1.20")
+    everyone = Settings(_env_file=None, admin_allowed_networks="*")
+    assert everyone.is_trusted_address("203.0.113.9")
+
+    with pytest.raises(ValueError, match="not a network"):
+        Settings(_env_file=None, admin_allowed_networks="localhost-ish")
+
+
+def test_backends_parse_from_json():
+    settings = Settings(
+        _env_file=None,
+        backends='[{"name": "big", "url": "http://gpu:11434", "models": ["llama3:70b"]}]',
+    )
+    (spec,) = settings.backends
+    assert (spec.name, spec.type, spec.models) == ("big", "ollama", ["llama3:70b"])

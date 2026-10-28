@@ -24,6 +24,7 @@ from localgate.core.db_config_store import (
 )
 from localgate.core.errors import InvalidRequestError
 from localgate.db.engine import make_engine
+from localgate.db.repositories.audit import audit
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -162,6 +163,7 @@ async def update_database_url(body: DatabaseUrlUpdate, request: Request) -> dict
     await _test_connection(url)
 
     save_database_url(url, request.app.state.database_config_path)
+    await audit(request, "config.database_url", redact_database_url(url))
     return {
         "established": True,
         "database_url": redact_database_url(url),

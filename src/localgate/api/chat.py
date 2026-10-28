@@ -17,6 +17,8 @@ response body, or as a final ``choices: []`` chunk when streaming.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -24,17 +26,29 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Header, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.background import BackgroundTask
 
 from localgate.api.deps import enforce_rate_limit, get_session
 from localgate.backends.base import InferenceBackend
 from localgate.config import Settings
 from localgate.core import metrics
+from localgate.core.backend_pool import FAILOVER_ERRORS, PooledBackend, call_with_failover
 from localgate.core.cache import cache_key
-from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.errors import ServiceBusyError, describe_backend_failure
+from localgate.core.key_policy import clamp_max_tokens, enforce_key_access
 from localgate.core.logging import get_logger
-from localgate.core.streaming import DONE, extract_delta, sse_error, sse_event
+from localgate.core.model_info import apply_default_num_ctx
+from localgate.core.scheduler import Lease
+from localgate.core.streaming import (
+    DONE,
+    ClientGone,
+    extract_delta,
+    sse_error,
+    sse_event,
+    until_disconnected,
+)
 from localgate.core.token_counter import count_message_tokens, count_tokens
 from localgate.core.types import ChatCompletionRequest, ChatMessage
 from localgate.db.models import APIKey
@@ -78,11 +92,17 @@ async def chat_completions(
 
     session_id = x_session_id or str(uuid.uuid4())
     model = settings.resolve_model(body.model)
+    await enforce_key_access(api_key, body.model, model, session)
     user_text = body.latest_user_text()
 
     extension = _pop_extension(body)
-    messages = await _augment_with_memory(
-        session, backend, settings, session_id, api_key.id, user_text, body.messages
+    store = api_key.store_conversations is not False
+    messages = (
+        await _augment_with_memory(
+            session, backend, settings, session_id, api_key.id, user_text, body.messages
+        )
+        if store
+        else body.messages
     )
     web: dict[str, Any] | None = None
     if extension.get("web_search"):
@@ -95,6 +115,13 @@ async def chat_completions(
                 messages, ChatMessage(role="system", content=sources_message(sources)["content"])
             )
     payload = body.to_backend_payload(messages, model)
+    clamp_max_tokens(api_key, payload)
+    # Which inference backend(s) serve this model, least busy first. Memory and
+    # web search above stay on the primary; only the generation itself is routed.
+    targets: list[PooledBackend] = await request.app.state.pool.route(model)
+    await apply_default_num_ctx(
+        payload, targets[0].backend, model, settings.default_num_ctx, request.app.state.model_info
+    )
 
     # Cache entries are tenant-scoped even when two keys submit identical prompts.
     key = cache_key({"_localgate_api_key_id": api_key.id, **payload})
@@ -126,6 +153,7 @@ async def chat_completions(
                 completion_tokens=_reported(hit, "completion_tokens", count_tokens(cached_text)),
                 latency_ms=0,  # no inference happened; that is the whole point
                 cached=True,
+                store_conversations=store,
             )
             return _replay_cached(hit, model) if body.stream else hit
 
@@ -134,8 +162,13 @@ async def chat_completions(
     started = time.perf_counter()
 
     if body.stream:
+        lease = await targets[0].scheduler.acquire(api_key.id, api_key.max_concurrent)
         return StreamingResponse(
             _stream_and_record(
+                lease=lease,
+                targets=targets,
+                per_key_limit=api_key.max_concurrent,
+                store_conversations=store,
                 backend=backend,
                 settings=settings,
                 cache=cache,
@@ -151,15 +184,20 @@ async def chat_completions(
             ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
+            # If the client is gone before the stream even starts, the generator's
+            # own cleanup never runs; this frees the slot anyway (release is idempotent).
+            background=BackgroundTask(lease.release),
         )
 
     try:
-        response = await backend.chat(payload)
-    except httpx.HTTPError as exc:
-        metrics.backend_errors_total.labels(backend=settings.backend_type).inc()
-        raise BackendError(
-            describe_backend_failure(exc, settings.backend_url, settings.backend_type)
-        ) from exc
+        response = await call_with_failover(
+            targets,
+            api_key.id,
+            api_key.max_concurrent,
+            lambda target: until_disconnected(request, target.backend.chat(payload)),
+        )
+    except ClientGone:
+        return Response(status_code=499)  # nobody is listening; the GPU is freed
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     assistant_text = _assistant_text(response)
@@ -181,6 +219,7 @@ async def chat_completions(
         ),
         completion_tokens=_reported(response, "completion_tokens", count_tokens(assistant_text)),
         latency_ms=latency_ms,
+        store_conversations=store,
     )
     if web is not None:
         response = {**response, "localgate": web}
@@ -286,6 +325,10 @@ async def _augment_with_memory(
 
 
 async def _stream_and_record(
+    lease: Lease,
+    targets: list[PooledBackend],
+    per_key_limit: int | None,
+    store_conversations: bool,
     backend: InferenceBackend,
     settings: Settings,
     cache: Any,
@@ -299,45 +342,94 @@ async def _stream_and_record(
     session_factory: async_sessionmaker[AsyncSession],
     web: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
-    """Relay the backend's stream to the client, then persist the completed turn."""
+    """Relay the backend's stream to the client, then persist the completed turn.
+
+    If the client disconnects mid-stream, the `finally` closes the upstream
+    request — so the GPU stops generating for nobody — frees the inference slot,
+    and still bills the tokens produced so far.
+    """
     assistant_text = ""
+    finished = False
+    current = 0
+    stream = targets[0].backend.chat_stream(payload)
+
+    def record(text: str) -> Any:
+        return _record_turn(
+            session_factory=session_factory,
+            backend=backend,
+            settings=settings,
+            api_key_id=api_key_id,
+            session_id=session_id,
+            model=model,
+            user_text=user_text,
+            assistant_text=text,
+            # A streamed response carries no usage block, so these counts are
+            # tiktoken's approximation rather than the model's own tokenizer.
+            # Documented as such in docs/api-reference.md.
+            prompt_tokens=count_message_tokens(payload["messages"]),
+            completion_tokens=count_tokens(text),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            store_conversations=store_conversations,
+        )
 
     try:
-        async for chunk in backend.chat_stream(payload):
-            assistant_text += extract_delta(chunk)
-            yield sse_event(chunk)
-    except httpx.HTTPError as exc:
-        metrics.backend_errors_total.labels(backend=settings.backend_type).inc()
-        # The 200 and its headers are already on the wire, so this can't become a
-        # 502. It has to be reported inside the stream — see core/streaming.py.
-        yield sse_error(describe_backend_failure(exc, settings.backend_url, settings.backend_type))
+        try:
+            while True:
+                try:
+                    async for chunk in stream:
+                        assistant_text += extract_delta(chunk)
+                        yield sse_event(chunk)
+                    break
+                except FAILOVER_ERRORS:
+                    # Unreachable before the first token: another backend can still
+                    # take the whole request. After it, the reply is half-sent.
+                    if assistant_text or current + 1 >= len(targets):
+                        raise
+                    lease.release()
+                    current += 1
+                    lease = await targets[current].scheduler.acquire(api_key_id, per_key_limit)
+                    stream = targets[current].backend.chat_stream(payload)
+        except httpx.HTTPError as exc:
+            spec = targets[current].spec
+            metrics.backend_errors_total.labels(backend=spec.name).inc()
+            # The 200 and its headers are already on the wire, so this can't become a
+            # 502. It has to be reported inside the stream — see core/streaming.py.
+            yield sse_error(describe_backend_failure(exc, spec.url, spec.type))
+            yield DONE
+            return
+        except ServiceBusyError as exc:
+            yield sse_error(exc.message)
+            yield DONE
+            return
+
+        if web is not None:
+            yield sse_event({"object": "chat.completion.chunk", "choices": [], "localgate": web})
         yield DONE
-        return
+        finished = True
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
+        lease.release()
+        if not finished and assistant_text:
+            # Cut short (client gone, or backend failed midway). Bill what was
+            # generated. The surrounding task is being cancelled, so the write runs
+            # as its own task — awaiting it here would be cancelled with us.
+            _keep(asyncio.ensure_future(record(assistant_text)))
 
-    if web is not None:
-        yield sse_event({"object": "chat.completion.chunk", "choices": [], "localgate": web})
-    yield DONE
-
-    latency_ms = int((time.perf_counter() - started) * 1000)
     if settings.cache_enabled and assistant_text:
         cache.set(key, _synthesize_response(assistant_text, model))
+    await record(assistant_text)
 
-    # A streamed response carries no usage block, so these counts are tiktoken's
-    # approximation rather than the model's own tokenizer. Documented as such in
-    # docs/api-reference.md.
-    await _record_turn(
-        session_factory=session_factory,
-        backend=backend,
-        settings=settings,
-        api_key_id=api_key_id,
-        session_id=session_id,
-        model=model,
-        user_text=user_text,
-        assistant_text=assistant_text,
-        prompt_tokens=count_message_tokens(payload["messages"]),
-        completion_tokens=count_tokens(assistant_text),
-        latency_ms=latency_ms,
-    )
+
+#: Background writes started from cancelled streams, kept referenced until done.
+_pending_writes: set[asyncio.Future[Any]] = set()
+
+
+def _keep(future: asyncio.Future[Any]) -> None:
+    _pending_writes.add(future)
+    future.add_done_callback(_pending_writes.discard)
 
 
 async def _record_turn(
@@ -353,8 +445,10 @@ async def _record_turn(
     completion_tokens: int,
     latency_ms: int,
     cached: bool = False,
+    store_conversations: bool = True,
 ) -> None:
-    """Persist history, memory and usage for one completed exchange.
+    """Persist history, memory and usage for one completed exchange. Keys set not
+    to store conversations get usage only — no history, no memory.
 
     This opens its own database session instead of reusing the request-scoped one
     because the streaming path calls it *after* the response body has been sent, by
@@ -362,11 +456,12 @@ async def _record_turn(
     injected session would be closed.
     """
     async with session_factory() as session:
-        convo_repo = ConversationRepository(session)
-        await convo_repo.add_message(session_id, api_key_id, "user", user_text)
-        await convo_repo.add_message(session_id, api_key_id, "assistant", assistant_text)
+        if store_conversations:
+            convo_repo = ConversationRepository(session)
+            await convo_repo.add_message(session_id, api_key_id, "user", user_text)
+            await convo_repo.add_message(session_id, api_key_id, "assistant", assistant_text)
 
-        if settings.memory_enabled and assistant_text:
+        if store_conversations and settings.memory_enabled and assistant_text:
             await _store_memory(
                 session, backend, settings, session_id, api_key_id, user_text, assistant_text
             )

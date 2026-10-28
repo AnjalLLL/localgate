@@ -9,6 +9,7 @@ error localgate returns is rendered in the OpenAI shape instead (see
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import httpx
@@ -24,10 +25,22 @@ class LocalgateError(Exception):
     status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR
     error_type: str = "internal_error"
 
-    def __init__(self, message: str, code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str | None = None,
+        *,
+        retry_after: float | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
+        self.headers = dict(headers or {})
+        if retry_after is not None:
+            # Whole seconds, at least 1: a client that sleeps 0 s just retries into
+            # the same refusal.
+            self.headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
 
 
 class AuthenticationError(LocalgateError):
@@ -38,6 +51,20 @@ class AuthenticationError(LocalgateError):
 class RateLimitError(LocalgateError):
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
     error_type = "rate_limit_error"
+
+
+class PermissionDeniedError(LocalgateError):
+    """Authenticated, but this key may not do that (e.g. a model it isn't allowed)."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "permission_error"
+
+
+class ServiceBusyError(LocalgateError):
+    """Every inference slot stayed busy past the queue timeout — try again later."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    error_type = "service_unavailable"
 
 
 class InvalidRequestError(LocalgateError):
@@ -111,6 +138,7 @@ def install_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=error_body(exc.message, exc.error_type, exc.code),
+            headers=exc.headers or None,
         )
 
     @app.exception_handler(StarletteHTTPException)
@@ -121,6 +149,7 @@ def install_exception_handlers(app: FastAPI) -> None:
             404: "not_found_error",
             429: "rate_limit_error",
             502: "backend_error",
+            503: "service_unavailable",
         }
         return JSONResponse(
             status_code=exc.status_code,

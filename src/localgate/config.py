@@ -16,18 +16,47 @@ remains available for tests that want an explicitly-constructed object.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from localgate import paths
 
 #: The documented placeholder. Its whole purpose is to be recognised and rejected.
 INSECURE_ADMIN_KEY = "change-me-in-production"  # noqa: S105
+
+#: Networks allowed to reach the dashboard, /admin, the API docs and /metrics by
+#: default: this machine, private LANs, Tailscale (CGNAT range) and IPv6 ULA/link-local.
+#: The public internet is not on it — /v1 stays reachable from anywhere the port is.
+DEFAULT_ADMIN_NETWORKS = (
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "fc00::/7",
+    "fe80::/10",
+)
+
+
+class BackendSpec(BaseModel):
+    """One inference server in `LOCALGATE_BACKENDS` (several GPUs or machines)."""
+
+    name: str
+    type: str = "ollama"
+    url: str
+    api_key: str | None = None
+    #: Models this backend serves; None = discover them from the backend.
+    models: list[str] | None = None
+    #: Concurrent requests this backend runs; None = LOCALGATE_MAX_CONCURRENT_REQUESTS.
+    max_concurrent: int | None = Field(default=None, ge=1)
+
 
 #: The project-local dotenv, relative to the current directory.
 PROJECT_ENV_FILE = ".env"
@@ -190,6 +219,31 @@ class Settings(BaseSettings):
     # copy is encrypted with a key derived from admin_key (core/key_vault.py).
     api_key_reveal_enabled: bool = True
 
+    # --- Sharing with other devices ---
+    #: Context window sent to Ollama for requests that don't set one (capped by the
+    #: model's own maximum). Ollama's server default is far smaller.
+    default_num_ctx: int = Field(default=8192, ge=512)
+    #: Inference requests run at once per backend; the rest wait in a fair queue.
+    max_concurrent_requests: int = Field(default=2, ge=1)
+    #: Seconds a request may wait for a slot before getting 503 + Retry-After.
+    queue_timeout: float = Field(default=60.0, gt=0)
+    #: Requests allowed to wait at once per backend; more get 503 straight away.
+    max_queue: int = Field(default=100, ge=1)
+    #: Who may reach /admin, /dashboard, the API docs and /metrics (CIDRs, or "*").
+    admin_allowed_networks: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_ADMIN_NETWORKS)
+    )
+    #: The address other devices use, when it isn't this machine's own (a tunnel,
+    #: a reverse proxy with a domain). Shown first on the Share page.
+    public_url: str | None = None
+    #: Several inference servers behind one gateway (JSON list of BackendSpec).
+    #: Empty: one backend from LOCALGATE_BACKEND_TYPE / LOCALGATE_BACKEND_URL.
+    backends: Annotated[list[BackendSpec], NoDecode] = Field(default_factory=list)
+    #: Share rate limits and per-key concurrency across worker processes.
+    redis_url: str | None = None
+    #: Advertise this gateway on the local network (needs `localgate[discovery]`).
+    discovery_enabled: bool = False
+
     # --- Observability ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "console"] = "console"
@@ -208,6 +262,34 @@ class Settings(BaseSettings):
         if text.startswith("["):
             return json.loads(text)
         return [item.strip() for item in text.split(",") if item.strip()]
+
+    @field_validator("admin_allowed_networks", mode="before")
+    @classmethod
+    def _parse_networks(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("["):
+                value = json.loads(text)
+            else:
+                value = [item.strip() for item in text.split(",") if item.strip()]
+        networks: list[str] = []
+        for item in value or []:
+            if item in ("*", "any"):
+                networks.extend(["0.0.0.0/0", "::/0"])
+                continue
+            try:
+                networks.append(str(ipaddress.ip_network(item, strict=False)))
+            except ValueError as exc:
+                raise ValueError(f"admin_allowed_networks: {item!r} is not a network") from exc
+        return networks
+
+    @field_validator("backends", mode="before")
+    @classmethod
+    def _parse_backends(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            return json.loads(text) if text else []
+        return value
 
     @field_validator("model_aliases", mode="before")
     @classmethod
@@ -240,6 +322,19 @@ class Settings(BaseSettings):
                 "and restart."
             )
         return self
+
+    def is_trusted_address(self, host: str | None) -> bool:
+        """Whether a client address is inside `admin_allowed_networks`."""
+        if not host:
+            return False
+        try:
+            address = ipaddress.ip_address(host.split("%", 1)[0])
+        except ValueError:
+            # ASGI test clients report "testclient"; unix sockets report nothing.
+            return host in ("testclient", "localhost")
+        if address.version == 6 and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        return any(address in ipaddress.ip_network(n) for n in self.admin_allowed_networks)
 
     @property
     def uses_insecure_admin_key(self) -> bool:

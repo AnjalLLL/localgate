@@ -62,6 +62,27 @@ backend_up = Gauge(
     registry=REGISTRY,
 )
 
+inference_active = Gauge(
+    "localgate_inference_active",
+    "Inference requests currently running on a backend.",
+    ["backend"],
+    registry=REGISTRY,
+)
+
+inference_queued = Gauge(
+    "localgate_inference_queued",
+    "Inference requests waiting for a free slot.",
+    ["backend"],
+    registry=REGISTRY,
+)
+
+queue_rejected_total = Counter(
+    "localgate_queue_rejected_total",
+    "Requests turned away with 503 because the queue was full or the wait timed out.",
+    ["backend", "reason"],
+    registry=REGISTRY,
+)
+
 
 def render() -> bytes:
     """Serialize the current metric values in the Prometheus text format."""

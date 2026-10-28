@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import time
 
-import httpx
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import enforce_rate_limit, get_session
-from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.backend_pool import call_with_failover
+from localgate.core.key_policy import clamp_max_tokens, enforce_key_access
+from localgate.core.model_info import apply_default_num_ctx
+from localgate.core.streaming import ClientGone, until_disconnected
 from localgate.core.token_counter import count_tokens
 from localgate.core.types import CompletionChoice, CompletionRequest, CompletionResponse, Usage
 from localgate.db.models import APIKey
@@ -38,8 +41,8 @@ async def create_completion(
     session: AsyncSession = Depends(get_session),
 ) -> CompletionResponse:
     settings = request.app.state.settings
-    backend = request.app.state.backend
     model = settings.resolve_model(body.model)
+    await enforce_key_access(api_key, body.model, model, session)
     prompt = body.prompt_text()
 
     payload = body.model_dump(exclude_none=True, exclude={"prompt", "stream"})
@@ -48,14 +51,22 @@ async def create_completion(
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
+    clamp_max_tokens(api_key, payload)
+    targets = await request.app.state.pool.route(model)
+    await apply_default_num_ctx(
+        payload, targets[0].backend, model, settings.default_num_ctx, request.app.state.model_info
+    )
 
     started = time.perf_counter()
     try:
-        response = await backend.chat(payload)
-    except httpx.HTTPError as exc:
-        raise BackendError(
-            describe_backend_failure(exc, settings.backend_url, settings.backend_type)
-        ) from exc
+        response = await call_with_failover(
+            targets,
+            api_key.id,
+            api_key.max_concurrent,
+            lambda target: until_disconnected(request, target.backend.chat(payload)),
+        )
+    except ClientGone:
+        return Response(status_code=499)  # type: ignore[return-value]
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     text = (response.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""

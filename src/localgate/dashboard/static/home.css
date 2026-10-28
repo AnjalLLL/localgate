@@ -161,3 +161,18 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
   .steps > li::before { left: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+.status-row[hidden] { display: none; }
+
+/* ---------- /connect ---------- */
+.connect .hero { padding-bottom: 24px; }
+.connect h2 { font-size: 20px; margin-bottom: 6px; }
+.creds { display: flex; flex-direction: column; gap: 14px; margin-bottom: 18px; }
+.cred { display: grid; grid-template-columns: 90px minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.cred .label { color: var(--text-3); font-size: 13px; }
+.cred code { overflow-wrap: anywhere; padding: 8px 10px; font-size: 13px; }
+.creds .actions { margin-top: 4px; align-items: center; gap: 14px; }
+@media (max-width: 640px) {
+  .cred { grid-template-columns: minmax(0, 1fr) auto; }
+  .cred .label { grid-column: 1 / -1; }
+}
