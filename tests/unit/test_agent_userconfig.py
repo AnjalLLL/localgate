@@ -46,7 +46,7 @@ def test_with_override_returns_a_new_instance(tmp_path):
     original = UserConfig()
     changed = original.with_override(theme="light")
     assert changed.theme == "light"
-    assert original.theme == "dark"
+    assert original.theme == "sunrise"
 
 
 def test_dump_is_readable_key_value_toml(tmp_path):
@@ -56,3 +56,16 @@ def test_dump_is_readable_key_value_toml(tmp_path):
     assert 'theme = "dark"' in text
     assert "auto_approve = true" in text
     assert "max_turns = 20" in text
+
+
+def test_every_theme_styles_the_prompt_and_console():
+    from localgate.agent import theme
+
+    for name in theme.THEMES:
+        console = theme.make_console(name)
+        style = theme.prompt_style(name)
+        assert style.style_rules, name
+        if name != "none":
+            # The literal styles the REPL prints with resolve to the theme's palette.
+            accent = theme.palette_for(name).accent
+            assert console.get_style("bold green") == console.get_style(f"bold {accent}")

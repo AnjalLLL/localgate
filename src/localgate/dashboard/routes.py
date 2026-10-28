@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from localgate import __version__
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -27,3 +30,26 @@ def mount_dashboard(app: FastAPI) -> bool:
         return False
     app.mount("/dashboard", StaticFiles(directory=str(STATIC_DIR), html=True), name="dashboard")
     return True
+
+
+def mount_home(app: FastAPI) -> None:
+    """A landing page at ``/``: what this server is, whether it's healthy, and how
+    to start using it. Browsers get the page; an API client asking for JSON gets
+    a short pointer document instead of HTML it can't use."""
+    page = STATIC_DIR / "home.html"
+
+    @app.get("/", include_in_schema=False)
+    async def home(request: Request) -> Response:
+        accept = request.headers.get("accept", "")
+        if not page.is_file() or ("text/html" not in accept and "json" in accept):
+            return JSONResponse(
+                {
+                    "name": "localgate",
+                    "version": __version__,
+                    "api": "/v1",
+                    "docs": "/docs",
+                    "dashboard": "/dashboard/",
+                    "health": "/health",
+                }
+            )
+        return FileResponse(page, media_type="text/html")

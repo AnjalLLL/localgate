@@ -139,6 +139,7 @@ def test_every_route_is_guarded(settings, tmp_path):
         "/health",  # a readiness probe that needed a key would be useless to a load balancer
         "/health/live",
         "/metrics",  # scrapers can't hold per-target bearer tokens; it exposes no secrets
+        "/",  # the landing page: static instructions; its status comes from /health
         # Dashboard sign-in/out: POST checks the admin key itself, DELETE only clears a
         # cookie. GET on the same path is guarded and is asserted separately below.
         "/admin/session",

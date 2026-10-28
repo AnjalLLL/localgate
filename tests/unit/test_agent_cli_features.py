@@ -265,3 +265,88 @@ async def test_interrupting_a_turn_keeps_the_session_usable(project, monkeypatch
 
     monkeypatch.setattr(repl.InterruptWatcher, "start", lambda self, task: None)
     assert await repl.run_turn(out, session, gate, "try again") == "second answer"
+
+
+# ------------------------------------------------- code written into the chat
+
+_PAGE = "\n".join(
+    [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        '<head><link rel="stylesheet" href="styles.css"></head>',
+        "<body>",
+        '  <nav class="navbar"><a href="/">Home</a> <a href="#contact">Contact</a></nav>',
+        '  <section id="contact"><h2>Contact</h2></section>',
+        "</body>",
+        "</html>",
+    ]
+)
+
+
+@pytest.fixture
+def site(tmp_path):
+    (tmp_path / "index.html").write_text("<html><body>old</body></html>\n")
+    (tmp_path / "styles.css").write_text("body {}\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.js").write_text("// app\n")
+    return tmp_path
+
+
+async def test_a_path_comment_inside_the_block_becomes_a_write_to_the_real_file(site):
+    """The shape qwen2.5-coder produced live: the file named in a comment on the
+    block's first line, under a directory that doesn't hold that file."""
+    reply = f"Update index.html as follows:\n\n```html\n<!-- src/index.html -->\n{_PAGE}\n```\n"
+    backend = ScriptedBackend([final_text(reply), final_text("Updated index.html.")])
+    session = AgentSession(backend, "scripted-model", site, confirm_write=lambda *_: True)
+
+    assert await session.send("add a contact section") == "Updated index.html."
+    assert (site / "index.html").read_text().rstrip() == _PAGE  # label line dropped
+    assert not (site / "src" / "index.html").exists()  # no stray copy
+
+
+async def test_css_comment_label_creates_a_new_file_where_it_says(site):
+    css = "\n".join(["/* theme.css */", *[f".c{i} {{ color: red; }}" for i in range(8)]])
+    backend = ScriptedBackend([final_text(f"```css\n{css}\n```"), final_text("done")])
+    session = AgentSession(backend, "scripted-model", site, confirm_write=lambda *_: True)
+
+    await session.send("add a theme stylesheet")
+    assert (site / "theme.css").read_text().startswith(".c0")
+
+
+async def test_code_in_the_reply_without_any_change_is_sent_back_once(site):
+    unlabelled = f"Here is the updated page:\n\n```html\n{_PAGE}\n```"
+    backend = ScriptedBackend([final_text(unlabelled), final_text("I only showed the code.")])
+    session = AgentSession(backend, "scripted-model", site)
+
+    # No change verb in the request: the old check would have accepted the reply.
+    assert await session.send("its just a stale page, where is the css") == (
+        "I only showed the code."
+    )
+    nudge = [m for m in backend.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "no file was changed" in nudge["content"]
+
+
+async def test_short_snippets_in_a_reply_are_not_second_guessed(site):
+    backend = ScriptedBackend(
+        [final_text("Use `display: flex`:\n\n```css\nnav { display: flex; }\n```")]
+    )
+    session = AgentSession(backend, "scripted-model", site)
+    await session.send("how do I lay out the nav?")
+    assert len(backend.requests) == 1
+
+
+def test_long_code_is_collapsed_in_the_chat_and_short_code_kept():
+    from localgate.agent.render import collapse_code
+
+    long_block = "```html\n" + "\n".join(f"<p>{i}</p>" for i in range(30)) + "\n```"
+    shown, hidden = collapse_code(f"Intro\n\n{long_block}\n\n```css\na {{}}\n```\nBye")
+    assert hidden == 1
+    assert "30 lines of html hidden" in shown
+    assert "<p>3</p>" not in shown and "a {}" in shown and "Bye" in shown
+
+
+def test_an_unfinished_block_is_summarized_while_streaming():
+    from localgate.agent.render import collapse_code
+
+    shown, hidden = collapse_code("Writing:\n```html\n<div>\n<p>", streaming=True)
+    assert hidden == 1 and "writing html… 2 lines" in shown and "<div>" not in shown
