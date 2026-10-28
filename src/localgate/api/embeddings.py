@@ -37,12 +37,15 @@ async def create_embeddings(
     )
 
     inputs = body.inputs()
+    lease = await request.app.state.scheduler.acquire(api_key.id, api_key.max_concurrent)
     try:
         vectors = [await backend.embed(text, model) for text in inputs]
     except httpx.HTTPError as exc:
         raise BackendError(
             describe_backend_failure(exc, settings.backend_url, settings.backend_type)
         ) from exc
+    finally:
+        lease.release()
 
     # Embeddings consume backend capacity like any other call, so they are billed
     # against the key. Leaving them out would let a client embed without limit and
