@@ -254,9 +254,10 @@ def create_app(
         health,
         keys,
         models,
+        share,
         usage,
     )
-    from localgate.dashboard.routes import mount_dashboard, mount_home
+    from localgate.dashboard.routes import mount_connect, mount_dashboard, mount_home
 
     app.include_router(health.router)
     app.include_router(chat.router)
@@ -272,8 +273,10 @@ def create_app(
     app.include_router(export.router, prefix="/admin")
     app.include_router(admin_ops.session_router, prefix="/admin")
     app.include_router(admin_ops.router, prefix="/admin")
+    app.include_router(share.router, prefix="/admin")
 
     mount_dashboard(app)
     mount_home(app)
+    mount_connect(app)
 
     return app

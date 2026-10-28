@@ -249,9 +249,11 @@ async function showLogin(message = "") {
   try {
     accounts = (await (await fetch("/admin/session/methods")).json()).accounts;
   } catch { /* assume accounts; the admin key option is still there */ }
-  $("#login-intro").textContent = accounts
-    ? "Your local models, memory and agents in one place."
-    : "No dashboard account yet. Create one on the server with `localgate users create`, or sign in with the admin key.";
+  $("#login-intro").replaceChildren(
+    ...(accounts
+      ? ["Your local models, memory and agents in one place."]
+      : ["No dashboard account yet. Create one on the server with ", h("code", { text: "localgate users create" }), ", or sign in with the admin key."]),
+  );
   setLoginMode(!accounts);
 }
 
@@ -2171,10 +2173,149 @@ async function viewSettings(root) {
 
 // ================================================================ router
 
+// ---------------------------------------------------------------- share
+
+/** Give another device or person access: a key with limits, plus everything
+ *  they need to use it — base URL, a connect link, a QR code and snippets. */
+async function viewShare(root) {
+  const addressBody = h("div", { class: "card-body" }, loading());
+  const result = h("div", {});
+  let urls = [];
+
+  async function loadAddresses() {
+    try {
+      urls = (await api("/admin/share")).urls;
+    } catch (err) {
+      addressBody.replaceChildren(errorState(err));
+      return;
+    }
+    addressBody.textContent = "";
+    if (!urls.length) {
+      addressBody.append(
+        h("p", { class: "muted", text: "No network address found. Other devices need one of this machine's addresses — start the gateway with:" }),
+        codeBlock("localgate serve --share", "shell"),
+      );
+    } else {
+      addressBody.append(
+        h(
+          "ul",
+          { class: "share-urls" },
+          urls.map((u) =>
+            h(
+              "li",
+              {},
+              h("span", { class: "share-label", text: u.label }),
+              h("code", { text: `${u.url}/v1` }),
+              h("button", { class: "btn sm", type: "button", text: "Copy", onclick: (e) => copyText(`${u.url}/v1`, e.currentTarget) }),
+            ),
+          ),
+        ),
+        h("p", { class: "small muted", text: "Devices can't connect? Start the gateway with `localgate serve --share`. Over the internet, use Tailscale or a tunnel — see docs/sharing.md." }),
+      );
+    }
+    urlSelect.replaceChildren(
+      ...(urls.length ? urls : [{ label: "This browser's address", url: location.origin }]).map((u) => h("option", { value: u.url, text: `${u.label} — ${u.url}` })),
+    );
+  }
+
+  const nameInput = h("input", { type: "text", placeholder: "Ana's laptop", required: true, maxlength: "100" });
+  const urlSelect = h("select", {});
+  const limits = limitsFields({ store_conversations: true });
+  const form = h(
+    "form",
+    {
+      class: "card-body",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const name = nameInput.value.trim();
+        if (!name) return;
+        try {
+          const key = await api("/admin/keys", { method: "POST", body: { name, ...limits.values() } });
+          nameInput.value = "";
+          await showAccess(key, urlSelect.value || location.origin);
+          toast("Access created.", "ok");
+        } catch (err) { toast(err.message, "bad"); }
+      },
+    },
+    h("div", { class: "field-row" }, field("Device or person", nameInput), field("They connect to", urlSelect)),
+    h("details", { class: "more-limits", open: true }, h("summary", { text: "Limits for this key" }), limits.element),
+    h("div", { class: "actions" }, h("button", { class: "btn primary", type: "submit", text: "Create access" })),
+  );
+
+  async function qrFor(text) {
+    const resp = await fetch("/admin/share/qr", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Localgate-Csrf": "1" },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok) throw new Error("Couldn't make the QR code.");
+    // A data: URL — the dashboard's CSP allows images only from itself or data:.
+    const svgText = await resp.text();
+    return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svgText)))}`;
+  }
+
+  async function showAccess(key, base) {
+    const connect = `${base}/connect#url=${encodeURIComponent(base)}&key=${encodeURIComponent(key.api_key)}`;
+    const qr = h("img", { class: "qr", alt: "QR code: opens the connect page with this key", width: "220", height: "220" });
+    qrFor(connect).then((src) => { qr.src = src; }).catch(() => qr.replaceWith(h("p", { class: "muted small", text: "QR code unavailable — share the link instead." })));
+    result.replaceChildren(
+      card(
+        `Access for “${key.name}”`,
+        h(
+          "div",
+          { class: "card-body share-result" },
+          h(
+            "div",
+            { class: "share-grid" },
+            h(
+              "div",
+              {},
+              h("p", { class: "muted small", text: "Scan with their phone, or send them the link. It opens a page with everything they need." }),
+              qr,
+            ),
+            h(
+              "div",
+              { class: "share-creds" },
+              h("dl", { class: "kv" }, [
+                [h("dt", { text: "Base URL" }), h("dd", {}, h("code", { text: `${base}/v1` }))],
+                [h("dt", { text: "API key" }), h("dd", {}, h("code", { class: "secret-inline", text: key.api_key }))],
+                [h("dt", { text: "Limits" }), h("dd", { text: limitsSummary(key) })],
+              ]),
+              h(
+                "div",
+                { class: "actions" },
+                h("button", { class: "btn sm", type: "button", text: "Copy connect link", onclick: (e) => copyText(connect, e.currentTarget) }),
+                h("button", { class: "btn sm", type: "button", text: "Copy key", onclick: (e) => copyText(key.api_key, e.currentTarget) }),
+              ),
+              h("p", { class: "small muted", text: "The key is shown in full here once. You can show it again later under API keys." }),
+            ),
+          ),
+          codeBlock(`localgate login --url ${base} --api-key ${key.api_key}\nlocalgate code --remote`, "shell"),
+          codeBlock(
+            `from openai import OpenAI\n\nclient = OpenAI(base_url="${base}/v1", api_key="${key.api_key}")`,
+            "python",
+          ),
+        ),
+      ),
+    );
+    result.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  root.append(
+    pageHead("Share", "Let another device or person use this machine's models — each with their own key and limits."),
+    card("Where devices reach this gateway", addressBody),
+    card("Add a device", form),
+    result,
+  );
+  await loadAddresses();
+}
+
 const ROUTES = {
   overview: viewOverview,
   chat: viewChat,
   keys: viewKeys,
+  share: viewShare,
   usage: viewUsage,
   sessions: viewSessions,
   agent: viewAgent,

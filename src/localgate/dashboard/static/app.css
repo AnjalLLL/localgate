@@ -158,7 +158,7 @@ p { margin: 0 0 var(--s3); }
 .icon-btn:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
 .icon-btn svg { width: 18px; height: 18px; }
 
-input[type="text"], input[type="password"], input[type="number"], input[type="search"], input[type="url"], select, textarea {
+input[type="text"], input[type="password"], input[type="number"], input[type="search"], input[type="url"], input[type="email"], input[type="date"], select, textarea {
   width: 100%; height: 38px; padding: 0 var(--s3); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
   background: var(--surface); color: var(--text); font: 13.5px var(--font); transition: border-color 0.15s, box-shadow 0.15s;
 }
@@ -617,9 +617,25 @@ td.num { white-space: nowrap; }
 /* ---------- Key limits (keys page, edit dialog, Share page) ---------- */
 .dialog.wide { max-width: 580px; }
 .limits { display: flex; flex-direction: column; gap: var(--s3); margin-top: var(--s3); }
+.limits .field-row { align-items: flex-start; }
 .limits .field-row > .field { margin-bottom: 0; }
 .field-hint { color: var(--text-3); font-weight: 400; font-size: 11.5px; }
 .more-limits { margin-top: var(--s3); }
 .more-limits > summary { cursor: pointer; color: var(--text-2); font-size: 13px; font-weight: 500; width: fit-content; }
 .more-limits > summary:hover { color: var(--text); }
 .limits-cell { font-size: 12.5px; color: var(--text-2); }
+
+/* ---------- Share page ---------- */
+.share-urls { list-style: none; padding: 0; margin: 0 0 var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
+.share-urls li { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; align-items: center; gap: var(--s3); }
+.share-urls code { overflow-wrap: anywhere; }
+.share-label { color: var(--text-3); font-size: 12.5px; }
+.share-grid { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: var(--s5); align-items: start; margin-bottom: var(--s4); }
+.qr { width: 220px; height: 220px; border-radius: var(--radius-sm); background: #fff; padding: 6px; border: 1px solid var(--border); }
+.share-creds code { overflow-wrap: anywhere; }
+.share-result .codeblock { margin-top: var(--s3); }
+@media (max-width: 720px) {
+  .share-grid { grid-template-columns: minmax(0, 1fr); }
+  .share-urls li { grid-template-columns: minmax(0, 1fr) auto; }
+  .share-label { grid-column: 1 / -1; }
+}
