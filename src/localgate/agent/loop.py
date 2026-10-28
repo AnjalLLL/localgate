@@ -574,6 +574,18 @@ MAX_TOOL_RESULT_CHARS = 16_000
 DEFAULT_TEMPERATURE = 0.2
 #: Context budget used when the model's window is unknown.
 DEFAULT_NUM_CTX = 16_384
+#: Tokens kept free for the model's reply when the window is unknown.
+DEFAULT_REPLY_TOKENS = 4096
+#: Full rewrites of one file allowed per task before further ones are refused.
+MAX_REWRITES_PER_FILE = 2
+#: Placeholders compaction leaves in history (agent/context.py). A model copying
+#: one into a file would replace the file's content with the placeholder.
+_PLACEHOLDER_RE = re.compile(r"<[\d,]+ chars elided>|result elided during compaction")
+
+
+def reply_budget(window: int) -> int:
+    """Tokens to keep free for the reply in a window of ``window`` tokens."""
+    return max(1024, min(DEFAULT_REPLY_TOKENS, window // 4))
 
 
 def _cap_tool_result(content: str) -> str:
@@ -674,6 +686,9 @@ class AgentSession:
         #: prompt and replies are grammar-constrained to a JSON tool call instead.
         self.native_tools = native_tools
         self.on_tool_log = on_tool_log
+        #: max_tokens for each reply; sized to the context window once it's known.
+        self.reply_tokens = DEFAULT_REPLY_TOKENS
+        self._task_rewrites: dict[str, int] = {}
         self.ledger = ledger or SessionLedger()
         self.context: ContextManager | None = None
         self.last_compaction: CompactionReport | None = None
@@ -753,8 +768,11 @@ class AgentSession:
     def _make_context_manager(self, budget: int) -> ContextManager:
         options = {"num_ctx": self.num_ctx} if self.num_ctx else None
         updater = make_llm_ledger_updater(self.backend, self.model, options)
-        # Leave room for the reply itself.
-        return ContextManager(max(1024, budget - 4096), updater=updater)
+        # Leave room for the reply itself — a quarter of the window, at most 4K.
+        # A flat 4K left an 8K model (llama3) only ~4K of context, so it compacted
+        # after every step and lost sight of its own earlier writes.
+        self.reply_tokens = reply_budget(budget)
+        return ContextManager(max(1024, budget - self.reply_tokens), updater=updater)
 
     def _request_options(self) -> dict[str, Any]:
         return {"num_ctx": self.num_ctx} if self.num_ctx else {}
@@ -822,7 +840,7 @@ class AgentSession:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": _normalize_backend_messages(outgoing),
-            "max_tokens": 4096,
+            "max_tokens": self.reply_tokens,
             "temperature": getattr(self.settings, "agent_temperature", DEFAULT_TEMPERATURE),
         }
         if self.native_tools:
@@ -854,6 +872,7 @@ class AgentSession:
         self._broken_files = set()
         self._task_changed_paths = set()
         self._task_mutation_attempts = 0
+        self._task_rewrites = {}
         self._seen_results = {}
         self._task_is_mutation = bool(_MUTATION_REQUEST_RE.search(user_input))
         self.ledger.observe_user(user_input)
@@ -1129,6 +1148,35 @@ class AgentSession:
         extensions = {PurePosixPath(f).suffix for f in project_files(self.root)}
         return any(_LANGUAGE_EXTENSIONS.get(lang) in extensions for lang, _code in blocks)
 
+    def _refuse_mutation(self, name: str, arguments: dict[str, Any]) -> str | None:
+        """Why this write must not happen, or None.
+
+        Two failure modes seen live with small models on small context windows:
+        copying a compaction placeholder ("<1,234 chars elided>") from history as
+        if it were file content — which would wipe the file — and rewriting the
+        same file over and over once its earlier versions were compacted away,
+        asking the user to approve each one.
+        """
+        for key in ("content", "new_string"):
+            value = arguments.get(key)
+            if isinstance(value, str) and _PLACEHOLDER_RE.search(value):
+                return (
+                    "Nothing was written: that content contains a placeholder from compacted "
+                    "conversation history, not real file text. Call read_file to see the file "
+                    "as it is now, then send the complete content or use edit_file."
+                )
+        path = arguments.get("path")
+        if name in {"write_file", "update_file"} and isinstance(path, str):
+            done = self._task_rewrites.get(path, 0)
+            if done >= MAX_REWRITES_PER_FILE:
+                return (
+                    f"{path} was already rewritten {done} times in this task, so this rewrite was "
+                    "refused and the user wasn't asked again. Stop rewriting it: give your final "
+                    "answer now, or make one specific change with edit_file."
+                )
+            self._task_rewrites[path] = done + 1
+        return None
+
     def _attachment_text(self, attachments: Sequence[str]) -> str:
         """File contents for the user's `@path` attachments, marked as read."""
         blocks: list[str] = []
@@ -1293,6 +1341,13 @@ class AgentSession:
         if name in MUTATING_TOOL_NAMES:
             arguments = unescape_text_arguments(arguments)
             call = {**call, "function": {**fn, "arguments": json.dumps(arguments)}}
+            refusal = self._refuse_mutation(name, arguments)
+            if refusal is not None:
+                # Answered to the model directly: the user is never asked to approve
+                # a write that can only do damage.
+                await self._log_tool(name, arguments, False, started, error="refused")
+                self._last_mutation_error = refusal
+                return reply(refusal)
         if name == "create_file" and isinstance(arguments.get("path"), str):
             try:
                 exists = resolve_within(self.root, arguments["path"]).exists()
