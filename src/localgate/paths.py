@@ -124,3 +124,20 @@ def describe_mode(path: Path) -> str:
         return format(path.stat().st_mode & 0o777, "04o")
     except OSError:
         return "missing"
+
+
+def log_dir() -> Path:
+    """Where a background `localgate serve` (see `localgate service`) writes logs."""
+    return data_dir() / "logs"
+
+
+def launch_agents_dir() -> Path:
+    """macOS per-user launchd agents (~/Library/LaunchAgents)."""
+    return _home() / "Library" / "LaunchAgents"
+
+
+def systemd_user_dir() -> Path:
+    """systemd per-user units ($XDG_CONFIG_HOME/systemd/user, else ~/.config/systemd/user)."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else _home() / ".config"
+    return base / "systemd" / "user"
