@@ -127,6 +127,7 @@ def test_write_secret_text_truncates(tmp_path):
     assert target.read_text() == "short\n"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits; Windows uses ACLs")
 def test_describe_mode(tmp_path):
     target = tmp_path / "secret.env"
     assert paths.describe_mode(target) == "missing"
