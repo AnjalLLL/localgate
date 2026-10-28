@@ -188,7 +188,7 @@ class Sandbox:
             "--mount", f"type=bind,source={root},target=/workspace",
             "--workdir", "/workspace",
         ]  # fmt: skip
-        if hasattr(os, "getuid") and self.kind == "docker":
+        if sys.platform != "win32" and self.kind == "docker":
             # Files the command creates belong to the user, not root (POSIX hosts).
             argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
         return [*argv, self.image, "sh", "-c", command]
