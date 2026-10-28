@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from localgate.agent.tools import ToolCallResult, execute_tool_call
+from localgate.agent.tools import (
+    MUTATING_TOOL_NAMES,
+    READ_ONLY_TOOL_NAMES,
+    ToolCallResult,
+    execute_tool_call,
+)
 from localgate.config import Settings
 
-READ_ONLY_TOOLS = {"read_file", "list_directory", "search_files", "git_status", "git_diff"}
-WRITE_TOOLS = {"write_file", "create_file", "update_file", "delete_file"}
+READ_ONLY_TOOLS = READ_ONLY_TOOL_NAMES
+WRITE_TOOLS = MUTATING_TOOL_NAMES
 
 
 def get_tool_timeout(tool_name: str, settings: Settings) -> float:
@@ -48,7 +54,7 @@ async def execute_tool_call_with_timeout(
 
     try:
         # Run synchronous tool execution in a thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await asyncio.wait_for(
             loop.run_in_executor(None, selected_executor, root, tool_call_id, name, arguments),
             timeout=timeout,
@@ -60,7 +66,7 @@ async def execute_tool_call_with_timeout(
             "Try a different approach or break the task into smaller steps."
         )
         return ToolCallResult(
-            tool_call_id=tool_call_id, name=name, content=error_msg, is_error=True
+            tool_call_id=tool_call_id, name=name, content=error_msg, is_error=True, timed_out=True
         )
 
 
@@ -69,10 +75,15 @@ class ToolCallTracker:
 
     def __init__(self) -> None:
         self.history: list[tuple[str, bool, float]] = []  # (tool_name, success, timestamp)
+        #: (tool_name, canonical arguments) per call, parallel to `history`.
+        self.signatures: list[tuple[str, str]] = []
 
-    def record(self, tool_name: str, success: bool) -> None:
+    def record(
+        self, tool_name: str, success: bool, arguments: dict[str, Any] | None = None
+    ) -> None:
         """Record a tool call result."""
         self.history.append((tool_name, success, time.time()))
+        self.signatures.append((tool_name, json.dumps(arguments or {}, sort_keys=True)))
 
     def get_recent_failures(self, tool_name: str, window_seconds: float = 60.0) -> int:
         """Count recent failures for a specific tool within the time window."""
@@ -88,17 +99,13 @@ class ToolCallTracker:
         return [name for name, _, _ in self.history[-n:]]
 
     def is_stuck_loop(self, threshold: int = 3) -> bool:
-        """Detect if the same tool is being called repeatedly without progress.
-
-        Returns True if the last 'threshold' calls are all the same read-only tool.
+        """Whether the model keeps repeating itself without progress: the same call
+        (tool *and* arguments) made ``threshold`` times recently, or the last
+        ``threshold`` calls all failing. Reading three different files in a row
+        is normal exploration, and successful writes are progress, not a loop.
         """
-        if len(self.history) < threshold:
-            return False
-
-        last_n = self.get_last_n_calls(threshold)
-        if not last_n:
-            return False
-
-        # Check if all are the same tool and it's read-only
-        first_tool = last_n[0]
-        return all(tool == first_tool for tool in last_n) and first_tool in READ_ONLY_TOOLS
+        recent = [sig for sig in self.signatures[-threshold * 2 :] if sig[0] not in WRITE_TOOLS]
+        if any(recent.count(sig) >= threshold for sig in set(recent)):
+            return True
+        last = self.history[-threshold:]
+        return len(last) == threshold and not any(success for _, success, _ in last)

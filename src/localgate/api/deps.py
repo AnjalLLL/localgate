@@ -6,6 +6,7 @@ docs/decisions/0001-dependencies-over-middleware.md.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, Request
@@ -13,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.core import metrics
-from localgate.core.auth import constant_time_equals
+from localgate.core.auth import ADMIN_COOKIE, constant_time_equals, verify_admin_session
 from localgate.core.errors import AuthenticationError, RateLimitError
 from localgate.db.models import APIKey
 from localgate.db.repositories.keys import APIKeyRepository
@@ -75,11 +76,26 @@ async def enforce_rate_limit(
 
 
 def require_admin(request: Request) -> None:
-    """Gate the ``/admin`` surface on the configured admin key."""
+    """Gate the ``/admin`` surface on the configured admin key.
+
+    Accepted as the ``X-Admin-Key`` header (CLI, scripts), or as the dashboard's
+    httpOnly session cookie. A cookie is sent by the browser automatically, so a
+    state-changing request authenticated by cookie must also carry the
+    ``X-Localgate-Csrf`` header, which a cross-site page cannot set.
+    """
     settings = request.app.state.settings
     provided = request.headers.get("x-admin-key")
-    if not provided or not constant_time_equals(provided, settings.admin_key):
+    if provided and constant_time_equals(provided, settings.admin_key):
+        return
+    cookie = request.cookies.get(ADMIN_COOKIE)
+    if cookie and verify_admin_session(cookie, settings.admin_key, time.time()):
+        if request.method in {"GET", "HEAD", "OPTIONS"} or request.headers.get("x-localgate-csrf"):
+            return
         raise AuthenticationError(
-            "Invalid admin key. Pass it as the X-Admin-Key header.",
-            code="invalid_admin_key",
+            "Missing X-Localgate-Csrf header on a cookie-authenticated request.",
+            code="csrf_required",
         )
+    raise AuthenticationError(
+        "Invalid admin key. Pass it as the X-Admin-Key header.",
+        code="invalid_admin_key",
+    )

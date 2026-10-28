@@ -118,6 +118,15 @@ class Settings(BaseSettings):
     search_provider: str | None = None  # None = duckduckgo; or "openserp" / "tavily"
     search_api_key: str | None = None  # required for "tavily" only
     search_base_url: str | None = None  # self-hosted "openserp" URL; defaults to :7000
+    # Provider-specific settings, for a fallback chain such as "searxng,brave,duckduckgo".
+    search_searxng_url: str | None = None  # defaults to http://localhost:8888
+    search_brave_api_key: str | None = None
+    # Chat-side web search (`"localgate": {"web_search": true}` on a chat request).
+    web_search_enabled: bool = True
+    web_search_max_sources: int = Field(default=4, ge=1, le=10)
+    # Let fetch_url / chat search reach private-network hosts. Off: refuses anything
+    # resolving to loopback, RFC 1918, link-local or cloud-metadata addresses.
+    fetch_allow_private: bool = False
 
     # --- Database (SQLite by default; any SQLAlchemy async URL works) ---
     # The default is resolved at load time via load_settings(); a bare Settings()
@@ -145,6 +154,29 @@ class Settings(BaseSettings):
     tool_timeout_search: float = Field(default=20.0, gt=0)  # timeout for web search
     tool_timeout_delegate: float = Field(default=180.0, gt=0)  # timeout for sub-agents
     tool_logging_enabled: bool = True  # log all tool calls for debugging
+    # Context window requested for the coding agent (Ollama `num_ctx`), capped at the
+    # model's own maximum. Larger windows use more VRAM.
+    agent_num_ctx: int = Field(default=16384, ge=2048)
+    # Sampling temperature for the coding agent. Low: exact snippets and well-formed tool
+    # calls matter far more than variety (Ollama's own default is 0.8).
+    agent_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    # Offer the todo_write planning tool. Off by default: in recorded runs it pulled 7B
+    # models into planning prose instead of acting. Worth enabling for larger models.
+    agent_todo_tool: bool = False
+    # Sandboxed command execution for the agent: "auto" picks the strongest sandbox
+    # available on this OS (sandbox-exec, bubblewrap, docker/podman); "off" disables
+    # the run_command tool. See agent/sandbox.py.
+    agent_sandbox: str = "auto"
+    agent_sandbox_image: str = "python:3.12-slim"
+    tool_timeout_command: float = Field(default=120.0, gt=0)
+    # Local voice (`pip install 'localgate[voice]'`): Piper text-to-speech and
+    # faster-whisper speech-to-text, served at /v1/audio/* and used by `localgate code --voice`.
+    voice_enabled: bool = True
+    voice_tts_voice: str = "en_US-lessac-medium"
+    voice_dir: str | None = None  # defaults to <data dir>/voices
+    voice_auto_download: bool = True  # fetch a missing Piper voice on first use
+    voice_stt_model: str = "base"  # faster-whisper model: tiny, base, small, medium, turbo, *.en
+    voice_stt_device: str = "auto"  # auto, cpu, cuda
 
     # --- Prompt cache ---
     cache_enabled: bool = False
@@ -154,6 +186,9 @@ class Settings(BaseSettings):
     # --- Auth & limits ---
     admin_key: str = Field(default=INSECURE_ADMIN_KEY)
     default_rate_limit_per_min: int = Field(default=60, ge=1)
+    # Keep an encrypted copy of new API keys so an admin can view them again. The
+    # copy is encrypted with a key derived from admin_key (core/key_vault.py).
+    api_key_reveal_enabled: bool = True
 
     # --- Observability ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"

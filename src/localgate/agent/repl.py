@@ -8,6 +8,7 @@ and Rich, and is exercised directly in tests without going through the CLI layer
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -22,12 +23,22 @@ from rich.panel import Panel
 
 from localgate.agent import gitutil
 from localgate.agent import theme as theme_mod
-from localgate.agent.loop import AgentSession, AgentTurnLimitExceeded
+from localgate.agent.loop import AgentSession, AgentTurnLimitExceeded, AsyncTool
 from localgate.agent.mcp import McpRegistry
 from localgate.agent.memory import AgentMemory, list_project_sessions, set_current_project_session
 from localgate.agent.render import print_diff
+from localgate.agent.roles import AgentRole
+from localgate.agent.sandbox import (
+    RUN_COMMAND_GUIDANCE,
+    RUN_COMMAND_SCHEMA,
+    Sandbox,
+    is_auto_allowed,
+    run_sandboxed,
+)
 from localgate.agent.theme import THEMES
+from localgate.agent.todo import TODO_GUIDANCE, TODO_WRITE_SCHEMA, TodoList
 from localgate.agent.tools import (
+    MUTATING_TOOL_NAMES,
     ToolCallResult,
     ensure_visible,
     execute_tool_call,
@@ -41,6 +52,8 @@ from localgate.integrations.caniollama import (
     get_compat_for_models,
     overall_pass_rate,
 )
+from localgate.voice.terminal import VoiceIO
+from localgate.web.fetch import FETCH_URL_SCHEMA, FetchError, fetch_page
 
 #: (command, one-line description) — the single source of truth for both the
 #: startup banner and `/help`, so a new command only needs to be added here once.
@@ -52,6 +65,12 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/mode [name]", "Show or set the write mode: manual, auto, plan (or shift+tab)."),
     ("/usage", "Request/token totals for this session."),
     ("/context", "How full the conversation is vs. the model's context window."),
+    ("/compact [focus]", "Compact history into the session ledger now (keep <focus>)."),
+    ("/ledger", "Show the session ledger: goal, decisions, files changed, to-dos."),
+    ("/todos", "Show the agent's current to-do list."),
+    ("/agents", "List the sub-agent roles delegate_task can use."),
+    ("/voice [on|off]", "Read replies aloud with Piper (local text-to-speech)."),
+    ("/listen", "Dictate your next message: speak, then press Enter (local Whisper)."),
     ("/config [key value]", "View, or set and persist, a preference."),
     ("/resume", "Pick a past session for this project to resume."),
     ("/undo", "Revert the most recent write."),
@@ -284,6 +303,25 @@ class WriteGate:
         preview = task if len(task) <= 80 else task[:77] + "..."
         return typer.confirm(f"Delegate sub-task {preview!r}?", default=True)
 
+    def confirm_fetch(self, _name: str, arguments: dict[str, Any]) -> bool:
+        """Like `confirm_search`: manual mode asks, defaulting to yes."""
+        if self.mode() != "manual":
+            return True
+        return typer.confirm(f"Fetch {arguments.get('url', '?')}?", default=True)
+
+    def confirm_command(self, _name: str, arguments: dict[str, Any]) -> bool:
+        """Commands run in a sandbox, but still change files in the project.
+        Plan mode never runs them; auto mode runs only allow-listed commands
+        (tests, linters, read-only git) without asking; everything else asks."""
+        command = str(arguments.get("command", ""))
+        if self.plan_mode:
+            self.console.print(f"[dim]plan mode: not running {command!r}[/dim]")
+            return False
+        if self.auto_approve and is_auto_allowed(command):
+            return True
+        self.console.print(f"[bold]$ {command}[/bold]")
+        return typer.confirm("Run this command in the sandbox?", default=False)
+
     def confirm_mcp(self, name: str, arguments: dict[str, Any]) -> bool:
         """MCP tools are externally supplied, so their side effects are unknown."""
         preview = str(arguments)
@@ -364,10 +402,7 @@ class WriteGate:
     ) -> ToolCallResult:
         """Wraps the default tool executor to record successful writes."""
         result = execute_tool_call(root, tool_call_id, name, arguments)
-        if (
-            name in {"write_file", "create_file", "update_file", "delete_file"}
-            and not result.is_error
-        ):
+        if name in MUTATING_TOOL_NAMES and not result.is_error:
             path = arguments.get("path", "?")
             self.last_written_path = path
             self.writes_this_turn.append(path)
@@ -486,18 +521,25 @@ async def _switch_model(
                 warned = True
 
     # Fallback to backend's check_tool_support if registry had no data
-    if not warned:
-        supports_tools = await session.backend.check_tool_support(name)
-        if supports_tools is False:
+    supports_tools = await session.backend.check_tool_support(name)
+    native = supports_tools is not False
+    if not warned and supports_tools is False:
+        if session.backend.name == "ollama":
+            console.print(
+                f"[yellow]{name} doesn't advertise tool-calling support — Localgate will use "
+                "JSON tool mode (grammar-constrained replies) for it, which is slower and "
+                "less reliable than native tools.[/yellow]"
+            )
+        else:
             console.print(
                 f"[red]{name} doesn't advertise tool-calling support — switching would likely "
                 "400 on the next turn.[/red]"
             )
-            answer = console.input("[yellow]Switch anyway? [y/N] [/yellow]").strip().lower()
-            if answer not in ("y", "yes"):
-                return
+        answer = console.input("[yellow]Switch anyway? [y/N] [/yellow]").strip().lower()
+        if answer not in ("y", "yes"):
+            return
 
-    session.model = name
+    session.switch_model(name, native_tools=native or session.backend.name != "ollama")
     console.print(f"[dim]model set to {session.model}[/dim]")
 
 
@@ -640,9 +682,11 @@ def _render_startup_banner(
         pass
 
     # Tools
-    caps: list[str] = ["read", "write", "search", "git"]
+    caps: list[str] = ["read", "edit", "search", "git", "todos"]
     if search_fn is not None:
-        caps.append("web_search")
+        caps.extend(["web_search", "fetch_url"])
+    if getattr(session, "sandbox", None) is not None:
+        caps.append("run_command")
     if session.allow_delegation:
         caps.append("delegate")
     if mcp_registry is not None and mcp_registry.servers():
@@ -675,6 +719,7 @@ def _print_tools(console: Console, session: AgentSession) -> None:
         "read_file",
         "create_file",
         "update_file",
+        "edit_file",
         "delete_file",
         "write_file",
         "list_directory",
@@ -694,6 +739,16 @@ def _print_tools(console: Console, session: AgentSession) -> None:
     else:
         console.print("[dim]web_search: disabled — enable with LOCALGATE_SEARCH_PROVIDER[/dim]")
 
+    if "fetch_url" in session.extra_tools:
+        console.print("[bold]fetch_url:[/bold] enabled (public http(s) pages only)")
+    sandbox = getattr(session, "sandbox", None)
+    if sandbox is not None:
+        console.print(f"[bold]run_command:[/bold] {sandbox.describe()}")
+    else:
+        console.print(
+            "[dim]run_command: disabled — no sandbox found (install bubblewrap on Linux, "
+            "or Docker/Podman on any OS; macOS uses sandbox-exec)[/dim]"
+        )
     if session.mcp_registry is not None and session.mcp_registry.servers():
         for server_name, tool_names in session.mcp_registry.servers():
             console.print(f"[bold]mcp:{server_name}:[/bold] {', '.join(tool_names)}")
@@ -737,9 +792,35 @@ async def _resume_command(
     memory.session_id = chosen
     history = await memory.load_history()
     session.messages = [{"role": "system", "content": session.system_prompt()}, *history]
+    session.ledger = await memory.load_ledger()
     console.print(
         f"[dim]resumed session {chosen[:8]} ({len(history)} prior message(s) loaded)[/dim]"
     )
+
+
+async def _print_context(console: Console, session: AgentSession) -> None:
+    """`/context`: where the context window goes — system prompt, ledger, history,
+    tool schemas — against the window this session actually requests."""
+    import json  # noqa: PLC0415
+
+    system = count_message_tokens(session.messages[:1])
+    history = count_message_tokens(session.messages[1:])
+    tools = count_tokens(json.dumps(session.tool_schemas))
+    ledger = 0 if session.ledger.is_empty() else count_tokens(session.ledger.render())
+    used = system + history + tools + ledger
+    window = session.num_ctx or await session.backend.context_window(session.model)
+    if window:
+        console.print(
+            f"[dim]{used:,} / {window:,} tokens ({used / window * 100:.0f}% of context)[/dim]"
+        )
+    else:
+        console.print(f"[dim]{used:,} tokens in the current conversation[/dim]")
+    console.print(
+        f"[dim]  system {system:,} · ledger {ledger:,} · history {history:,} · "
+        f"tool schemas {tools:,}[/dim]"
+    )
+    if session.last_compaction is not None and session.last_compaction.changed:
+        console.print(f"[dim]  last: {session.last_compaction.describe()}[/dim]")
 
 
 def _make_prompt_session(gate: WriteGate) -> PromptSession[str] | None:
@@ -859,8 +940,8 @@ async def run_turn(
 
     # Show a summary of files written this turn
     if gate.writes_this_turn:
-        names = ", ".join(gate.writes_this_turn)
-        console.print(f"[bold green]  files written: {names}[/bold green]")
+        names = ", ".join(dict.fromkeys(gate.writes_this_turn))
+        console.print(f"\n[bold green]  files written: {names}[/bold green]")
 
     gate.after_turn(user_input)
     console.print()
@@ -872,7 +953,111 @@ async def run_turn(
             await memory.record_usage(session.model, prompt_tokens, completion_tokens)
     if memory is not None:
         await memory.record_turn(user_input, result)
+        with contextlib.suppress(Exception):
+            await memory.save_ledger(session.ledger)
     return result
+
+
+async def build_agent_session(
+    backend: Any,
+    model: str,
+    root: Path,
+    gate: WriteGate,
+    console: Console,
+    *,
+    max_turns: int = 20,
+    allow_delegation: bool = False,
+    search_fn: SearchFn | None = None,
+    mcp_registry: McpRegistry | None = None,
+    settings: Any | None = None,
+    session_id: str | None = None,
+    memory: AgentMemory | None = None,
+    sandbox: Sandbox | None = None,
+    agent_roles: dict[str, AgentRole] | None = None,
+    native_tools: bool = True,
+) -> AgentSession:
+    """The `AgentSession` both the REPL and single-shot runs use: the write gate's
+    confirmations, the optional tools this machine supports (web fetch, sandboxed
+    commands, the to-do list), durable tool logging, and the persisted ledger."""
+    todos = TodoList()
+    extra_tools: list[AsyncTool] = []
+    if getattr(settings, "agent_todo_tool", False):
+        extra_tools.append(AsyncTool(TODO_WRITE_SCHEMA, todos.write, guidance=TODO_GUIDANCE))
+    if search_fn is not None:
+        allow_private = bool(getattr(settings, "fetch_allow_private", False))
+
+        async def fetch(arguments: dict[str, Any]) -> str:
+            try:
+                page = await fetch_page(
+                    str(arguments["url"]),
+                    max_chars=int(arguments.get("max_chars") or 12_000),
+                    allow_private=allow_private,
+                )
+            except FetchError as exc:
+                return f"Could not fetch: {exc}"
+            return page.render()
+
+        extra_tools.append(
+            AsyncTool(
+                FETCH_URL_SCHEMA,
+                fetch,
+                confirm=gate.confirm_fetch,
+                timeout=float(getattr(settings, "tool_timeout_search", 20.0)) + 10,
+            )
+        )
+    if sandbox is not None:
+        default_timeout = float(getattr(settings, "tool_timeout_command", 120.0))
+
+        async def run_command(arguments: dict[str, Any]) -> str:
+            timeout = arguments.get("timeout")
+            limit = float(timeout) if isinstance(timeout, int) and timeout > 0 else default_timeout
+            result = await run_sandboxed(sandbox, root, str(arguments["command"]), timeout=limit)
+            return result.render()
+
+        extra_tools.append(
+            AsyncTool(
+                RUN_COMMAND_SCHEMA,
+                run_command,
+                confirm=gate.confirm_command,
+                read_only=False,
+                guidance=RUN_COMMAND_GUIDANCE,
+            )
+        )
+
+    session = AgentSession(
+        backend,
+        model,
+        root,
+        confirm_write=gate.confirm_write,
+        confirm_search=gate.confirm_search,
+        confirm_delegate=gate.confirm_delegate,
+        confirm_mcp=gate.confirm_mcp,
+        tool_executor=gate.tracking_executor,
+        max_turns=max_turns,
+        allow_delegation=allow_delegation,
+        search_fn=search_fn,
+        mcp_registry=mcp_registry,
+        auto_read=True,
+        settings=settings,
+        session_id=session_id,
+        extra_tools=extra_tools,
+        native_tools=native_tools,
+        on_tool_log=memory.record_tool_call if memory is not None else None,
+        agent_roles=agent_roles,
+    )
+    session.sandbox = sandbox  # type: ignore[attr-defined]
+    session.todos = todos  # type: ignore[attr-defined]
+
+    def show_todos(current: TodoList) -> None:
+        session.ledger.open_todos = current.pending()
+        console.print(f"[cyan]{current.render()}[/cyan]")
+
+    todos.on_change = show_todos
+    if memory is not None:
+        # A missing table or a bad row just starts a fresh ledger.
+        with contextlib.suppress(Exception):
+            session.ledger = await memory.load_ledger()
+    return session
 
 
 async def run_repl(
@@ -894,6 +1079,10 @@ async def run_repl(
     mcp_registry: McpRegistry | None = None,
     settings: Any | None = None,
     session_id: str | None = None,
+    sandbox: Sandbox | None = None,
+    agent_roles: dict[str, AgentRole] | None = None,
+    native_tools: bool = True,
+    voice: VoiceIO | None = None,
 ) -> None:
     """A persistent chat session in `root`, until `/exit` or EOF (Ctrl+D)."""
     console = theme_mod.make_console(theme, no_color=no_color)
@@ -909,22 +1098,22 @@ async def run_repl(
         theme_name=theme_name,
         plan_mode=plan_mode,
     )
-    session = AgentSession(
+    session = await build_agent_session(
         backend,
         model,
         root,
-        confirm_write=gate.confirm_write,
-        confirm_search=gate.confirm_search,
-        confirm_delegate=gate.confirm_delegate,
-        confirm_mcp=gate.confirm_mcp,
-        tool_executor=gate.tracking_executor,
+        gate,
+        console,
         max_turns=max_turns,
         allow_delegation=allow_delegation,
         search_fn=search_fn,
         mcp_registry=mcp_registry,
-        auto_read=True,
         settings=settings,
         session_id=session_id,
+        memory=memory,
+        sandbox=sandbox,
+        agent_roles=agent_roles,
+        native_tools=native_tools,
     )
     prompt_session = _make_prompt_session(gate)
 
@@ -951,6 +1140,15 @@ async def run_repl(
         line = line.strip()
         if not line:
             continue
+        if line == "/listen":
+            if voice is None:
+                console.print("[dim]voice is off on this server (LOCALGATE_VOICE_ENABLED)[/dim]")
+                continue
+            heard = await voice.listen()
+            if not heard:
+                continue
+            console.print(f"[dim]you said:[/dim] {heard}")
+            line = heard
 
         if line == "/exit":
             break
@@ -1035,13 +1233,29 @@ async def run_repl(
             )
             continue
         if line == "/context":
-            used = count_message_tokens(session.messages)
-            window = await session.backend.context_window(session.model)
-            if window:
-                pct = used / window * 100
-                console.print(f"[dim]{used:,} / {window:,} tokens ({pct:.0f}% of context)[/dim]")
-            else:
-                console.print(f"[dim]{used:,} tokens in the current conversation[/dim]")
+            await _print_context(console, session)
+            continue
+        if line.startswith("/compact"):
+            focus = line[len("/compact") :].strip() or None
+            report = await session.compact(focus)
+            console.print(f"[dim]{report.describe()}[/dim]")
+            continue
+        if line == "/ledger":
+            ledger = session.ledger
+            console.print(
+                ledger.render() if not ledger.is_empty() else "[dim]ledger is empty[/dim]"
+            )
+            continue
+        if line == "/todos":
+            todos = getattr(session, "todos", None)
+            console.print(todos.render() if todos is not None else "[dim]no to-do list[/dim]")
+            continue
+        if line == "/agents":
+            if not session.allow_delegation:
+                console.print("[dim]delegation is off — start with --allow-delegation[/dim]")
+            for role in session.agent_roles.values():
+                model_note = f"  [dim]model: {role.model}[/dim]" if role.model else ""
+                console.print(f"  [bold]{role.name}[/bold] — {role.description}{model_note}")
             continue
         if line.startswith("/config"):
             parts = line.split(maxsplit=2)
@@ -1078,12 +1292,25 @@ async def run_repl(
         if line == "/tools":
             _print_tools(console, session)
             continue
+        if line.startswith("/voice"):
+            if voice is None:
+                console.print("[dim]voice is off on this server (LOCALGATE_VOICE_ENABLED)[/dim]")
+                continue
+            arg = line[len("/voice") :].strip().lower()
+            voice.speak_enabled = (
+                (not voice.speak_enabled) if not arg else arg in {"on", "1", "yes"}
+            )
+            state = "on — replies are read aloud" if voice.speak_enabled else "off"
+            console.print(f"[dim]voice {state}[/dim]")
+            continue
         if line.startswith("/"):
             console.print(f"[dim]unknown command {line!r} — try /help[/dim]")
             continue
 
         try:
-            await run_turn(console, session, gate, line, memory=memory, usage=usage)
+            reply = await run_turn(console, session, gate, line, memory=memory, usage=usage)
+            if voice is not None and voice.speak_enabled and reply:
+                await voice.say(reply)
         except AgentTurnLimitExceeded as exc:
             console.print(f"[red]{exc}[/red]")
         except httpx.HTTPStatusError as exc:
@@ -1120,6 +1347,10 @@ async def run_single_shot(
     mcp_registry: McpRegistry | None = None,
     settings: Any | None = None,
     session_id: str | None = None,
+    sandbox: Sandbox | None = None,
+    agent_roles: dict[str, AgentRole] | None = None,
+    native_tools: bool = True,
+    voice: VoiceIO | None = None,
 ) -> SingleShotResult:
     """One task, one turn, with the same diff/spinner/streaming UI as the REPL."""
     console = theme_mod.make_console(theme, no_color=no_color)
@@ -1132,22 +1363,24 @@ async def run_single_shot(
         theme_name=theme,
         plan_mode=plan_mode,
     )
-    session = AgentSession(
+    session = await build_agent_session(
         backend,
         model,
         root,
-        confirm_write=gate.confirm_write,
-        confirm_search=gate.confirm_search,
-        confirm_delegate=gate.confirm_delegate,
-        confirm_mcp=gate.confirm_mcp,
-        tool_executor=gate.tracking_executor,
+        gate,
+        console,
         max_turns=max_turns,
         allow_delegation=allow_delegation,
         search_fn=search_fn,
         mcp_registry=mcp_registry,
-        auto_read=True,
         settings=settings,
         session_id=session_id,
+        memory=memory,
+        sandbox=sandbox,
+        agent_roles=agent_roles,
+        native_tools=native_tools,
     )
     text = await run_turn(console, session, gate, task, memory=memory, usage=SessionUsage())
+    if voice is not None and voice.speak_enabled and text:
+        await voice.say(text)
     return SingleShotResult(text, gate.declined_a_write)

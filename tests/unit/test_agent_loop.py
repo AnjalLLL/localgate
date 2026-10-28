@@ -126,9 +126,14 @@ async def test_write_file_is_skipped_when_declined(project):
 
 
 async def test_overwrite_is_rejected_until_that_file_is_read(project):
+    # Nested, so it is not among the small root files shown in the first prompt.
+    (project / "pkg").mkdir()
+    (project / "pkg" / "mod.txt").write_text("old content\n")
     backend = ScriptedBackend(
         [
-            tool_call("c1", "write_file", {"path": "app.py", "content": "new content\n"}),
+            tool_call("c1", "write_file", {"path": "pkg/mod.txt", "content": "new content\n"}),
+            final_text("I think I updated it"),
+            # The loop answers an unverified success claim once with what really happened.
             final_text("could not update it"),
         ]
     )
@@ -143,9 +148,12 @@ async def test_overwrite_is_rejected_until_that_file_is_read(project):
 
     assert result == "could not update it"
     assert confirmations == []
-    assert (project / "app.py").read_text() == "old content\n"
+    assert (project / "pkg" / "mod.txt").read_text() == "old content\n"
     tool_message = next(m for m in backend.requests[1]["messages"] if m["role"] == "tool")
-    assert "Read 'app.py' successfully" in tool_message["content"]
+    assert "must be read before write_file" in tool_message["content"]
+    assert "old content" in tool_message["content"]  # the file is read for the model
+    nudge = backend.requests[2]["messages"][-1]
+    assert nudge["role"] == "user" and "no file was changed" in nudge["content"]
 
 
 async def test_multiple_tool_calls_in_one_turn_are_all_executed(project):

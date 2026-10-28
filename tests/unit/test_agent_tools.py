@@ -24,6 +24,14 @@ from localgate.agent.tools import (
 )
 
 
+def _symlink_or_skip(link, target):
+    """Creating symlinks needs Developer Mode or admin rights on Windows."""
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable here: {exc}")
+
+
 @pytest.fixture
 def project(tmp_path):
     (tmp_path / "src").mkdir()
@@ -87,7 +95,7 @@ def test_explicit_create_update_delete_contracts(project):
 def test_all_file_tools_reject_symlink_paths(project, tmp_path):
     outside = tmp_path.parent / "outside-secret.txt"
     outside.write_text("do not leak")
-    (project / "link.txt").symlink_to(outside)
+    _symlink_or_skip(project / "link.txt", outside)
     with pytest.raises(PathEscapeError):
         read_file(project, "link.txt")
     with pytest.raises(PathEscapeError):
@@ -189,7 +197,7 @@ def test_search_files_returns_no_matches_message_via_execute(project):
 def test_search_files_does_not_follow_file_symlinks(project, tmp_path):
     outside = tmp_path.parent / "outside-search-secret.txt"
     outside.write_text("UNIQUE_OUTSIDE_SECRET")
-    (project / "linked-secret.txt").symlink_to(outside)
+    _symlink_or_skip(project / "linked-secret.txt", outside)
     assert search_files(project, "UNIQUE_OUTSIDE_SECRET") == []
 
 
