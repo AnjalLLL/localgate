@@ -73,13 +73,14 @@ async def enforce_rate_limit(
     even though several dependencies ask for it.
     """
     limiter = request.app.state.rate_limiter
-    if not limiter.allow(api_key.id, api_key.rate_limit_per_min):
+    allowed, retry_after = await limiter.check(api_key.id, api_key.rate_limit_per_min)
+    if not allowed:
         metrics.rate_limited_total.inc()
         raise RateLimitError(
             f"Rate limit exceeded for this key ({api_key.rate_limit_per_min} requests/minute). "
             "Raise it with `localgate keys update <id> --rate-limit N`, or retry shortly.",
             code="rate_limit_exceeded",
-            retry_after=limiter.retry_after(api_key.id),
+            retry_after=retry_after,
         )
     return api_key
 

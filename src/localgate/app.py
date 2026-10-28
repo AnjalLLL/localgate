@@ -158,6 +158,19 @@ def create_app(
         app.state.backend = app.state.pool.primary.backend
         app.state.scheduler = app.state.pool.primary.scheduler
         app.state.rate_limiter = RateLimiter()
+        shared: list[Any] = []
+        if settings.redis_url:
+            # Limits that hold across worker processes (see core/shared_limits.py).
+            from localgate.core.shared_limits import (  # noqa: PLC0415
+                RedisKeyLeases,
+                RedisRateLimiter,
+            )
+
+            app.state.rate_limiter = RedisRateLimiter(settings.redis_url)
+            leases = RedisKeyLeases(settings.redis_url, ttl=settings.backend_timeout * 2)
+            for member in app.state.pool.members:
+                member.scheduler.remote = leases
+            shared = [app.state.rate_limiter, leases]
         app.state.model_info = ModelInfoCache()
         app.state.cache = PromptCache(
             max_entries=settings.cache_max_entries, ttl_seconds=settings.cache_ttl_seconds
@@ -189,6 +202,8 @@ def create_app(
         # running this, so nothing is still using these when they close. That is what
         # makes SIGTERM graceful rather than abrupt.
         await app.state.pool.aclose()
+        for client in shared:
+            await client.aclose()
         await engine.dispose()
         logger.info("localgate_stopped")
 
