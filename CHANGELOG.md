@@ -136,6 +136,11 @@ sub-agent roles, local voice, viewable API keys, and a redesigned dashboard.
   - **Temperature:** the agent now samples at 0.2 by default (`LOCALGATE_AGENT_TEMPERATURE`)
     instead of Ollama's 0.8.
 
+### Fixed
+
+- `/resume` lists a project's sessions newest first even when two share a timestamp, which
+  happens routinely on Windows because of its coarse clock.
+
 ## [0.10.8] — 2026-09-20
 
 ### Fixed
