@@ -313,3 +313,44 @@ def test_keys_update_with_nothing_to_change_says_so(env):
 def test_bad_expiry_is_rejected(env):
     result = runner.invoke(app, ["keys", "create", "--name", "x", "--expires", "soonish"])
     assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------- sharing
+
+
+def test_serve_share_listens_on_the_network_and_prints_addresses(fresh, monkeypatch):
+    started: list[dict] = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: started.append(kwargs))
+    monkeypatch.setattr(
+        "localgate.cli.share_urls",
+        lambda port, public_url=None: [
+            {"label": "Local network", "url": f"http://192.168.1.20:{port}"}
+        ],
+    )
+    result = runner.invoke(app, ["serve", "--share"])
+    assert result.exit_code == 0, result.output
+    assert started[0]["host"] == "0.0.0.0"
+    assert "http://192.168.1.20:8000/v1" in result.stdout
+    assert "/dashboard/#/share" in result.stdout
+
+
+def test_serve_refuses_the_network_with_the_placeholder_key(fresh, monkeypatch):
+    from localgate.config import INSECURE_ADMIN_KEY
+
+    monkeypatch.setenv("LOCALGATE_ADMIN_KEY", INSECURE_ADMIN_KEY)
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: pytest.fail("must not start"))
+    result = runner.invoke(app, ["serve", "--host", "192.168.1.20"])
+    assert result.exit_code == 2
+    assert "placeholder admin key" in result.stderr
+
+
+def test_compose_deploy_reaches_the_gateway_from_caddy(env, tmp_path):
+    out = tmp_path / "deploy"
+    result = runner.invoke(
+        app,
+        ["deploy", "--domain", "gw.example.com", "--target", "compose", "--output-dir", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "reverse_proxy localgate:8000" in (out / "Caddyfile").read_text()
+    assert "LOCALGATE_HOST=0.0.0.0" in (out / "localgate.env").read_text()
+    assert "--proxy-headers" in (out / "docker-compose.yml").read_text()

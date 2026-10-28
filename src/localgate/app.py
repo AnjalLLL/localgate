@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from localgate import __version__
 from localgate.backends import available_backends, get_backend
@@ -25,9 +26,10 @@ from localgate.core.db_config_store import (
     is_database_established,
     load_database_url,
 )
-from localgate.core.errors import ConfigurationError, install_exception_handlers
+from localgate.core.errors import ConfigurationError, error_body, install_exception_handlers
 from localgate.core.logging import configure_logging, get_logger
 from localgate.core.model_info import ModelInfoCache
+from localgate.core.netinfo import is_loopback_host
 from localgate.core.rate_limiter import RateLimiter
 from localgate.core.scheduler import InferenceScheduler
 from localgate.db.engine import init_models, make_engine, make_session_factory
@@ -51,6 +53,44 @@ DASHBOARD_CSP = (
     "connect-src 'self'; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; "
     "form-action 'self'"
 )
+
+
+#: Paths that only `admin_allowed_networks` may reach.
+_ADMIN_PREFIXES = ("/admin", "/dashboard", "/docs", "/redoc", "/openapi.json", "/metrics")
+#: Files under /dashboard that the public landing and connect pages load.
+PUBLIC_ASSETS = frozenset(
+    {
+        "home.css",
+        "home.js",
+        "connect.js",
+        "font-inter.woff2",
+        "font-serif.woff2",
+        "font-serif-italic.woff2",
+        "font-mono.woff2",
+    }
+)
+
+
+def _is_admin_surface(path: str) -> bool:
+    if path.startswith("/dashboard/") and path.rsplit("/", 1)[-1] in PUBLIC_ASSETS:
+        return False
+    return any(path == p or path.startswith(p + "/") for p in _ADMIN_PREFIXES) or (
+        path.startswith("/dashboard")
+    )
+
+
+def _untrusted_response(path: str) -> Response:
+    message = (
+        "The dashboard and admin API are only available from trusted networks "
+        "(LOCALGATE_ADMIN_ALLOWED_NETWORKS). The /v1 API works from here with an API key."
+    )
+    if path.startswith("/dashboard"):
+        return HTMLResponse(
+            f"<!doctype html><title>localgate</title><p>{message}</p>", status_code=403
+        )
+    return JSONResponse(
+        error_body(message, "permission_error", "untrusted_network"), status_code=403
+    )
 
 
 def resolve_database_url(settings: Settings, config_path: Path | None = None) -> str:
@@ -87,9 +127,9 @@ def create_app(
             f"Available backends: {', '.join(available_backends())}."
         )
 
-    if settings.host == "0.0.0.0" and settings.uses_insecure_admin_key:  # noqa: S104
+    if not is_loopback_host(settings.host) and settings.uses_insecure_admin_key:
         raise ConfigurationError(
-            "Refusing to bind to 0.0.0.0 with the default admin key. "
+            f"Refusing to listen on {settings.host} with the default admin key. "
             "This would expose your gateway to the network with a key that is printed in the docs. "
             "Either set LOCALGATE_ADMIN_KEY to a real value (generate one with "
             "`openssl rand -hex 32`), or bind to 127.0.0.1 (the default) for local-only use."
@@ -179,11 +219,23 @@ def create_app(
     install_exception_handlers(app)
 
     @app.middleware("http")
+    async def trusted_networks_only(request: Any, call_next: Any) -> Any:
+        """The dashboard, /admin, the API docs and /metrics answer only clients on
+        `admin_allowed_networks` (this machine, LANs, Tailscale by default). The
+        /v1 API — what other devices are given keys for — is unaffected."""
+        path = request.url.path
+        if _is_admin_surface(path):
+            client = request.client.host if request.client else None
+            if not settings.is_trusted_address(client):
+                return _untrusted_response(path)
+        return await call_next(request)
+
+    @app.middleware("http")
     async def security_headers(request: Any, call_next: Any) -> Any:
         """Strict headers on the dashboard and landing page: scripts and styles only from this
         origin (no inline script), no framing, no referrer leakage."""
         response = await call_next(request)
-        if request.url.path == "/" or request.url.path.startswith("/dashboard"):
+        if request.url.path in ("/", "/connect") or request.url.path.startswith("/dashboard"):
             response.headers.setdefault("Content-Security-Policy", DASHBOARD_CSP)
             response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")

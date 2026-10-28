@@ -21,7 +21,9 @@ from fastapi import APIRouter, Request, Response
 from sqlalchemy import text
 
 from localgate import __version__
+from localgate.api.deps import require_admin
 from localgate.core import metrics
+from localgate.core.errors import AuthenticationError
 
 router = APIRouter(tags=["operations"])
 
@@ -52,6 +54,12 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
     ready = backend_ok and database_ok
     if not ready:
         response.status_code = 503
+
+    # Anyone may ask whether the gateway is up; only trusted networks (or a
+    # signed-in admin) see where the backend lives, database errors and warnings.
+    client = request.client.host if request.client else None
+    if not (settings.is_trusted_address(client) or _is_admin(request)):
+        return {"status": "ok" if ready else "degraded", "version": __version__}
 
     return {
         "status": "ok" if ready else "degraded",
@@ -124,3 +132,12 @@ def _warnings(settings: Any) -> list[str]:
             "in the session. Fine for local use; move to Postgres before this grows."
         )
     return warnings
+
+
+def _is_admin(request: Request) -> bool:
+    """A valid admin key header or dashboard session — without raising."""
+    try:
+        require_admin(request)
+    except AuthenticationError:
+        return False
+    return True
