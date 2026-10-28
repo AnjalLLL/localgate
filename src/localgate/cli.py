@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import secrets
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import datetime, timedelta, timezone
@@ -47,12 +48,17 @@ app = typer.Typer(
 )
 keys_app = typer.Typer(help="Create, inspect and revoke API keys.", no_args_is_help=True)
 db_app = typer.Typer(help="Initialize and migrate the database.", no_args_is_help=True)
+service_app = typer.Typer(
+    help="Run the gateway in the background: start at login, restart if it stops.",
+    no_args_is_help=True,
+)
 users_app = typer.Typer(
     help="Dashboard accounts: sign in with email and password.", no_args_is_help=True
 )
 app.add_typer(keys_app, name="keys")
 app.add_typer(db_app, name="db")
 app.add_typer(users_app, name="users")
+app.add_typer(service_app, name="service")
 bench_app = typer.Typer(help="Measure how reliably models drive the agent.", no_args_is_help=True)
 app.add_typer(bench_app, name="bench")
 voice_app = typer.Typer(
@@ -644,6 +650,103 @@ def users_delete(email: str = typer.Argument(..., help="The account's email.")) 
         typer.secho(f"No account for {normalize_email(email)}.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     typer.secho(f"Deleted {normalize_email(email)}.", fg=typer.colors.GREEN)
+
+
+# ---------------------------------------------------------------------- service
+
+
+def _service_plan(serve_args: list[str]) -> Any:
+    from localgate import service  # noqa: PLC0415
+
+    try:
+        return service.plan(serve_args)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _run_steps(steps: list[list[str]], *, check: bool = True) -> bool:
+    for step in steps:
+        try:
+            done = subprocess.run(step, check=False, capture_output=True, text=True)  # noqa: S603
+        except FileNotFoundError:
+            typer.secho(f"  {step[0]} isn't available on this machine.", fg=typer.colors.RED)
+            return False
+        if done.returncode != 0 and check:
+            typer.secho(
+                f"  `{' '.join(step)}` failed: {(done.stderr or done.stdout).strip()}",
+                fg=typer.colors.RED,
+            )
+            return False
+    return True
+
+
+@service_app.command("install")
+def service_install(
+    share: bool = typer.Option(
+        False, "--share", help="Serve other devices too (see `serve --share`)."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Interface to bind."),
+    port: int | None = typer.Option(None, "--port", help="Port to bind."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be installed."),
+) -> None:
+    """Start `localgate serve` at login and keep it running."""
+    serve_args = (
+        (["--share"] if share else [])
+        + (["--host", host] if host else [])
+        + (["--port", str(port)] if port else [])
+    )
+    plan = _service_plan(serve_args)
+    if dry_run:
+        typer.secho(f"{plan.platform}" + (f" — {plan.path}" if plan.path else ""), bold=True)
+        typer.echo(plan.content)
+        for step in plan.install:
+            typer.echo("$ " + " ".join(step))
+        return
+    # The service runs without a terminal, so it can't ask for anything: make sure
+    # there's an admin key and a migrated database before it starts.
+    _ensure_admin_key()
+    paths.log_dir().mkdir(parents=True, exist_ok=True)
+    if plan.path is not None:
+        plan.path.parent.mkdir(parents=True, exist_ok=True)
+        _run_steps(plan.uninstall, check=False)  # replace an older install cleanly
+        plan.path.write_text(plan.content, encoding="utf-8")
+    if not _run_steps(plan.install):
+        raise typer.Exit(code=1)
+    typer.secho(f"Installed: {plan.platform}.", fg=typer.colors.GREEN)
+    typer.echo("  localgate starts now and at every login. `localgate service status` checks it.")
+    if sys.platform.startswith("linux"):
+        typer.echo("  To keep it running while logged out: loginctl enable-linger $USER")
+
+
+@service_app.command("uninstall")
+def service_uninstall() -> None:
+    """Stop the background gateway and remove it from login."""
+    plan = _service_plan([])
+    _run_steps(plan.uninstall, check=False)
+    if plan.path is not None and plan.path.exists():
+        plan.path.unlink()
+    typer.secho("Removed the localgate service.", fg=typer.colors.GREEN)
+
+
+@service_app.command("status")
+def service_status() -> None:
+    """Whether the background gateway is installed and running."""
+    plan = _service_plan([])
+    if plan.path is not None and not plan.path.exists():
+        typer.echo("Not installed. Install it with: localgate service install")
+        raise typer.Exit(code=1)
+    result = subprocess.run(plan.status, check=False, capture_output=True, text=True)  # noqa: S603
+    typer.echo((result.stdout or result.stderr).strip() or "(no output)")
+    raise typer.Exit(code=0 if result.returncode == 0 else 1)
+
+
+@service_app.command("logs")
+def service_logs() -> None:
+    """The background gateway's recent log output."""
+    plan = _service_plan([])
+    result = subprocess.run(plan.logs, check=False, capture_output=True, text=True)  # noqa: S603
+    typer.echo((result.stdout or result.stderr).strip() or "(no log output yet)")
 
 
 # ---------------------------------------------------------------------------- doctor
