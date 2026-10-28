@@ -38,13 +38,15 @@ class OpenAICompatBackend(InferenceBackend):
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout, headers=headers)
 
     async def chat(self, request: dict[str, Any]) -> dict[str, Any]:
-        resp = await self._client.post("/v1/chat/completions", json={**request, "stream": False})
+        resp = await self._client.post(
+            "/v1/chat/completions", json={**_openai_body(request), "stream": False}
+        )
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
     async def chat_stream(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         async with self._client.stream(
-            "POST", "/v1/chat/completions", json={**request, "stream": True}
+            "POST", "/v1/chat/completions", json={**_openai_body(request), "stream": True}
         ) as resp:
             await _raise_for_stream_status(resp)
             async for line in resp.aiter_lines():
@@ -81,6 +83,16 @@ class OpenAICompatBackend(InferenceBackend):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+#: Request keys that are Localgate/Ollama-native extensions, not part of the
+#: OpenAI contract. A strict upstream (vLLM, a hosted API) may reject unknown
+#: fields, so they are dropped before the request leaves for a generic server.
+NATIVE_ONLY_KEYS = frozenset({"options", "format", "keep_alive"})
+
+
+def _openai_body(request: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in request.items() if k not in NATIVE_ONLY_KEYS}
 
 
 async def _raise_for_stream_status(resp: httpx.Response) -> None:

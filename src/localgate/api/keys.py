@@ -10,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import get_session, require_admin
 from localgate.core.errors import InvalidRequestError
+from localgate.core.logging import get_logger
 from localgate.db.models import APIKey
 from localgate.db.repositories.keys import APIKeyRepository
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
+logger = get_logger(__name__)
 
 
 class CreateKeyRequest(BaseModel):
@@ -41,6 +43,8 @@ class KeyResponse(BaseModel):
     # 500 because one historical row has a null column is never the right trade.
     created_at: datetime | None = None
     last_used_at: datetime | None = None
+    #: Whether an admin can view this key again (POST /admin/keys/{id}/reveal).
+    revealable: bool = False
 
     @classmethod
     def of(cls, key: APIKey) -> KeyResponse:
@@ -52,6 +56,7 @@ class KeyResponse(BaseModel):
             rate_limit_per_min=key.rate_limit_per_min,
             created_at=key.created_at,
             last_used_at=key.last_used_at,
+            revealable=bool(key.key_ciphertext) and not key.revoked,
         )
 
 
@@ -65,17 +70,54 @@ class CreatedKeyResponse(KeyResponse):
 async def create_key(
     body: CreateKeyRequest, request: Request, session: AsyncSession = Depends(get_session)
 ) -> CreatedKeyResponse:
-    """Create a key. The raw value is returned **once** and is not recoverable after that."""
+    """Create a key. Unless reveal is disabled (or the admin key is the insecure
+    default), an encrypted copy is kept so an admin can view it again later."""
     settings = request.app.state.settings
     limit = body.rate_limit_per_min or settings.default_rate_limit_per_min
 
-    key, raw_key = await APIKeyRepository(session).create(body.name, limit)
+    vault_key = settings.admin_key if settings.api_key_reveal_enabled else None
+    key, raw_key = await APIKeyRepository(session).create(body.name, limit, admin_key=vault_key)
     return CreatedKeyResponse(**KeyResponse.of(key).model_dump(), api_key=raw_key)
 
 
 @router.get("/keys", response_model=list[KeyResponse])
 async def list_keys(session: AsyncSession = Depends(get_session)) -> list[KeyResponse]:
     return [KeyResponse.of(key) for key in await APIKeyRepository(session).list_all()]
+
+
+class RevealedKey(BaseModel):
+    id: str
+    api_key: str
+
+
+@router.post("/keys/{key_id}/reveal", response_model=RevealedKey)
+async def reveal_key(
+    key_id: str, request: Request, session: AsyncSession = Depends(get_session)
+) -> RevealedKey:
+    """Show a key's full value again. POST, so a cookie-authenticated dashboard
+    request needs the CSRF header like any other sensitive action."""
+    settings = request.app.state.settings
+    repo = APIKeyRepository(session)
+    key = await repo.get(key_id)
+    if key is None:
+        raise InvalidRequestError(f"No API key with id {key_id!r}.", code="key_not_found")
+    if key.revoked:
+        raise InvalidRequestError("This key is revoked.", code="key_revoked")
+    if not settings.api_key_reveal_enabled:
+        raise InvalidRequestError(
+            "Revealing keys is disabled (LOCALGATE_API_KEY_REVEAL_ENABLED=false).",
+            code="reveal_disabled",
+        )
+    raw = await repo.reveal(key_id, settings.admin_key)
+    if raw is None:
+        raise InvalidRequestError(
+            "This key can't be shown again: it was created before keys could be revealed, "
+            "while the default admin key was in use, or before the admin key was changed. "
+            "Create a new key if you've lost it.",
+            code="key_not_recoverable",
+        )
+    logger.info("api_key_revealed", key_id=key_id)
+    return RevealedKey(id=key_id, api_key=raw)
 
 
 @router.get("/keys/{key_id}", response_model=KeyResponse)

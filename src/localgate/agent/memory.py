@@ -18,11 +18,12 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from localgate.agent.context import SessionLedger
 from localgate.backends.base import InferenceBackend
 from localgate.config import Settings
 from localgate.core.logging import get_logger
@@ -30,12 +31,17 @@ from localgate.core.types import ChatMessage
 from localgate.db.repositories.conversations import ConversationRepository, SummaryRepository
 from localgate.db.repositories.embeddings import EmbeddingRepository
 from localgate.db.repositories.keys import APIKeyRepository
+from localgate.db.repositories.ledgers import LedgerRepository
+from localgate.db.repositories.tool_calls import ToolCallRepository
 from localgate.db.repositories.usage import UsageRepository
 from localgate.memory.chunker import chunk_text
 from localgate.memory.context_builder import build_augmented_messages
 from localgate.memory.embedder import embed_text
 from localgate.memory.retriever import retrieve_relevant_context
 from localgate.memory.summarizer import maybe_summarize
+
+if TYPE_CHECKING:
+    from localgate.agent.loop import ToolLogEntry
 
 #: The one APIKey row every local `localgate code` session's history is attributed
 #: to. Never sent anywhere as a credential.
@@ -265,6 +271,35 @@ class AgentMemory:
         async with self._session_factory() as db_session:
             await UsageRepository(db_session).record(
                 self._api_key_id, model, prompt_tokens, completion_tokens
+            )
+
+    async def record_tool_call(self, entry: ToolLogEntry) -> None:
+        """Durable, owner-scoped tool-call log (arguments already redacted)."""
+        if not getattr(self._settings, "tool_logging_enabled", True):
+            return
+        async with self._session_factory() as db_session:
+            await ToolCallRepository(db_session).create(
+                session_id=entry.session_id,
+                tool_name=entry.tool_name,
+                arguments=entry.arguments,
+                success=entry.success,
+                duration_ms=entry.duration_ms,
+                error=entry.error,
+                timed_out=entry.timed_out,
+                api_key_id=self._api_key_id,
+                run_id=entry.run_id,
+                model=entry.model,
+            )
+
+    async def load_ledger(self) -> SessionLedger:
+        async with self._session_factory() as db_session:
+            data = await LedgerRepository(db_session).get(self.session_id, self._api_key_id)
+        return SessionLedger.from_dict(data)
+
+    async def save_ledger(self, ledger: SessionLedger) -> None:
+        async with self._session_factory() as db_session:
+            await LedgerRepository(db_session).save(
+                self.session_id, self._api_key_id, ledger.to_dict()
             )
 
     async def load_history(self, limit: int = 80) -> list[dict[str, str]]:

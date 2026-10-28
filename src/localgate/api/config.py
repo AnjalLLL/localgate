@@ -62,7 +62,33 @@ async def get_config(request: Request) -> dict:
             "enabled": settings.cache_enabled,
             **(request.app.state.cache.stats() if settings.cache_enabled else {}),
         },
-        "security": {"using_default_admin_key": settings.uses_insecure_admin_key},
+        "agent": {
+            "context_window": settings.agent_num_ctx,
+            "temperature": settings.agent_temperature,
+            "sandbox": settings.agent_sandbox,
+            "sandbox_image": settings.agent_sandbox_image,
+            "command_timeout": settings.tool_timeout_command,
+            "tool_logging": settings.tool_logging_enabled,
+        },
+        "search": {
+            "providers": settings.search_provider or "duckduckgo",
+            "chat_web_search": settings.web_search_enabled,
+            "max_sources": settings.web_search_max_sources,
+            "fetch_private_hosts": settings.fetch_allow_private,
+            # Whether keys are configured — never the keys themselves.
+            "brave_key_set": bool(settings.search_brave_api_key),
+            "tavily_key_set": bool(settings.search_api_key),
+        },
+        "voice": {
+            "enabled": settings.voice_enabled,
+            "tts_voice": settings.voice_tts_voice,
+            "stt_model": settings.voice_stt_model,
+            "auto_download": settings.voice_auto_download,
+        },
+        "security": {
+            "using_default_admin_key": settings.uses_insecure_admin_key,
+            "api_key_reveal": settings.api_key_reveal_enabled,
+        },
     }
 
 

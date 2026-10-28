@@ -87,6 +87,31 @@ class ConversationRepository:
             for row in result
         ]
 
+    async def list_all_sessions(self, limit: int = 100) -> list[dict]:
+        """Every owner's sessions, for admins. Grouped by owner *and* session id:
+        two keys may use the same session id, and their histories never merge."""
+        stmt = (
+            select(
+                ConversationMessage.api_key_id,
+                ConversationMessage.session_id,
+                func.count(ConversationMessage.id).label("message_count"),
+                func.max(ConversationMessage.created_at).label("last_message_at"),
+            )
+            .group_by(ConversationMessage.api_key_id, ConversationMessage.session_id)
+            .order_by(desc("last_message_at"))
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [
+            {
+                "api_key_id": row.api_key_id,
+                "session_id": row.session_id,
+                "message_count": row.message_count,
+                "last_message_at": row.last_message_at.isoformat() if row.last_message_at else None,
+            }
+            for row in result
+        ]
+
 
 class SummaryRepository:
     def __init__(self, session: AsyncSession) -> None:

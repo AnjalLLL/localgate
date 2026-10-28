@@ -4,6 +4,138 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — 2026-10-28 — the agent & benchmark release
+
+The biggest update so far. `localgate code` was rebuilt around **measured** reliability on
+small local models. The new `localgate bench agent` (11 tasks checked on disk) drove the work:
+with qwen2.5-coder:7b on Ollama, the first cut of the rebuilt agent scored **5/11 (45%)**; after
+fixing what each failure trace showed, it scores **10–11 of 11 (91–100%)** across repeated runs.
+Alongside it:
+context management that keeps the original goal, web search with citations, sandboxed commands,
+sub-agent roles, local voice, viewable API keys, and a redesigned dashboard.
+
+**Upgrading:** migrations `0005` and `0006` run automatically on start. Voice needs the new extra:
+`pip install 'localgate[voice]'`.
+
+
+### Added
+
+- **Reliable context on Ollama:** the agent sends `num_ctx` through Ollama's native `/api/chat`
+  (translated to and from the OpenAI shape), so long sessions are no longer silently truncated
+  from the front. Configure with `LOCALGATE_AGENT_NUM_CTX`.
+- **Session ledger and compaction:** the original goal, current request, files read and changed,
+  decisions, constraints, to-dos and last error are pinned after the system prompt and stored per
+  owner and session (migration `0005`). History is compacted against the budget cheapest step
+  first, keeping user messages word for word. New REPL commands: `/compact [focus]` and
+  `/ledger`. `/context` now shows a breakdown.
+- **Tools:** `edit_file` (exact-snippet replacement), paged `read_file`, `todo_write`,
+  `fetch_url` (public hosts only, robots.txt respected) and `run_command`, which runs only inside
+  an OS sandbox (macOS sandbox-exec, Linux bubblewrap, or Docker/Podman on any OS, including
+  Windows). Also SEARCH/REPLACE-block parsing, argument validation against tool schemas, parallel
+  read-only calls, and a grammar-constrained JSON tool mode for Ollama models without native tools.
+- **Sub-agent roles:** built-in `explorer`, `researcher` and `reviewer`, plus Markdown-defined
+  roles in `~/.config/localgate/agents/` and `.localgate/agents/`, each with its own tools and
+  optional model. `/agents` lists them.
+- **Search provider chain:** `searxng`, `openserp`, `brave`, `tavily`, `duckduckgo` with ordered
+  fallback and a short-lived cache.
+- **Web search in chat:** `"localgate": {"web_search": true}` on `/v1/chat/completions` returns an
+  answer with numbered `localgate.citations`.
+- **`localgate bench agent`:** a tool-calling benchmark whose results are checked on disk.
+- **Logging:** durable, redacted logs of every agent tool call, recording owner, run and model.
+- **Dashboard rebuild:** cookie sign-in (the admin key is no longer stored in the browser) with CSRF
+  protection and a strict CSP. Pages: overview, chat with web search, keys, usage, sessions with
+  the ledger and a memory inspector, agent runs, models, and settings with a search test.
+- **CI:** tests now run on macOS and Windows as well as Linux.
+- **Viewable API keys:** new keys keep an AES-GCM-encrypted copy (key derived from the admin key,
+  migration `0006`), so an admin can view them again with **Show key** in the dashboard or
+  `POST /admin/keys/{id}/reveal`. Changing the admin key makes the old copies unreadable. Nothing
+  is stored while the default admin key is in use. Keys created before this can't be shown. To
+  disable, set `LOCALGATE_API_KEY_REVEAL_ENABLED=false`.
+- **Local voice** (`pip install 'localgate[voice]'`): Piper text-to-speech and faster-whisper
+  speech-to-text.
+  - **API:** `POST /v1/audio/speech`, `POST /v1/audio/transcriptions` (OpenAI-compatible) and
+    `GET /v1/audio/voices`.
+  - **Dashboard:** microphone dictation and spoken replies, falling back to browser speech.
+  - **CLI:** `localgate voice status|download|say|listen` and `localgate code --voice` with
+    `/voice` and `/listen`.
+  - **Compatibility:** works around espeak-ng's path-length limit and faster-whisper's
+    incompatibility with PyAV 19.
+- **Dashboard UX pass** (reviewed with screenshots in headless Chrome, light and dark, desktop and
+  phone):
+  - **Layout:** cards in a row no longer stagger, and the page spacing is consistent.
+  - **Icons:** SVG navigation icons and a favicon.
+  - **Times:** relative times with the full timestamp on hover. UTC timestamps without an offset
+    were shown hours off outside UTC, which is now fixed.
+  - **Chat:** a welcome screen with suggestions, an API-key banner, the web-search hint only when
+    it's on, an auto-growing composer, an SVG mic button, and removable conversations.
+  - **Models and sessions:** embedding-only models are labeled and left out of the chat picker,
+    and sessions show API key names.
+- **Dashboard redesign:** chat-first, and the console is reorganised.
+  - **Chat:** a reading-first layout with a greeting and centered composer on new chats, a reading
+    column, serif answers with full Markdown (headings, nested lists, quotes, links), code blocks
+    with copy buttons, and copy, read-aloud and retry under each answer.
+  - **Composer:** model picker, Web search and Voice toggles, dictation and send/stop all live
+    inside it.
+  - **Context:** the recent turns are sent with each message, so the model follows the thread.
+  - **Sidebar:** New chat and Recents (with per-conversation URLs), plus a Console section. API
+    keys are set inline on first use.
+  - **Agent runs:** each task is shown as an expandable timeline of tool steps with status,
+    duration, files changed and errors.
+  - **Look:** Localgate's own "Jade & Ink" theme (jade accent on cool paper, or bright jade on
+    ink in dark mode, with amber as the second chart colour), a new gate logo, and bundled
+    open-license fonts (Inter, Source Serif 4, JetBrains Mono; see `FONTS-LICENSE.txt`).
+- **Settings redesign:** sections with a sticky side navigation.
+  - **Appearance:** a colour-mode switch and a theme picker.
+  - **Chat:** API key with show/hide and **Test key**, which shows that key's usage, plus switches
+    for default model, web search and voice.
+  - **Server:** gateway configuration as readable cards (inference, memory, coding agent, web,
+    voice, security); `/admin/config` now also reports agent, search, voice and security
+    settings, never the keys themselves.
+  - **Database and web search:** connection and provider tests.
+  - **Data & account:** export, clear Recents, and sign out.
+- **Six colour themes:** Jade (default), Lagoon, Iris, Rose, Sunrise and Graphite, each with
+  light and dark variants. Neutrals take a subtle tint from the accent.
+- **README:** a new demo video and GIF (a real `localgate code` session plus a dashboard tour),
+  and page-by-page screenshots of the new design, replacing the old images.
+- **Agent fixes from recording real sessions:**
+  - `create_file` on an existing file is refused (pointing to `edit_file`) instead of prompting
+    to overwrite.
+  - Double-escaped file contents (`\n` text instead of newlines) are repaired.
+  - `read_file` on a folder points to `list_directory`.
+  - A verbatim repeat of a read-only call or command with no file changed since returns the
+    earlier result instead of re-running it.
+  - A task that asks for a change but ends with none attempted gets one nudge naming the file.
+  - Tool results echoed back as an answer count as no answer.
+  - `todo_write` is now opt-in (`LOCALGATE_AGENT_TODO_TOOL`).
+  - Duplicate tool-call lines in the terminal are gone, and "files written" no longer repeats
+    a file.
+- **Chat history:** opening a conversation that belongs to a different API key now shows it
+  read-only through the admin session, instead of "no stored history".
+
+### Changed
+
+- New system prompt that no longer forces one JSON tool call per reply. The loop no longer
+  injects "next step" or "you have read enough" turns. Stuck-loop detection now looks for repeated
+  identical calls or consecutive failures. Large tool results are capped; assistant prose is no
+  longer cut at 2000 characters.
+- Sub-agents now inherit search, extra tools, timeouts (`tool_timeout_delegate` is now applied)
+  and tool logging.
+- File writes keep an existing file's CRLF/LF line endings and write identical bytes on every OS.
+- Tuned against `localgate bench agent` with qwen2.5-coder:7b. The score went from 5/11 to 9–11/11
+  across repeated runs; the changes below are what got it there.
+  - **Read rules:** files shown in the first prompt count as read. `edit_file` no longer needs a
+    prior read, because its exact match proves the model knows the content. A refused full rewrite
+    or delete now reads the file for the model and asks it to retry.
+  - **Edit feedback:** an ambiguous `edit_file` returns a complete, unique old/new pair for each
+    match. After an edit that removes a name, the result lists where that name is still used.
+  - **Syntax checks:** Python and JSON files are checked after every write; a newly introduced
+    syntax error is reported to the model.
+  - **Unfinished work:** one corrective turn is added when the model claims success after failed
+    edits, leaves a file broken, describes a next step instead of doing it, names a file it didn't
+    change, or replies with nothing.
+  - **Temperature:** the agent now samples at 0.2 by default (`LOCALGATE_AGENT_TEMPERATURE`)
+    instead of Ollama's 0.8.
+
 ## [0.10.8] — 2026-09-20
 
 ### Fixed

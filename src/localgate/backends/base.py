@@ -54,6 +54,11 @@ class InferenceBackend(ABC):
         """
         return None
 
+    async def capabilities(self, model: str) -> list[str] | None:
+        """What ``model`` can do (e.g. ``["completion", "tools", "embedding"]``) if
+        the backend reports it cheaply, else ``None`` (unknown)."""
+        return None
+
     async def context_window(self, model: str) -> int | None:
         """``model``'s context window in tokens, if the backend can report it
         cheaply. ``None`` means unknown — callers should degrade to showing raw

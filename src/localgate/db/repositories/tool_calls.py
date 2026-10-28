@@ -26,9 +26,16 @@ class ToolCallRepository:
         duration_ms: int,
         error: str | None = None,
         timed_out: bool = False,
+        *,
+        api_key_id: str | None = None,
+        run_id: str | None = None,
+        model: str | None = None,
     ) -> ToolCallLog:
         """Create a new tool call log entry."""
         log = ToolCallLog(
+            api_key_id=api_key_id,
+            run_id=run_id,
+            model=model,
             session_id=session_id,
             tool_name=tool_name,
             arguments=arguments,
@@ -49,6 +56,23 @@ class ToolCallRepository:
             .where(ToolCallLog.session_id == session_id)
             .order_by(ToolCallLog.created_at.desc())
             .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def recent_for_owner(self, api_key_id: str, limit: int = 200) -> list[ToolCallLog]:
+        """The owner's most recent tool calls across sessions, newest first."""
+        result = await self.session.execute(
+            select(ToolCallLog)
+            .where(ToolCallLog.api_key_id == api_key_id)
+            .order_by(ToolCallLog.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def recent(self, limit: int = 200) -> list[ToolCallLog]:
+        """Every owner's most recent tool calls — admin views only."""
+        result = await self.session.execute(
+            select(ToolCallLog).order_by(ToolCallLog.created_at.desc()).limit(limit)
         )
         return list(result.scalars().all())
 

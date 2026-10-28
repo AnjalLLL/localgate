@@ -14,28 +14,46 @@ convenience wrapper around a single-turn session, used by the single-shot
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from localgate.agent.context import (
+    CompactionReport,
+    ContextManager,
+    SessionLedger,
+    ledger_message,
+    make_llm_ledger_updater,
+)
 from localgate.agent.mcp import McpRegistry, is_mcp_tool_name
 from localgate.agent.tool_executor import (
     ToolCallTracker,
     execute_tool_call_with_timeout,
 )
 from localgate.agent.tools import (
-    DELEGATE_TASK_SCHEMA,
+    DEFAULT_SUB_AGENT_EXTRAS,
+    MUTATING_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
+    SYNTAX_WARNING,
     TOOL_SCHEMAS,
     ToolCallResult,
+    apply_edit,
+    delegate_task_schema,
     ensure_visible,
     execute_tool_call,
     list_directory,
     read_file,
+    read_file_page,
     resolve_within,
+    search_files,
+    unescape_text_arguments,
+    validate_arguments,
 )
 from localgate.agent.websearch import WEB_SEARCH_SCHEMA, SearchFn
 from localgate.backends.base import InferenceBackend
@@ -53,14 +71,21 @@ def _normalize_backend_messages(messages: list[dict[str, Any]]) -> list[dict[str
 
 
 SYSTEM_PROMPT = (
-    "You are a coding agent. Execute tasks by calling tools.\n"
-    "RULES:\n"
-    "- Call ONE tool per response. No explanation, no markdown, no code blocks.\n"
-    "- read_file BEFORE update_file, delete_file, or overwriting with write_file.\n"
-    "- Write COMPLETE code. No placeholders like '/* add here */' or '...'.\n"
-    "- When finished, say only: Done: <1 sentence summary>\n"
-    'FORMAT: {"name": "tool_name", "arguments": {...}}\n'
-    "Respond with ONLY the JSON above. Nothing else."
+    "You are a coding agent working inside one project directory. You act only "
+    "through tools; a change you did not make with a tool did not happen.\n"
+    "How to work:\n"
+    "- Find the relevant code first with search_files, list_directory and read_file. "
+    "You may call several read-only tools at once.\n"
+    "- To change an existing file: read it, then call edit_file with an exact snippet "
+    "copied from the file. Use create_file for new files. Use write_file only when "
+    "most of a file changes.\n"
+    "- Write complete, working code. Never leave placeholders such as '...' or "
+    "'TODO: implement'.\n"
+    "- If a tool returns an error, read it and fix the call instead of repeating it.\n"
+    "- When the task is done, reply in plain text with a short summary of what you "
+    "changed and anything left to do.\n"
+    "If native tool calling is unavailable, reply with exactly one JSON object: "
+    '{"name": "tool_name", "arguments": {...}}'
 )
 
 #: Appended to `SYSTEM_PROMPT` only when the corresponding tool is actually on
@@ -97,6 +122,20 @@ _MUTATION_REQUEST_RE = re.compile(
 )
 #: Matches a JSON object embedded anywhere in prose — used as a fallback when the
 #: whole-string parse fails but the model clearly emitted a tool call inside text.
+#: A reply announcing work still to do ("Next, I need to update main.py") rather
+#: than finishing — small models often stop there without making the call.
+_NEXT_STEP_RE = re.compile(
+    r"\b(next,? (i|we)('ll| will| need to| should)|now (i|we)('ll| will| need to)|"
+    r"i('ll| will) now|let me now|then (i|we)('ll| will| need to))\b",
+    re.IGNORECASE,
+)
+#: Calls whose result can only change if a file changes (or, for search, not at all
+#: within one task) — repeating one verbatim is a loop, not progress.
+_REPEATABLE_TOOLS = READ_ONLY_TOOL_NAMES | {"run_command", "web_search", "fetch_url"}
+#: A model echoing a tool result back as its "answer" (seen with small models).
+_ECHOED_TOOL_RESPONSE_RE = re.compile(r"<tool_response>.*?(</tool_response>|$)", re.DOTALL)
+#: Path-like tokens in prose ("main.py", "src/app.ts") for `_claimed_but_unchanged`.
+_PATH_TOKEN_RE = re.compile(r"[\w./-]*\w\.[A-Za-z]{1,8}\b")
 _EMBEDDED_JSON_RE = re.compile(
     r'\{[^{}]*"name"\s*:\s*"[^"]+?"[^{}]*"arguments"\s*:\s*\{', re.DOTALL
 )
@@ -215,7 +254,13 @@ def _as_synthetic_tool_call(content: str, known_names: frozenset[str]) -> dict[s
             if result is not None:
                 return result
 
-    # Fourth: extract a named code block as a write_file call.
+    # Fourth: Aider-style SEARCH/REPLACE blocks are an edit_file call in prose.
+    if "edit_file" in known_names:
+        edits = _extract_search_replace_edits(content)
+        if edits:
+            return edits[0]
+
+    # Fifth: extract a named code block as a write_file call.
     # Models often say "### `contact.html`\n```html\n...code...\n```"
     # which IS a write_file action expressed as prose.
     if "write_file" in known_names:
@@ -267,6 +312,44 @@ def _extract_code_block_as_write(content: str) -> dict[str, Any] | None:
             },
         }
     return None
+
+
+#: A SEARCH/REPLACE block — the edit format Aider popularized, which many coding
+#: models emit unprompted:
+#:
+#:     path/to/file.py
+#:     <<<<<<< SEARCH
+#:     old lines
+#:     =======
+#:     new lines
+#:     >>>>>>> REPLACE
+_SEARCH_REPLACE_RE = re.compile(
+    r"(?:^|\n)[`*# ]*([\w./\\-]+\.\w+)[`* ]*\s*\n(?:```\w*\s*\n)?"
+    r"<{5,9} ?SEARCH\s*\n(.*?)\n?={5,9}\s*\n(.*?)\n?>{5,9} ?REPLACE",
+    re.DOTALL,
+)
+
+
+def _extract_search_replace_edits(content: str) -> list[dict[str, Any]]:
+    """Every SEARCH/REPLACE block in ``content`` as an edit_file call."""
+    edits: list[dict[str, Any]] = []
+    for match in _SEARCH_REPLACE_RE.finditer(content):
+        path, old, new = match.group(1).strip(), match.group(2), match.group(3)
+        if not old.strip():
+            continue
+        edits.append(
+            {
+                "id": f"synthetic-{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": "edit_file",
+                    "arguments": json.dumps(
+                        {"path": path.replace("\\", "/"), "old_string": old, "new_string": new}
+                    ),
+                },
+            }
+        )
+    return edits
 
 
 def _extract_all_code_blocks_as_writes(content: str) -> list[dict[str, Any]]:
@@ -390,12 +473,69 @@ async def _stream_completion(
     return message
 
 
+@dataclass
+class AsyncTool:
+    """A tool implemented outside `tools.py` — web fetch, sandboxed commands,
+    the to-do list — offered to the model only when it is configured."""
+
+    schema: dict[str, Any]
+    run: Callable[[dict[str, Any]], Awaitable[str]]
+    #: Asked before each call: (tool name, arguments) -> proceed? ``None`` = never ask.
+    confirm: Callable[[str, dict[str, Any]], bool] | None = None
+    read_only: bool = True
+    timeout: float | None = None
+    #: Appended to the system prompt while the tool is offered.
+    guidance: str = ""
+
+    @property
+    def name(self) -> str:
+        return str(self.schema["function"]["name"])
+
+
+@dataclass
+class ToolLogEntry:
+    """One executed tool call, for durable logging. Arguments are already
+    redacted to a one-line summary: file contents never reach the log."""
+
+    run_id: str
+    session_id: str
+    model: str
+    tool_name: str
+    arguments: dict[str, Any]
+    success: bool
+    duration_ms: int
+    error: str | None = None
+    timed_out: bool = False
+
+
+#: Receives each :class:`ToolLogEntry` — e.g. `AgentMemory.record_tool_call`.
+OnToolLog = Callable[[ToolLogEntry], Awaitable[None]]
+
+#: Tool results longer than this are cut, with a note, before entering history.
+MAX_TOOL_RESULT_CHARS = 16_000
+#: Agent sampling temperature when no settings are given (see `agent_temperature`).
+DEFAULT_TEMPERATURE = 0.2
+#: Context budget used when the model's window is unknown.
+DEFAULT_NUM_CTX = 16_384
+
+
+def _cap_tool_result(content: str) -> str:
+    if len(content) <= MAX_TOOL_RESULT_CHARS:
+        return content
+    omitted = len(content) - MAX_TOOL_RESULT_CHARS
+    return (
+        content[:MAX_TOOL_RESULT_CHARS]
+        + f"\n[... {omitted:,} more characters omitted; narrow the request to see them]"
+    )
+
+
 class AgentSession:
     """One conversation with the model, across as many turns as the caller sends.
 
     A fresh session starts with just the system prompt; each call to :meth:`send`
     appends a user turn, runs the tool-call loop to completion, and returns the
-    model's final text. History accumulates in ``self.messages`` until :meth:`reset`.
+    model's final text. History accumulates in ``self.messages`` until :meth:`reset`,
+    compacted against the context budget as it grows (see `agent/context.py`).
     """
 
     def __init__(
@@ -420,6 +560,12 @@ class AgentSession:
         auto_read: bool = False,
         settings: Any | None = None,
         session_id: str | None = None,
+        extra_tools: list[AsyncTool] | None = None,
+        num_ctx: int | None = None,
+        native_tools: bool = True,
+        on_tool_log: OnToolLog | None = None,
+        ledger: SessionLedger | None = None,
+        agent_roles: dict[str, Any] | None = None,
     ) -> None:
         self.backend = backend
         self.model = model
@@ -440,8 +586,10 @@ class AgentSession:
         #: a delegated sub-agent's own session (see `_run_delegated_task`), which
         #: is the depth-1 cap: a sub-agent cannot itself spawn a sub-agent.
         self.allow_delegation = allow_delegation
+        #: Named sub-agent roles (`agent/roles.py`), offered through delegate_task.
+        self.agent_roles: dict[str, Any] = dict(agent_roles or {})
         if allow_delegation:
-            self.tool_schemas.append(DELEGATE_TASK_SCHEMA)
+            self.tool_schemas.append(delegate_task_schema(self.agent_roles))
         #: Executes `web_search`, if the CLI configured a provider — `None` means
         #: the tool isn't in `self.tool_schemas` at all, not that it silently no-ops.
         self.search_fn = search_fn
@@ -452,15 +600,34 @@ class AgentSession:
         self.mcp_registry = mcp_registry
         if mcp_registry is not None:
             self.tool_schemas.extend(mcp_registry.tool_schemas)
+        self.extra_tools: dict[str, AsyncTool] = {t.name: t for t in extra_tools or []}
+        self.tool_schemas.extend(t.schema for t in self.extra_tools.values())
         self.tool_executor = tool_executor if tool_executor is not None else execute_tool_call
         self.augment = augment
         self.auto_read = auto_read
         self.settings = settings
         self.session_id = session_id or str(uuid.uuid4())
+        #: Explicit context window to request; resolved from the model on first send.
+        self.num_ctx = num_ctx
+        self._num_ctx_resolved = num_ctx is not None
+        #: False for models without native tool calling: tools are described in the
+        #: prompt and replies are grammar-constrained to a JSON tool call instead.
+        self.native_tools = native_tools
+        self.on_tool_log = on_tool_log
+        self.ledger = ledger or SessionLedger()
+        self.context: ContextManager | None = None
+        self.last_compaction: CompactionReport | None = None
+        self.run_id = ""
         self.tool_tracker = ToolCallTracker()
         self._task_tool_calls = 0
         self._task_mutations = 0
         self._read_paths: set[str] = set()
+        self._last_mutation_error: str | None = None
+        self._broken_files: set[str] = set()
+        self._task_changed_paths: set[str] = set()
+        self._task_mutation_attempts = 0
+        self._seen_results: dict[tuple[str, str], tuple[int, str]] = {}
+        self._task_is_mutation = False
         self._known_tool_names = frozenset(s["function"]["name"] for s in self.tool_schemas)
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt()}]
 
@@ -472,11 +639,86 @@ class AgentSession:
             prompt += _DELEGATE_GUIDANCE
         if self.search_fn is not None:
             prompt += _SEARCH_GUIDANCE
+        for tool in self.extra_tools.values():
+            prompt += tool.guidance
+        if not self.native_tools:
+            prompt += _json_tool_protocol(self.tool_schemas)
         return prompt
 
     def reset(self) -> None:
         """Drop history, starting a new conversation in the same session."""
         self.messages = [{"role": "system", "content": self.system_prompt()}]
+        self.ledger = SessionLedger()
+
+    def switch_model(self, model: str, *, native_tools: bool = True) -> None:
+        """Change model; the context window and tool protocol are re-derived."""
+        self.model = model
+        self.native_tools = native_tools
+        self.num_ctx = None
+        self._num_ctx_resolved = False
+        self.context = None
+        self.refresh_tools()
+
+    def refresh_tools(self) -> None:
+        """Recompute derived state after `tool_schemas` changes."""
+        self._known_tool_names = frozenset(s["function"]["name"] for s in self.tool_schemas)
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = {"role": "system", "content": self.system_prompt()}
+
+    # -- context window -------------------------------------------------------------
+
+    async def _resolve_context(self) -> None:
+        """Pick the context window once: the model's own maximum, capped by the
+        configured agent budget so a 128K-capable model doesn't reserve 128K of
+        VRAM. Only Ollama needs it sent per request; other servers fix it at load."""
+        if self._num_ctx_resolved:
+            if self.context is None and self.num_ctx:
+                self.context = self._make_context_manager(self.num_ctx)
+            return
+        self._num_ctx_resolved = True
+        cap = getattr(self.settings, "agent_num_ctx", None) or DEFAULT_NUM_CTX
+        try:
+            window = await self.backend.context_window(self.model)
+        except Exception:  # noqa: BLE001 — unknown window is the safe answer
+            window = None
+        if window:
+            self.num_ctx = min(window, cap)
+        elif self.backend.name == "ollama":
+            self.num_ctx = cap
+        budget = self.num_ctx or window
+        if budget:
+            self.context = self._make_context_manager(budget)
+
+    def _make_context_manager(self, budget: int) -> ContextManager:
+        options = {"num_ctx": self.num_ctx} if self.num_ctx else None
+        updater = make_llm_ledger_updater(self.backend, self.model, options)
+        # Leave room for the reply itself.
+        return ContextManager(max(1024, budget - 4096), updater=updater)
+
+    def _request_options(self) -> dict[str, Any]:
+        return {"num_ctx": self.num_ctx} if self.num_ctx else {}
+
+    async def compact(self, focus: str | None = None, *, force: bool = True) -> CompactionReport:
+        """Compact history now (the `/compact` command), or when over budget."""
+        await self._resolve_context()
+        manager = self.context or self._make_context_manager(DEFAULT_NUM_CTX)
+        self.messages, report = await manager.compact(
+            self.messages, self.tool_schemas, self.ledger, focus=focus, force=force
+        )
+        self.last_compaction = report
+        return report
+
+    def context_usage(self) -> int:
+        return ContextManager.usage(self.messages, self.tool_schemas, self.ledger)
+
+    def _outgoing(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """History plus the pinned ledger, right after the system prompt."""
+        pinned = ledger_message(self.ledger)
+        if pinned is None or not messages or messages[0].get("role") != "system":
+            return messages
+        return [messages[0], pinned, *messages[1:]]
+
+    # -- the turn loop ---------------------------------------------------------------
 
     def _build_project_context(self) -> str:
         """Build a compact project context to inject on the first turn."""
@@ -510,8 +752,26 @@ class AgentSession:
                 break
             total_chars += len(content)
             parts.append(f"\nContents of {entry}:\n```\n{content}\n```")
+            # The model has seen it in full, so it counts as read for edits.
+            self._read_paths.add(entry)
 
         return "\n".join(parts)
+
+    def _payload(self, outgoing: list[dict[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": _normalize_backend_messages(outgoing),
+            "max_tokens": 4096,
+            "temperature": getattr(self.settings, "agent_temperature", DEFAULT_TEMPERATURE),
+        }
+        if self.native_tools:
+            payload["tools"] = self.tool_schemas
+        else:
+            payload["format"] = _json_tool_format(self._known_tool_names)
+        options = self._request_options()
+        if options:
+            payload["options"] = options
+        return payload
 
     async def send(self, user_input: str) -> str:
         """Run one user turn to completion and return the model's final reply.
@@ -519,12 +779,23 @@ class AgentSession:
         Output is buffered silently during the tool loop — only tool events
         (via on_event) are shown. The final answer is streamed at the end.
         """
+        await self._resolve_context()
         require_tool_evidence = self.auto_read and bool(_MUTATION_REQUEST_RE.search(user_input))
+        self.run_id = uuid.uuid4().hex
         self.tool_tracker = ToolCallTracker()
         self._task_tool_calls = 0
         self._task_mutations = 0
         self._read_paths = set()
+        self._last_mutation_error = None
+        self._broken_files = set()
+        self._task_changed_paths = set()
+        self._task_mutation_attempts = 0
+        self._seen_results = {}
+        self._task_is_mutation = bool(_MUTATION_REQUEST_RE.search(user_input))
+        self.ledger.observe_user(user_input)
         prose_without_tools = 0
+        unverified_claim_nudged = False
+        empty_reply_nudged = False
         if len(self.messages) == 1:
             context = self._build_project_context()
             if context:
@@ -537,15 +808,17 @@ class AgentSession:
             pass
 
         for _ in range(self.max_turns):
-            outgoing = await self.augment(self.messages) if self.augment else self.messages
-            payload = {
-                "model": self.model,
-                "messages": _normalize_backend_messages(outgoing),
-                "tools": self.tool_schemas,
-                "max_tokens": 4096,
-            }
-            # Buffer silently — don't stream model prose to user
-            if self.on_token is not None:
+            if self.context is not None and self.context.needs_compaction(
+                self.messages, self.tool_schemas, self.ledger
+            ):
+                report = await self.compact(force=False)
+                if report.changed and self.on_event is not None:
+                    self.on_event(report.describe())
+
+            history = self._outgoing(self.messages)
+            outgoing = await self.augment(history) if self.augment else history
+            payload = self._payload(outgoing)
+            if self.on_token is not None and self.native_tools:
                 message = await _stream_completion(
                     self.backend, payload, _noop, self._known_tool_names
                 )
@@ -554,33 +827,32 @@ class AgentSession:
                 message = response["choices"][0]["message"]
 
             content = message.get("content") or ""
-            # Truncate only prose without code blocks — code blocks need full content
-            if len(content) > 2000 and "```" not in content:
-                message["content"] = content[:2000]
-                content = message["content"]
-
             tool_calls = message.get("tool_calls") or []
+            if not self.native_tools and not tool_calls:
+                final, constrained_call = _parse_constrained_reply(content, self._known_tool_names)
+                if constrained_call is not None:
+                    tool_calls = [constrained_call]
+                    message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+                elif final is not None:
+                    content = final
+                    message = {"role": "assistant", "content": final}
             if not tool_calls and content:
                 synthetic = _as_synthetic_tool_call(content, self._known_tool_names)
                 if synthetic is not None:
-                    # If it's a code-block write, grab ALL code blocks as writes
-                    if (
-                        synthetic["function"]["name"] == "write_file"
-                        and "write_file" in self._known_tool_names
-                    ):
+                    synthetic_name = synthetic["function"]["name"]
+                    if synthetic_name == "edit_file":
+                        tool_calls = _extract_search_replace_edits(content) or [synthetic]
+                    elif synthetic_name == "write_file":
                         all_writes = _extract_all_code_blocks_as_writes(content)
                         tool_calls = all_writes if len(all_writes) > 1 else [synthetic]
                     else:
                         tool_calls = [synthetic]
-                    if self.on_event is not None:
-                        for tc in tool_calls:
-                            fn = tc["function"]
-                            self.on_event(f"{fn['name']}(...)")
                     message = {
                         "role": "assistant",
                         "content": None,
                         "tool_calls": tool_calls,
                     }
+            message.pop("_early_stopped", None)
 
             self.messages.append(message)
 
@@ -603,54 +875,123 @@ class AgentSession:
                         "The selected model answered without using project tools twice; "
                         "choose a model with reliable tool-calling support."
                     )
+                # A model that ends right after failed edits (or leaving a file that
+                # no longer parses) usually still claims success. Tell it once what
+                # actually happened, with the error, before accepting its answer.
+                problem = self._unfinished_work(content)
+                answer_text = _ECHOED_TOOL_RESPONSE_RE.sub("", content).strip()
+                if not answer_text and self._task_tool_calls and not empty_reply_nudged:
+                    # An empty reply mid-task is a stall, not an answer.
+                    empty_reply_nudged = True
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": "Your reply was empty. Continue the task with a tool "
+                            "call, or give your final answer.",
+                        }
+                    )
+                    continue
+                if problem and not unverified_claim_nudged:
+                    unverified_claim_nudged = True
+                    self.messages.append({"role": "user", "content": problem})
+                    continue
                 # Final answer — show it to user
                 if self.on_token and content:
                     self.on_token(content)
                 return content
 
-            for call in tool_calls:
-                self.messages.append(await self._run_tool_call(call))
+            for result in await self._run_tool_calls(tool_calls):
+                self.messages.append(result)
 
-            # Count read/write operations
-            read_count = sum(
-                1
-                for name, success, _ in self.tool_tracker.history
-                if success and name in READ_ONLY_TOOL_NAMES
-            )
-            write_count = self._task_mutations
-
-            # Check for stuck loop before continuing
+            # The only nudge left: a model repeating the same call (or failing
+            # over and over) is told so once, instead of being pushed every turn.
             if self.tool_tracker.is_stuck_loop():
                 self.messages.append(
                     {
                         "role": "user",
                         "content": (
-                            "PROGRESS CHECK: You've repeated similar actions without completing "
-                            "the task. Either: 1) Show final result now, 2) Ask user for "
-                            "clarification, 3) Try a completely different approach. "
-                            "Do NOT repeat previous actions."
+                            "PROGRESS CHECK: you are repeating the same tool call or every "
+                            "recent call failed. Use a different approach, ask the user for "
+                            "clarification, or give your final answer now."
                         ),
                     }
                 )
-            # After enough reading, push model to start writing
-            elif read_count >= 4 and write_count == 0:
-                self.messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "You have read enough. Now call write_file to create/update files. "
-                            'JSON only: {"name": "write_file", "arguments": {"path": ..., '
-                            '"content": ...}}'
-                        ),
-                    }
-                )
-            else:
-                self.messages.append({"role": "user", "content": "Next step. One tool call only."})
+                self.tool_tracker = ToolCallTracker()
 
         raise AgentTurnLimitExceeded(
             f"Stopped after {self.max_turns} turns without a final answer — "
             "the model may be looping."
         )
+
+    async def _run_tool_calls(self, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Run one turn's calls. Built-in read-only calls with no confirmation
+        step run concurrently; anything that writes, asks, or has side effects
+        runs in order so confirmations and checkpoints stay sequential."""
+        if len(calls) > 1 and all(
+            (call.get("function") or {}).get("name") in READ_ONLY_TOOL_NAMES for call in calls
+        ):
+            return list(await asyncio.gather(*(self._run_tool_call(call) for call in calls)))
+        return [await self._run_tool_call(call) for call in calls]
+
+    def _claimed_but_unchanged(self, answer: str) -> list[str]:
+        """Project files an edit task's final answer names but didn't change.
+
+        Small models often finish one file of a multi-file change and report
+        all of them done. Only checked once something was changed, so a plain
+        question about a file is never second-guessed.
+        """
+        if self._task_mutations == 0 or not self._task_is_mutation:
+            return []
+        found: list[str] = []
+        for token in sorted(set(_PATH_TOKEN_RE.findall(answer))):
+            path = token.strip("`'\".,:;()")
+            if path in self._task_changed_paths or path in found:
+                continue
+            try:
+                exists = resolve_within(self.root, path).is_file()
+            except ValueError:
+                continue
+            if exists:
+                found.append(path)
+        return found
+
+    def _unfinished_work(self, final_answer: str = "") -> str | None:
+        if self._broken_files:
+            names = ", ".join(sorted(self._broken_files))
+            return (
+                f"CHECK: {names} still has a syntax error, so the task is not done. Read "
+                "it and fix it, or tell the user plainly that it is broken."
+            )
+        unchanged = self._claimed_but_unchanged(final_answer)
+        if unchanged:
+            names = ", ".join(unchanged)
+            return (
+                f"CHECK: your answer mentions {names}, but {names} was not changed in this "
+                "task. Do not rely on memory: call read_file on it now, and if it still "
+                "needs the change, make it with edit_file. Then give your final answer."
+            )
+        if self._task_is_mutation and _NEXT_STEP_RE.search(final_answer):
+            return (
+                "You described a next step instead of doing it. Do it now with a tool "
+                "call; give your final answer only when every step is done."
+            )
+        if self._task_is_mutation and self._task_mutation_attempts == 0:
+            target = next(
+                (p for p in reversed(self.ledger.files_read) if p in self._read_paths), None
+            )
+            first_step = f" Start with {target}: call edit_file on it now." if target else ""
+            return (
+                "CHECK: this task asked for a change, but no file has been changed yet. Do not "
+                "describe a plan — make the change with a tool call." + first_step + " If no "
+                "change is needed, say so plainly and explain why."
+            )
+        if self._task_mutations == 0 and self._last_mutation_error:
+            return (
+                "CHECK: no file was changed in this task; your last change failed with: "
+                f"{self._last_mutation_error[:300]}\nRetry it correctly, or tell the user "
+                "plainly that the change was not made."
+            )
+        return None
 
     def _has_done_work(self) -> bool:
         """Check if any tool calls have been made in this conversation."""
@@ -670,51 +1011,8 @@ class AgentSession:
                 return entry
         return None
 
-    def _auto_read_first_file(self) -> None:
-        """Pre-read the first relevant file so the model has code context."""
-        first = self._pick_first_file()
-        if not first:
-            return
-        try:
-            content = read_file(self.root, first)
-        except (OSError, ValueError):
-            return
-        call_id = f"auto-{uuid.uuid4().hex[:8]}"
-        self.messages.append(
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": "read_file",
-                            "arguments": json.dumps({"path": first}),
-                        },
-                    }
-                ],
-            }
-        )
-        self.messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": "read_file",
-                "content": content,
-            }
-        )
-        self._read_paths.add(first)
-        if self.on_event is not None:
-            self.on_event(f"read_file(path={first!r})")
-
-    async def _force_read(self, path: str) -> None:
-        """Force-inject a read_file when model refuses to use tools."""
-        try:
-            content = read_file(self.root, path)
-        except (OSError, ValueError):
-            return
-        call_id = f"force-{uuid.uuid4().hex[:8]}"
+    def _inject_read(self, path: str, content: str, prefix: str) -> None:
+        call_id = f"{prefix}-{uuid.uuid4().hex[:8]}"
         self.messages.append(
             {
                 "role": "assistant",
@@ -736,27 +1034,103 @@ class AgentSession:
                 "role": "tool",
                 "tool_call_id": call_id,
                 "name": "read_file",
-                "content": content,
+                "content": _cap_tool_result(content),
             }
         )
         self._read_paths.add(path)
+        self.ledger.observe_tool("read_file", {"path": path}, True, "")
         if self.on_event is not None:
             self.on_event(f"read_file(path={path!r})")
+
+    def _auto_read_first_file(self) -> None:
+        """Pre-read the first relevant file so the model has code context."""
+        first = self._pick_first_file()
+        if not first:
+            return
+        try:
+            content = read_file(self.root, first)
+        except (OSError, ValueError):
+            return
+        self._inject_read(first, content, "auto")
+
+    async def _force_read(self, path: str) -> None:
+        """Force-inject a read_file when model refuses to use tools."""
+        try:
+            content = read_file(self.root, path)
+        except (OSError, ValueError):
+            return
+        self._inject_read(path, content, "force")
         self.messages.append(
             {
                 "role": "user",
-                "content": (
-                    f"I read {path} for you. Now write_file to make changes. "
-                    "JSON only, no explanation."
-                ),
+                "content": f"I read {path} for you. Now make the change with a tool call.",
             }
         )
 
+    async def _log_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        success: bool,
+        started: float,
+        *,
+        error: str | None = None,
+        timed_out: bool = False,
+    ) -> None:
+        self.tool_tracker.record(name, success, arguments)
+        if self.on_tool_log is None:
+            return
+        entry = ToolLogEntry(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            model=self.model,
+            tool_name=name,
+            arguments=_summarize(arguments),
+            success=success,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            error=error[:500] if error else None,
+            timed_out=timed_out,
+        )
+        with contextlib.suppress(Exception):  # logging must never break a turn
+            await self.on_tool_log(entry)
+
     async def _run_tool_call(self, call: dict[str, Any]) -> dict[str, Any]:
+        result = await self._execute_tool_call(call)
+        result["content"] = _cap_tool_result(str(result.get("content") or ""))
+        name = (call.get("function") or {}).get("name", "")
+        if name in _REPEATABLE_TOOLS and not result["content"].startswith("You already made"):
+            arguments = _parse_arguments((call.get("function") or {}).get("arguments", ""))
+            key = (name, json.dumps(arguments, sort_keys=True))
+            self._seen_results[key] = (self._task_mutations, result["content"])
+        return result
+
+    async def _execute_tool_call(self, call: dict[str, Any]) -> dict[str, Any]:
         fn = call["function"]
         name = fn["name"]
         arguments = _parse_arguments(fn.get("arguments", ""))
+        started = time.monotonic()
         self._task_tool_calls += 1
+        if name in MUTATING_TOOL_NAMES or name == "delegate_task":
+            # Any attempt — even refused, declined or delegated — means the model did
+            # try to make the change, so the "nothing changed yet" check stays quiet.
+            self._task_mutation_attempts += 1
+
+        def reply(content: str) -> dict[str, Any]:
+            return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+
+        # The same read-only call (or command) again with no file changed since can only
+        # return the same thing. Small models loop like this; hand back the earlier
+        # result and say so, instead of re-running it.
+        repeat_key = (name, json.dumps(arguments, sort_keys=True))
+        if name in _REPEATABLE_TOOLS and repeat_key in self._seen_results:
+            mutations_then, previous = self._seen_results[repeat_key]
+            if mutations_then == self._task_mutations:
+                await self._log_tool(name, arguments, False, started, error="repeated call")
+                return reply(
+                    "You already made this exact call and no file has changed since, so the "
+                    "result is the same (shown below). Act on it now — e.g. fix the code with "
+                    f"edit_file — instead of repeating it.\n\n{previous[:3000]}"
+                )
 
         if name not in self._known_tool_names:
             # Not just a typo guard: this is the actual boundary that keeps a
@@ -765,13 +1139,28 @@ class AgentSession:
             # hallucinates a call for a tool it was never offered (structured
             # `tool_calls` aren't otherwise checked against the schema) hits
             # this rather than `self.tool_executor`.
-            return {
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "name": name,
-                "content": f"Unknown tool: {name}",
-            }
+            await self._log_tool(name, arguments, False, started, error="unknown tool")
+            return reply(f"Unknown tool: {name}")
 
+        # Full replacements and deletes need a prior read: they could clobber content
+        # the model never saw. edit_file doesn't — its exact-match old_string is
+        # itself proof the model knows what it is changing.
+        if name in MUTATING_TOOL_NAMES:
+            arguments = unescape_text_arguments(arguments)
+            call = {**call, "function": {**fn, "arguments": json.dumps(arguments)}}
+        if name == "create_file" and isinstance(arguments.get("path"), str):
+            try:
+                exists = resolve_within(self.root, arguments["path"]).exists()
+            except ValueError:
+                exists = False  # the executor returns the precise boundary error
+            if exists:
+                message = (
+                    f"{arguments['path']} already exists, so create_file was refused and nothing "
+                    "changed. To change it, read it and use edit_file."
+                )
+                await self._log_tool(name, arguments, False, started, error="already exists")
+                self._last_mutation_error = message
+                return reply(message)
         needs_prior_read = name in {"update_file", "delete_file"}
         if name == "write_file" and isinstance(arguments.get("path"), str):
             try:
@@ -784,104 +1173,122 @@ class AgentSession:
         if needs_prior_read:
             path = arguments.get("path")
             if not isinstance(path, str) or path not in self._read_paths:
-                return {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": name,
-                    "content": f"Read {path!r} successfully in this turn before {name}.",
-                }
+                await self._log_tool(name, arguments, False, started, error="not read first")
+                if not isinstance(path, str):
+                    return reply(f"Error: {name} needs a 'path' string.")
+                # Rather than make a small model work out that it must read and
+                # retry, read for it: the change can be retried on the next turn.
+                try:
+                    current = read_file_page(self.root, path)
+                except (OSError, ValueError) as exc:
+                    return reply(f"Error: {name} failed: {type(exc).__name__}: {exc}")
+                self._read_paths.add(path)
+                self.ledger.observe_tool("read_file", {"path": path}, True, "")
+                self._last_mutation_error = f"{name} on {path} was refused: not read first"
+                return reply(
+                    f"Error: {path} was not changed, because a file must be read before "
+                    f"{name}. Its current content is below. Check that your change still "
+                    f"applies, then call {name} again.\n\n{current}"
+                )
 
-        if (
-            name in {"write_file", "create_file", "update_file", "delete_file"}
-            and self.confirm_write is not None
-        ):
+        if name in MUTATING_TOOL_NAMES and self.confirm_write is not None:
             path = arguments.get("path", "?")
-            content = None if name == "delete_file" else arguments.get("content", "")
-            if not self.confirm_write(path, content):
-                return {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": name,
-                    "content": f"User declined to write {path}. Ask before trying again.",
-                }
+            if name == "delete_file":
+                preview: str | None = None
+            elif name == "edit_file":
+                try:
+                    preview = apply_edit(
+                        self.root,
+                        str(path),
+                        arguments.get("old_string", ""),
+                        arguments.get("new_string", ""),
+                        bool(arguments.get("replace_all", False)),
+                    )
+                except (OSError, ValueError, TypeError) as exc:
+                    message = f"{type(exc).__name__}: {exc}"
+                    await self._log_tool(name, arguments, False, started, error=message)
+                    self.ledger.observe_tool(name, arguments, False, message)
+                    self._last_mutation_error = message
+                    return reply(message)
+            else:
+                preview = arguments.get("content", "")
+            if not self.confirm_write(path, preview):
+                await self._log_tool(name, arguments, False, started, error="declined")
+                return reply(f"User declined to write {path}. Ask before trying again.")
 
         if name == "delegate_task" and self.allow_delegation:
             task = arguments.get("task", "")
             if self.confirm_delegate is not None and not self.confirm_delegate(task):
-                return {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": name,
-                    "content": "User declined this delegation. Do the sub-task directly instead.",
-                }
+                await self._log_tool(name, arguments, False, started, error="declined")
+                return reply("User declined this delegation. Do the sub-task directly instead.")
             if self.on_event is not None:
                 self.on_event(f"delegate_task({_summarize(arguments)})")
             content = await self._run_delegated_task(arguments)
-            return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+            await self._log_tool(name, arguments, True, started)
+            return reply(content)
 
         if name == "web_search" and self.search_fn is not None:
             query = arguments.get("query", "")
             if self.confirm_search is not None and not self.confirm_search(query):
-                return {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": name,
-                    "content": "User declined this search. Ask before trying again.",
-                }
+                await self._log_tool(name, arguments, False, started, error="declined")
+                return reply("User declined this search. Ask before trying again.")
             if self.on_event is not None:
                 self.on_event(f"web_search(query={query!r})")
+            if not query:
+                await self._log_tool(name, arguments, False, started, error="no query")
+                return reply("web_search requires a query.")
+            timeout = self.settings.tool_timeout_search if self.settings is not None else None
+            content, timed_out = await _with_timeout(self.search_fn(query), timeout)
+            if timed_out:
+                content = (
+                    f"Web search timed out after {timeout}s. "
+                    "Try a more specific query or skip this search."
+                )
+            await self._log_tool(name, arguments, not timed_out, started, timed_out=timed_out)
+            return reply(content)
 
-            # Wrap search with timeout
-            if self.settings is not None and query:
-                timeout = self.settings.tool_timeout_search
-                try:
-                    content = await asyncio.wait_for(self.search_fn(query), timeout=timeout)
-                except asyncio.TimeoutError:
-                    content = (
-                        f"Web search timed out after {timeout}s. "
-                        "Try a more specific query or skip this search."
-                    )
-            else:
-                content = await self.search_fn(query) if query else "web_search requires a query."
-            content = str(content or "")
-
-            # Track the call
-            self.tool_tracker.record(name, "timed out" not in content.lower())
-            return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+        if name in self.extra_tools:
+            tool = self.extra_tools[name]
+            if tool.confirm is not None and not tool.confirm(name, arguments):
+                await self._log_tool(name, arguments, False, started, error="declined")
+                return reply(f"User declined this {name} call.")
+            if self.on_event is not None:
+                self.on_event(f"{name}({_summarize(arguments)})")
+            problem = validate_arguments(tool.schema, arguments)
+            if problem:
+                await self._log_tool(name, arguments, False, started, error=problem)
+                return reply(f"Invalid arguments: {problem}")
+            try:
+                content, timed_out = await _with_timeout(tool.run(arguments), tool.timeout)
+            except Exception as exc:  # noqa: BLE001 — failures go back to the model
+                message = f"{type(exc).__name__}: {exc}"
+                await self._log_tool(name, arguments, False, started, error=message)
+                self.ledger.observe_tool(name, arguments, False, message)
+                return reply(message)
+            if timed_out:
+                content = f"Tool '{name}' timed out after {tool.timeout}s."
+            await self._log_tool(name, arguments, not timed_out, started, timed_out=timed_out)
+            return reply(content)
 
         if is_mcp_tool_name(name) and self.mcp_registry is not None:
             if self.confirm_mcp is not None and not self.confirm_mcp(name, arguments):
-                return {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": name,
-                    "content": "User declined this MCP tool call.",
-                }
+                await self._log_tool(name, arguments, False, started, error="declined")
+                return reply("User declined this MCP tool call.")
             if self.on_event is not None:
                 self.on_event(f"{name}({_summarize(arguments)})")
-
-            # Wrap MCP tool with timeout
-            if self.settings is not None:
-                timeout = self.settings.tool_timeout_read  # Use read timeout for MCP tools
-                try:
-                    content = await asyncio.wait_for(
-                        self.mcp_registry.call_tool(name, arguments), timeout=timeout
-                    )
-                except asyncio.TimeoutError:
-                    content = f"Tool '{name}' timed out after {timeout}s. Try a simpler operation."
-            else:
-                content = await self.mcp_registry.call_tool(name, arguments)
-            content = str(content or "")
-
-            # Track the call
-            self.tool_tracker.record(name, "timed out" not in content.lower())
-            return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+            timeout = self.settings.tool_timeout_read if self.settings is not None else None
+            content, timed_out = await _with_timeout(
+                self.mcp_registry.call_tool(name, arguments), timeout
+            )
+            if timed_out:
+                content = f"Tool '{name}' timed out after {timeout}s. Try a simpler operation."
+            await self._log_tool(name, arguments, not timed_out, started, timed_out=timed_out)
+            return reply(content)
 
         if self.on_event is not None:
             args_repr = ", ".join(f"{k}={v!r}" for k, v in _summarize(arguments).items())
             self.on_event(f"{name}({args_repr})")
 
-        # Execute with timeout if settings are available
         if self.settings is not None:
             result = await execute_tool_call_with_timeout(
                 self.root,
@@ -892,31 +1299,47 @@ class AgentSession:
                 executor=self.tool_executor,
             )
         else:
-            # Fallback to original executor if no settings
             result = self.tool_executor(self.root, call["id"], name, arguments)
 
-        # Track the call for stuck detection
-        self.tool_tracker.record(name, not result.is_error)
+        await self._log_tool(
+            name,
+            arguments,
+            not result.is_error,
+            started,
+            error=result.content if result.is_error else None,
+            timed_out=result.timed_out,
+        )
+        self.ledger.observe_tool(name, arguments, not result.is_error, result.content)
         if not result.is_error and name == "read_file":
             path = arguments.get("path")
             if isinstance(path, str):
                 self._read_paths.add(path)
-        if not result.is_error and name in {
-            "write_file",
-            "create_file",
-            "update_file",
-            "delete_file",
-        }:
+        if name in MUTATING_TOOL_NAMES:
+            path_arg = arguments.get("path")
+            if result.is_error:
+                self._last_mutation_error = result.content
+            elif isinstance(path_arg, str):
+                self._task_changed_paths.add(path_arg)
+                if SYNTAX_WARNING in result.content:
+                    self._broken_files.add(path_arg)
+                else:
+                    self._broken_files.discard(path_arg)
+        if not result.is_error and name in MUTATING_TOOL_NAMES:
             self._task_mutations += 1
+            path = arguments.get("path")
+            if isinstance(path, str) and name != "delete_file":
+                # The model just wrote it, so its content is known: a follow-up
+                # edit needn't re-read the file first.
+                self._read_paths.add(path)
 
-        # TODO: Add database logging via dependency injection
-        # For now, tool call tracking is done in-memory via self.tool_tracker
-
+        content = result.content
+        if not result.is_error and name == "edit_file":
+            content += _remaining_references(self.root, arguments)
         return {
             "role": "tool",
             "tool_call_id": result.tool_call_id,
             "name": result.name,
-            "content": result.content,
+            "content": content,
         }
 
     async def _run_delegated_task(self, arguments: dict[str, Any]) -> str:
@@ -927,42 +1350,155 @@ class AgentSession:
         Shares `root`, `confirm_write`, and `tool_executor` with the parent, so a
         delegated write hits the same path-safety checks and the same
         confirmation UI as any other write — delegation changes who's asking,
-        not whether it's asked.
+        not whether it's asked. It also inherits search, MCP and extra tools
+        (filtered to what it was granted), timeouts and tool logging.
         """
         task = arguments.get("task")
         if not isinstance(task, str) or not task.strip():
             return "delegate_task requires a non-empty 'task' string."
 
+        role = self.agent_roles.get(str(arguments.get("agent") or ""))
+        delegable = self._known_tool_names - {"delegate_task"}
         requested = arguments.get("allowed_tools")
         if isinstance(requested, list) and requested and all(isinstance(t, str) for t in requested):
-            allowed = frozenset(requested) & self._known_tool_names - {"delegate_task"}
-            if not allowed:
-                allowed = READ_ONLY_TOOL_NAMES
+            allowed = frozenset(requested) & delegable
+        elif role is not None and role.tools:
+            allowed = frozenset(role.tools) & delegable
         else:
-            allowed = READ_ONLY_TOOL_NAMES
+            allowed = frozenset()
+        if not allowed:
+            allowed = (READ_ONLY_TOOL_NAMES | DEFAULT_SUB_AGENT_EXTRAS) & delegable
 
         requested_turns = arguments.get("max_turns")
-        sub_max_turns = 10
+        sub_max_turns = role.max_turns if role is not None else 10
         if isinstance(requested_turns, int) and requested_turns > 0:
             sub_max_turns = requested_turns
 
-        sub_schemas = [s for s in TOOL_SCHEMAS if s["function"]["name"] in allowed]
-        sub_confirm_write = self.confirm_write if "write_file" in allowed else None
-
+        may_write = bool(allowed & MUTATING_TOOL_NAMES)
         sub_session = AgentSession(
             self.backend,
-            self.model,
+            role.model if role is not None and role.model else self.model,
             self.root,
-            confirm_write=sub_confirm_write,
+            confirm_write=self.confirm_write if may_write else None,
+            confirm_search=None,  # the delegation itself was the approval
+            confirm_mcp=self.confirm_mcp,
             tool_executor=self.tool_executor,
             max_turns=sub_max_turns,
-            tool_schemas=sub_schemas,
+            tool_schemas=[],
             allow_delegation=False,  # depth 1 — a sub-agent cannot itself delegate
+            search_fn=self.search_fn if "web_search" in allowed else None,
+            mcp_registry=self.mcp_registry,
+            extra_tools=[t for n, t in self.extra_tools.items() if n in allowed],
+            settings=self.settings,
+            session_id=f"{self.session_id}:sub:{uuid.uuid4().hex[:6]}",
+            num_ctx=self.num_ctx if (role is None or not role.model) else None,
+            on_tool_log=self.on_tool_log,
         )
+        # TOOL_SCHEMAS and the parent's list overlap; keep the first of each name.
+        by_name: dict[str, dict[str, Any]] = {}
+        for schema in [*TOOL_SCHEMAS, *self.tool_schemas]:
+            by_name.setdefault(schema["function"]["name"], schema)
+        sub_session.tool_schemas = [s for n, s in by_name.items() if n in allowed]
+        sub_session.refresh_tools()
+        if role is not None and role.prompt:
+            sub_session.messages[0]["content"] = (
+                sub_session.system_prompt() + f"\n\nYour role: {role.prompt}"
+            )
+        if self.on_event is not None:
+            parent_event = self.on_event
+            sub_session.on_event = lambda text: parent_event(f"  ↳ {text}")
+
+        timeout = getattr(self.settings, "tool_timeout_delegate", None)
         try:
-            return await sub_session.send(task)
-        except AgentTurnLimitExceeded as exc:
+            content, timed_out = await _with_timeout(sub_session.send(task), timeout)
+        except (AgentTurnLimitExceeded, AgentToolUseRequired) as exc:
             return f"Sub-agent stopped without finishing: {exc}"
+        if timed_out:
+            return f"Sub-agent timed out after {timeout}s without finishing."
+        return content
+
+
+_IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
+
+
+def _remaining_references(root: Path, arguments: dict[str, Any]) -> str:
+    """After an edit that removes an identifier (a rename, a deleted function),
+    where it is still used — so a multi-file change isn't left half done."""
+    old = arguments.get("old_string")
+    new = arguments.get("new_string")
+    if not isinstance(old, str) or not isinstance(new, str):
+        return ""
+    removed = set(_IDENTIFIER_RE.findall(old)) - set(_IDENTIFIER_RE.findall(new))
+    removed -= {"def", "class", "return", "self", "import", "from", "None", "True", "False"}
+    if not removed or len(removed) > 3:
+        return ""
+    notes: list[str] = []
+    for identifier in sorted(removed):
+        try:
+            hits = search_files(root, rf"\b{re.escape(identifier)}\b", max_results=10)
+        except (OSError, ValueError):
+            continue
+        if hits:
+            places = ", ".join(hit.split(": ", 1)[0] for hit in hits)
+            notes.append(f"'{identifier}' still appears at {places}")
+    if not notes:
+        return ""
+    return "\nNote: " + "; ".join(notes) + ". Update those too if they refer to what you changed."
+
+
+async def _with_timeout(coro: Awaitable[Any], timeout: float | None) -> tuple[str, bool]:
+    """Await ``coro`` with an optional timeout: (text result, timed out?)."""
+    if timeout is None:
+        return str(await coro or ""), False
+    try:
+        return str(await asyncio.wait_for(coro, timeout=timeout) or ""), False
+    except asyncio.TimeoutError:
+        return "", True
+
+
+def _json_tool_protocol(tool_schemas: list[dict[str, Any]]) -> str:
+    """Tool descriptions for a model without native tool calling."""
+    lines = [
+        "\n\nYou cannot call tools natively. Every reply must be ONE JSON object:",
+        '{"name": "<tool name>", "arguments": {...}} to call a tool, or',
+        '{"name": "final_answer", "arguments": {"text": "<your answer>"}} when done.',
+        "Available tools:",
+    ]
+    for schema in tool_schemas:
+        function = schema["function"]
+        params = ", ".join((function.get("parameters") or {}).get("properties") or {})
+        lines.append(f"- {function['name']}({params}): {function.get('description', '')}")
+    return "\n".join(lines)
+
+
+def _json_tool_format(names: frozenset[str]) -> dict[str, Any]:
+    """A JSON schema Ollama enforces with a grammar, so even a model with no tool
+    support always produces a parseable tool call or final answer."""
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "enum": sorted(names | {"final_answer"})},
+            "arguments": {"type": "object"},
+        },
+        "required": ["name", "arguments"],
+    }
+
+
+def _parse_constrained_reply(
+    content: str, known_names: frozenset[str]
+) -> tuple[str | None, dict[str, Any] | None]:
+    """(final answer, tool call) from a grammar-constrained reply."""
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+    if parsed.get("name") == "final_answer":
+        arguments = parsed.get("arguments") or {}
+        text = arguments.get("text") if isinstance(arguments, dict) else None
+        return (str(text) if text is not None else ""), None
+    return None, _try_parse_tool_call(content, known_names)
 
 
 async def run_agent(
