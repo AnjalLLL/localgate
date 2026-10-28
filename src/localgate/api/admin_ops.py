@@ -29,6 +29,7 @@ from localgate.core.auth import (
     issue_admin_session,
 )
 from localgate.core.errors import AuthenticationError, LocalgateError, RateLimitError
+from localgate.db.repositories.audit import AuditRepository, audit
 from localgate.db.repositories.conversations import ConversationRepository, SummaryRepository
 from localgate.db.repositories.embeddings import EmbeddingRepository
 from localgate.db.repositories.keys import APIKeyRepository
@@ -100,10 +101,18 @@ async def sign_in(
         subject = ""
     if subject is None:
         _failed_sign_ins[client].append(now)
+        await audit(
+            request,
+            "sign_in.failed",
+            body.email or None,
+            actor=body.email or "admin-key",
+            method="password" if body.email else "admin_key",
+        )
         if body.email:
             raise AuthenticationError("Wrong email or password.", code="invalid_credentials")
         raise AuthenticationError("Invalid admin key.", code="invalid_admin_key")
     _failed_sign_ins.pop(client, None)
+    await audit(request, "sign_in", subject or None, actor=subject or "admin-key")
     response.set_cookie(
         ADMIN_COOKIE,
         issue_admin_session(settings.admin_key, now, subject=subject),
@@ -162,6 +171,8 @@ async def overview(request: Request, session: AsyncSession = Depends(get_session
             "recent_tool_calls": len(tool_rows),
             "success_rate": round(tool_ok / len(tool_rows), 3) if tool_rows else None,
         },
+        "queue": request.app.state.scheduler.stats(),
+        "backends": request.app.state.pool.stats(),
     }
 
 
@@ -169,14 +180,20 @@ async def overview(request: Request, session: AsyncSession = Depends(get_session
 async def models(request: Request) -> list[dict[str, Any]]:
     """Models the backend serves, with tool support and context window when the
     backend can report them cheaply."""
-    backend: InferenceBackend = request.app.state.backend
-    try:
-        listed = await backend.list_models_detailed()
-    except httpx.HTTPError as exc:
-        raise LocalgateError(f"Couldn't list models from the backend: {exc}") from exc
+    pool = request.app.state.pool
+    listed: list[tuple[InferenceBackend, str, dict[str, Any]]] = []
+    for member in pool.members:
+        try:
+            rows = await member.backend.list_models_detailed()
+        except httpx.HTTPError as exc:
+            if len(pool.members) == 1:
+                raise LocalgateError(f"Couldn't list models from the backend: {exc}") from exc
+            continue
+        listed.extend((member.backend, member.name, row) for row in rows)
     limit = asyncio.Semaphore(4)
 
-    async def describe(entry: dict[str, Any]) -> dict[str, Any]:
+    async def describe(item: tuple[InferenceBackend, str, dict[str, Any]]) -> dict[str, Any]:
+        backend, backend_name, entry = item
         async with limit:
             try:
                 tools, window, caps = await asyncio.gather(
@@ -191,6 +208,7 @@ async def models(request: Request) -> list[dict[str, Any]]:
         can_chat = caps is None or "completion" in caps
         return {
             **entry,
+            "backend": backend_name,
             "tool_support": tools,
             "context_window": window,
             "capabilities": caps,
@@ -334,3 +352,24 @@ async def search_test(body: SearchProbe, request: Request) -> dict:
         "error": error,
         "results": [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in results],
     }
+
+
+@router.get("/audit")
+async def audit_log(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Recent admin actions, newest first."""
+    events = await AuditRepository(session).recent(limit, offset)
+    return [
+        {
+            "at": event.at,
+            "actor": event.actor,
+            "action": event.action,
+            "target": event.target,
+            "details": event.details,
+            "ip": event.ip,
+        }
+        for event in events
+    ]

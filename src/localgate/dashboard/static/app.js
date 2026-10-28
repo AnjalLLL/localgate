@@ -249,9 +249,11 @@ async function showLogin(message = "") {
   try {
     accounts = (await (await fetch("/admin/session/methods")).json()).accounts;
   } catch { /* assume accounts; the admin key option is still there */ }
-  $("#login-intro").textContent = accounts
-    ? "Your local models, memory and agents in one place."
-    : "No dashboard account yet. Create one on the server with `localgate users create`, or sign in with the admin key.";
+  $("#login-intro").replaceChildren(
+    ...(accounts
+      ? ["Your local models, memory and agents in one place."]
+      : ["No dashboard account yet. Create one on the server with ", h("code", { text: "localgate users create" }), ", or sign in with the admin key."]),
+  );
   setLoginMode(!accounts);
 }
 
@@ -1176,12 +1178,81 @@ async function viewChat(root, chatId) {
 
 // ---------------------------------------------------------------- keys
 
+// ---------------------------------------------------------------- key limits
+
+// Model names for the "Models" suggestions — fetched once per page load.
+let modelNamesPromise = null;
+function modelNames() {
+  modelNamesPromise ||= api("/admin/models").then((rows) => rows.map((m) => m.name)).catch(() => []);
+  return modelNamesPromise;
+}
+
+function field(label, control, hint) {
+  return h("label", { class: "field" }, h("span", { text: label }), control, hint ? h("small", { class: "field-hint", text: hint }) : null);
+}
+
+/** The optional per-key limits, shared by the create form, the edit dialog and
+ *  the Share page. `values()` returns them in the /admin/keys shape (null = no limit). */
+function limitsFields(initial = {}) {
+  const listId = `models-${Math.random().toString(36).slice(2)}`;
+  const datalist = h("datalist", { id: listId });
+  modelNames().then((names) => datalist.replaceChildren(...names.map((n) => h("option", { value: n }))));
+  const models = h("input", { type: "text", placeholder: "any model", list: listId, value: (initial.allowed_models || []).join(", ") });
+  const maxTokens = h("input", { type: "number", min: "1", placeholder: "no cap", value: initial.max_tokens ?? "" });
+  const quota = h("input", { type: "number", min: "1", placeholder: "unlimited", value: initial.token_quota ?? "" });
+  const period = h("select", {}, h("option", { value: "month", text: "per month" }), h("option", { value: "day", text: "per day" }));
+  period.value = initial.quota_period || "month";
+  const expires = h("input", { type: "date", value: initial.expires_at ? initial.expires_at.slice(0, 10) : "" });
+  const concurrent = h("input", { type: "number", min: "1", placeholder: "no limit", value: initial.max_concurrent ?? "" });
+  const store = h("input", { type: "checkbox" });
+  store.checked = initial.store_conversations !== false;
+  const element = h(
+    "div",
+    { class: "limits" },
+    h("div", { class: "field-row" }, field("Models", models, "Comma-separated; empty = any"), field("Max reply tokens", maxTokens)),
+    h("div", { class: "field-row" }, field("Token quota", quota), field("Quota period", period)),
+    h("div", { class: "field-row" }, field("Expires", expires), field("Requests at once", concurrent)),
+    h("label", { class: "check" }, store, h("span", { text: "Store conversations for memory (you can read them in Sessions)" })),
+    datalist,
+  );
+  const num = (input) => (input.value === "" ? null : Number(input.value));
+  return {
+    element,
+    values: () => {
+      const names = models.value.split(",").map((m) => m.trim()).filter(Boolean);
+      return {
+        allowed_models: names.length ? names : null,
+        max_tokens: num(maxTokens),
+        token_quota: num(quota),
+        quota_period: period.value,
+        // The whole chosen day counts: the key stops at the end of it, UTC.
+        expires_at: expires.value ? new Date(`${expires.value}T23:59:59Z`).toISOString() : null,
+        max_concurrent: num(concurrent),
+        store_conversations: store.checked,
+      };
+    },
+  };
+}
+
+/** One-line summary of a key's limits for tables. */
+function limitsSummary(k) {
+  const parts = [`${k.rate_limit_per_min}/min`];
+  if (k.allowed_models?.length) parts.push(k.allowed_models.length === 1 ? k.allowed_models[0] : `${k.allowed_models.length} models`);
+  if (k.max_tokens) parts.push(`≤${compact(k.max_tokens)} tokens/reply`);
+  if (k.token_quota) parts.push(`${compact(k.tokens_this_period || 0)} / ${compact(k.token_quota)} per ${k.quota_period}`);
+  if (k.max_concurrent) parts.push(`${k.max_concurrent} at once`);
+  if (k.expires_at) parts.push(`${k.expired ? "expired" : "until"} ${fmtDate(k.expires_at).split(",")[0]}`);
+  if (k.store_conversations === false) parts.push("no history");
+  return parts.join(" · ");
+}
+
 async function viewKeys(root) {
   const listBody = h("div", {}, loading());
   const usagePanel = h("div", { class: "card-body" }, h("p", { class: "muted", text: "Select a key to see its usage." }));
   const reveal = h("div", {});
   const nameInput = h("input", { type: "text", placeholder: "my-app", required: true, maxlength: "100" });
   const limitInput = h("input", { type: "number", min: "1", value: "60" });
+  const createLimits = limitsFields();
 
   const createForm = h(
     "form",
@@ -1192,7 +1263,7 @@ async function viewKeys(root) {
         const name = nameInput.value.trim();
         if (!name) return;
         try {
-          const key = await api("/admin/keys", { method: "POST", body: { name, rate_limit_per_min: Number(limitInput.value) || undefined } });
+          const key = await api("/admin/keys", { method: "POST", body: { name, rate_limit_per_min: Number(limitInput.value) || undefined, ...createLimits.values() } });
           nameInput.value = "";
           showReveal(key);
           toast("Key created.", "ok");
@@ -1207,6 +1278,7 @@ async function viewKeys(root) {
       h("label", { class: "field" }, h("span", { text: "Requests / min" }), limitInput),
       h("button", { class: "btn primary", type: "submit", text: "Create key" }),
     ),
+    h("details", { class: "more-limits" }, h("summary", { text: "More limits — models, quota, expiry…" }), createLimits.element),
     reveal,
   );
 
@@ -1266,25 +1338,34 @@ async function viewKeys(root) {
     }
   }
 
-  function editLimit(k, cell) {
-    const input = h("input", { type: "number", min: "1", value: String(k.rate_limit_per_min), "aria-label": `Rate limit for ${k.name}` });
-    input.style.width = "90px";
-    const save = async () => {
-      const value = Number(input.value);
-      if (!value || value < 1) { toast("Rate limit must be at least 1.", "bad"); return; }
-      try {
-        await api(`/admin/keys/${encodeURIComponent(k.id)}`, { method: "PATCH", body: { rate_limit_per_min: value } });
-        toast("Rate limit updated.", "ok");
-        load();
-      } catch (err) { toast(err.message, "bad"); }
-    };
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") save();
-      if (e.key === "Escape") load();
+  function editLimits(k) {
+    const limits = limitsFields(k);
+    const rate = h("input", { type: "number", min: "1", value: String(k.rate_limit_per_min) });
+    const dialog = h(
+      "dialog",
+      { class: "dialog wide", "aria-label": `Limits for ${k.name}` },
+      h(
+        "form",
+        { method: "dialog" },
+        h("h2", { text: `Limits for “${k.name}”` }),
+        h("p", { class: "muted small", text: "Changes apply on the next request — the key itself stays the same." }),
+        h("div", { class: "field-row" }, field("Requests / min", rate)),
+        limits.element,
+        h("div", { class: "dialog-actions" }, h("button", { value: "cancel", class: "btn ghost", text: "Cancel" }), h("button", { value: "ok", class: "btn primary", text: "Save limits" })),
+      ),
+    );
+    dialog.addEventListener("close", async () => {
+      if (dialog.returnValue === "ok") {
+        try {
+          await api(`/admin/keys/${encodeURIComponent(k.id)}`, { method: "PATCH", body: { rate_limit_per_min: Number(rate.value) || k.rate_limit_per_min, ...limits.values() } });
+          toast("Limits updated.", "ok");
+          load();
+        } catch (err) { toast(err.message, "bad"); }
+      }
+      dialog.remove();
     });
-    cell.textContent = "";
-    cell.append(h("div", { class: "actions" }, input, h("button", { class: "btn sm", type: "button", text: "Save", onclick: save })));
-    input.focus();
+    document.body.append(dialog);
+    dialog.showModal();
   }
 
   async function revealKey(k) {
@@ -1313,20 +1394,19 @@ async function viewKeys(root) {
         table(
           [
             { label: "Name", value: (k) => h("span", {}, k.name, h("span", { class: "cell-sub mono", text: k.key_prefix ? `${k.key_prefix}…` : "issued before v0.6" })) },
-            { label: "Status", value: (k) => (k.revoked ? badge("revoked", "bad") : badge("active", "ok")) },
+            { label: "Status", value: (k) => (k.revoked ? badge("revoked", "bad") : k.expired ? badge("expired", "warn") : badge("active", "ok")) },
             {
-              label: "Rate limit",
-              num: true,
+              label: "Limits",
               value: (k) => {
-                const span = h("span", {}, `${k.rate_limit_per_min}/min `);
+                const span = h("span", { class: "limits-cell" }, limitsSummary(k), " ");
                 if (!k.revoked) {
                   span.append(
                     h("button", {
                       class: "link-btn small",
                       type: "button",
                       text: "edit",
-                      "aria-label": `Edit rate limit for ${k.name}`,
-                      onclick: (e) => { e.stopPropagation(); editLimit(k, span.parentElement); },
+                      "aria-label": `Edit limits for ${k.name}`,
+                      onclick: (e) => { e.stopPropagation(); editLimits(k); },
                     }),
                   );
                 }
@@ -1368,7 +1448,7 @@ async function viewKeys(root) {
   }
 
   root.append(
-    pageHead("API keys", "Issue, rate-limit and revoke the keys clients use."),
+    pageHead("API keys", "Issue, limit and revoke the keys clients and devices use."),
     h("div", { class: "grid split" }, card("Keys", listBody), card("Usage for selected key", usagePanel)),
     card("Create a key", createForm),
   );
@@ -1765,6 +1845,8 @@ async function viewModels(root) {
     table(
       [
         { label: "Model", value: (m) => h("span", { class: "mono", text: m.name }) },
+        // Only worth a column when several machines serve models (LOCALGATE_BACKENDS).
+        ...(new Set(models.map((m) => m.backend)).size > 1 ? [{ label: "Backend", value: (m) => m.backend }] : []),
         { label: "Parameters", value: (m) => m.parameter_size || "—" },
         { label: "Quantization", value: (m) => m.quantization || "—" },
         { label: "Size", value: (m) => m.size_human || "—", num: true },
@@ -2093,15 +2175,202 @@ async function viewSettings(root) {
 
 // ================================================================ router
 
+// ---------------------------------------------------------------- share
+
+/** Give another device or person access: a key with limits, plus everything
+ *  they need to use it — base URL, a connect link, a QR code and snippets. */
+async function viewShare(root) {
+  const addressBody = h("div", { class: "card-body" }, loading());
+  const result = h("div", {});
+  let urls = [];
+
+  async function loadAddresses() {
+    try {
+      urls = (await api("/admin/share")).urls;
+    } catch (err) {
+      addressBody.replaceChildren(errorState(err));
+      return;
+    }
+    addressBody.textContent = "";
+    if (!urls.length) {
+      addressBody.append(
+        h("p", { class: "muted", text: "No network address found. Other devices need one of this machine's addresses — start the gateway with:" }),
+        codeBlock("localgate serve --share", "shell"),
+      );
+    } else {
+      addressBody.append(
+        h(
+          "ul",
+          { class: "share-urls" },
+          urls.map((u) =>
+            h(
+              "li",
+              {},
+              h("span", { class: "share-label", text: u.label }),
+              h("code", { text: `${u.url}/v1` }),
+              h("button", { class: "btn sm", type: "button", text: "Copy", onclick: (e) => copyText(`${u.url}/v1`, e.currentTarget) }),
+            ),
+          ),
+        ),
+        h("p", { class: "small muted", text: "Devices can't connect? Start the gateway with `localgate serve --share`. Over the internet, use Tailscale or a tunnel — see docs/sharing.md." }),
+      );
+    }
+    urlSelect.replaceChildren(
+      ...(urls.length ? urls : [{ label: "This browser's address", url: location.origin }]).map((u) => h("option", { value: u.url, text: `${u.label} — ${u.url}` })),
+    );
+  }
+
+  const nameInput = h("input", { type: "text", placeholder: "Ana's laptop", required: true, maxlength: "100" });
+  const urlSelect = h("select", {});
+  const limits = limitsFields({ store_conversations: true });
+  const form = h(
+    "form",
+    {
+      class: "card-body",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const name = nameInput.value.trim();
+        if (!name) return;
+        try {
+          const key = await api("/admin/keys", { method: "POST", body: { name, ...limits.values() } });
+          nameInput.value = "";
+          await showAccess(key, urlSelect.value || location.origin);
+          toast("Access created.", "ok");
+        } catch (err) { toast(err.message, "bad"); }
+      },
+    },
+    h("div", { class: "field-row" }, field("Device or person", nameInput), field("They connect to", urlSelect)),
+    h("details", { class: "more-limits", open: true }, h("summary", { text: "Limits for this key" }), limits.element),
+    h("div", { class: "actions" }, h("button", { class: "btn primary", type: "submit", text: "Create access" })),
+  );
+
+  async function qrFor(text) {
+    const resp = await fetch("/admin/share/qr", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Localgate-Csrf": "1" },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok) throw new Error("Couldn't make the QR code.");
+    // A data: URL — the dashboard's CSP allows images only from itself or data:.
+    const svgText = await resp.text();
+    return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svgText)))}`;
+  }
+
+  async function showAccess(key, base) {
+    const connect = `${base}/connect#url=${encodeURIComponent(base)}&key=${encodeURIComponent(key.api_key)}`;
+    const qr = h("img", { class: "qr", alt: "QR code: opens the connect page with this key", width: "220", height: "220" });
+    qrFor(connect).then((src) => { qr.src = src; }).catch(() => qr.replaceWith(h("p", { class: "muted small", text: "QR code unavailable — share the link instead." })));
+    result.replaceChildren(
+      card(
+        `Access for “${key.name}”`,
+        h(
+          "div",
+          { class: "card-body share-result" },
+          h(
+            "div",
+            { class: "share-grid" },
+            h(
+              "div",
+              {},
+              h("p", { class: "muted small", text: "Scan with their phone, or send them the link. It opens a page with everything they need." }),
+              qr,
+            ),
+            h(
+              "div",
+              { class: "share-creds" },
+              h("dl", { class: "kv" }, [
+                [h("dt", { text: "Base URL" }), h("dd", {}, h("code", { text: `${base}/v1` }))],
+                [h("dt", { text: "API key" }), h("dd", {}, h("code", { class: "secret-inline", text: key.api_key }))],
+                [h("dt", { text: "Limits" }), h("dd", { text: limitsSummary(key) })],
+              ]),
+              h(
+                "div",
+                { class: "actions" },
+                h("button", { class: "btn sm", type: "button", text: "Copy connect link", onclick: (e) => copyText(connect, e.currentTarget) }),
+                h("button", { class: "btn sm", type: "button", text: "Copy key", onclick: (e) => copyText(key.api_key, e.currentTarget) }),
+              ),
+              h("p", { class: "small muted", text: "The key is shown in full here once. You can show it again later under API keys." }),
+            ),
+          ),
+          codeBlock(`localgate login --url ${base} --api-key ${key.api_key}\nlocalgate code --remote`, "shell"),
+          codeBlock(
+            `from openai import OpenAI\n\nclient = OpenAI(base_url="${base}/v1", api_key="${key.api_key}")`,
+            "python",
+          ),
+        ),
+      ),
+    );
+    result.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  root.append(
+    pageHead("Share", "Let another device or person use this machine's models — each with their own key and limits."),
+    card("Where devices reach this gateway", addressBody),
+    card("Add a device", form),
+    result,
+  );
+  await loadAddresses();
+}
+
+// ---------------------------------------------------------------- activity
+
+const ACTION_LABELS = {
+  "key.created": "created key",
+  "key.updated": "changed limits of key",
+  "key.revealed": "viewed key",
+  "key.revoked": "revoked key",
+  sign_in: "signed in",
+  "sign_in.failed": "failed sign-in",
+  "user.created": "created account",
+  "user.deleted": "deleted account",
+  "user.password_changed": "changed password of",
+  "config.database_url": "changed database to",
+};
+
+/** Who did what to the gateway: keys, sign-ins, accounts, settings. */
+async function viewActivity(root) {
+  const body = h("div", {}, loading());
+  root.append(pageHead("Activity", "Admin actions on this gateway — who did what, and from where."), card("Recent actions", body));
+  try {
+    const events = await api("/admin/audit?limit=200");
+    body.replaceChildren(
+      table(
+        [
+          { label: "When", value: (e) => when(e.at) },
+          { label: "Who", value: (e) => h("span", { class: e.actor === "admin-key" || e.actor === "cli" ? "muted" : "", text: e.actor }) },
+          {
+            label: "What",
+            value: (e) =>
+              h(
+                "span",
+                {},
+                e.action === "sign_in.failed" ? badge("failed sign-in", "bad") : ACTION_LABELS[e.action] || e.action,
+                e.target && e.action !== "sign_in.failed" ? h("span", { class: "mono", text: ` ${e.details?.name || e.target}` }) : null,
+              ),
+          },
+          { label: "From", value: (e) => h("span", { class: "mono cell-sub", text: e.ip || "this machine" }) },
+        ],
+        events,
+        { emptyText: "No admin actions yet." },
+      ),
+    );
+  } catch (err) {
+    body.replaceChildren(errorState(err));
+  }
+}
+
 const ROUTES = {
   overview: viewOverview,
   chat: viewChat,
   keys: viewKeys,
+  share: viewShare,
   usage: viewUsage,
   sessions: viewSessions,
   agent: viewAgent,
   models: viewModels,
   settings: viewSettings,
+  activity: viewActivity,
 };
 
 let routeToken = 0;

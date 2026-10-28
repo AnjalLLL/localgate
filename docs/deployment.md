@@ -2,6 +2,10 @@
 
 ## Before you expose it to anything
 
+> Sharing models with your own devices on a home or office network (or Tailscale)
+> needs none of this page: `localgate serve --share` — see [Sharing your GPU](sharing.md).
+> This page is for running localgate as a service on the internet.
+
 ```bash
 LOCALGATE_ENVIRONMENT=production
 LOCALGATE_ADMIN_KEY=$(openssl rand -hex 32)
@@ -71,7 +75,10 @@ location / {
 }
 ```
 
-Keep `/metrics` off the public listener. It exposes no prompts or key material, but it is
+Behind a proxy, start localgate with `--proxy-headers --forwarded-allow-ips <proxy-address>`:
+the dashboard, `/admin`, the API docs and `/metrics` answer only trusted networks
+(`LOCALGATE_ADMIN_ALLOWED_NETWORKS`), and without the forwarded address every request looks
+like it comes from the proxy. Keep `/metrics` off the public listener. It exposes no prompts or key material, but it is
 unauthenticated and there's no reason for the internet to have it.
 
 ## Health checks

@@ -10,11 +10,14 @@ useless in exactly the situations you reach for it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Coroutine
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -32,6 +35,8 @@ from localgate.core.db_config_store import (
     redact_database_url,
     save_database_url,
 )
+from localgate.core.key_policy import QUOTA_PERIODS, as_utc, is_expired
+from localgate.core.netinfo import is_loopback_host, share_urls
 from localgate.core.passwords import password_problem
 from localgate.db.engine import current_revision, init_models, make_engine, make_session_factory
 from localgate.db.repositories.keys import APIKeyRepository
@@ -44,12 +49,17 @@ app = typer.Typer(
 )
 keys_app = typer.Typer(help="Create, inspect and revoke API keys.", no_args_is_help=True)
 db_app = typer.Typer(help="Initialize and migrate the database.", no_args_is_help=True)
+service_app = typer.Typer(
+    help="Run the gateway in the background: start at login, restart if it stops.",
+    no_args_is_help=True,
+)
 users_app = typer.Typer(
     help="Dashboard accounts: sign in with email and password.", no_args_is_help=True
 )
 app.add_typer(keys_app, name="keys")
 app.add_typer(db_app, name="db")
 app.add_typer(users_app, name="users")
+app.add_typer(service_app, name="service")
 bench_app = typer.Typer(help="Measure how reliably models drive the agent.", no_args_is_help=True)
 app.add_typer(bench_app, name="bench")
 voice_app = typer.Typer(
@@ -78,6 +88,7 @@ def _version_callback(show: bool) -> None:
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(  # noqa: ARG001 — read only by _version_callback's side effect
         False,
         "--version",
@@ -87,6 +98,12 @@ def main(
     ),
 ) -> None:
     """localgate — a local-first API gateway for open-source LLMs."""
+    # Commands are for people at a terminal: show warnings, not migration chatter.
+    # `serve` sets up its own server logging; LOCALGATE_LOG_LEVEL=DEBUG shows all.
+    if ctx.invoked_subcommand != "serve" and os.environ.get("LOCALGATE_LOG_LEVEL") != "DEBUG":
+        from localgate.core.logging import configure_logging  # noqa: PLC0415
+
+        configure_logging("WARNING")
 
 
 def _settings() -> Settings:
@@ -202,11 +219,32 @@ def serve(
             "Requires --proxy-headers. Defaults to FORWARDED_ALLOW_IPS env var."
         ),
     ),
+    share: bool = typer.Option(
+        False,
+        "--share",
+        help=(
+            "Let other devices use this machine's models: listen on the network and "
+            "print the addresses to give them. The dashboard stays on trusted networks."
+        ),
+    ),
 ) -> None:
     """Start the gateway."""
     new_admin_key = _ensure_admin_key()
     settings = _settings()
-    dashboard = f"http://{host or settings.host}:{port or settings.port}/dashboard/"
+    bind_host = "0.0.0.0" if share else (host or settings.host)  # noqa: S104
+    bind_port = port or settings.port
+    if not is_loopback_host(bind_host) and settings.uses_insecure_admin_key:
+        typer.secho(
+            f"Refusing to listen on {bind_host} with the placeholder admin key — anyone on "
+            "the network could manage this gateway. Remove LOCALGATE_ADMIN_KEY from your "
+            ".env to get a generated one, or set a real key.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    # 0.0.0.0 isn't an address a browser can open; the owner uses this machine's.
+    local_host = "127.0.0.1" if bind_host in ("0.0.0.0", "::") else bind_host  # noqa: S104
+    dashboard = f"http://{local_host}:{bind_port}/dashboard/"
     account = _first_account_setup(settings)
     if account is not None:
         typer.secho(f"  Sign in at {dashboard} as {account}.", fg=typer.colors.GREEN)
@@ -223,9 +261,11 @@ def serve(
         typer.echo(f"  sign in at  {dashboard}   (show the key again: localgate admin-key)")
         typer.echo("  Or create an email/password login: localgate users create")
         typer.echo()
+    if not is_loopback_host(bind_host):
+        _print_share_box(bind_port, settings)
     common: dict = {
-        "host": host or settings.host,
-        "port": port or settings.port,
+        "host": bind_host,
+        "port": bind_port,
         "log_config": None,  # localgate configures structlog itself
     }
     if proxy_headers:
@@ -238,11 +278,37 @@ def serve(
         # rather than forking a supervisor that exits immediately after handing off.
         from localgate.app import create_app  # noqa: PLC0415
 
-        uvicorn.run(create_app(), reload=reload, **common)
+        # The app needs the port it's actually on (for the LAN announcement), and
+        # --share turns that announcement on.
+        app_settings = settings.model_copy(
+            update={"port": bind_port, "discovery_enabled": settings.discovery_enabled or share}
+        )
+        uvicorn.run(create_app(app_settings), reload=reload, **common)
     else:
         # Multi-worker: must use a string import path + factory so each worker
         # forks and calls create_app() independently.
         uvicorn.run("localgate.app:create_app", factory=True, workers=workers, **common)
+
+
+def _print_share_box(port: int, settings: Settings) -> None:
+    """Where other devices reach this gateway, and how to hand them access."""
+    urls = share_urls(port, settings.public_url)
+    typer.secho("Sharing this machine's models", fg=typer.colors.GREEN, bold=True)
+    if not urls:
+        typer.echo("  No network address found — is this machine on a network?")
+    for entry in urls:
+        typer.echo(f"  {entry['label']:<14} {entry['url']}/v1")
+    typer.echo(
+        f"  Give each device its own key: http://127.0.0.1:{port}/dashboard/#/share "
+        "(or `localgate keys create --name <device>`)."
+    )
+    if not settings.public_url:
+        typer.secho(
+            "  This is plain HTTP — fine on your own network or Tailscale. For the internet, "
+            "put HTTPS in front (docs/sharing.md: Tailscale, Cloudflare Tunnel, Caddy).",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo()
 
 
 @app.command()
@@ -515,6 +581,17 @@ def _first_account_setup(settings: Settings) -> str | None:
     return normalize_email(email)
 
 
+def _audit_cli(settings: Settings, action: str, target: str | None, **details: Any) -> None:
+    """Record an admin action taken from this terminal (actor "cli")."""
+    from localgate.db.repositories.audit import AuditRepository  # noqa: PLC0415
+
+    async def write(session: Any) -> None:
+        await AuditRepository(session).record("cli", action, target, details or None)
+
+    with contextlib.suppress(Exception):  # auditing must never break the action
+        _run(_with_session(settings, write))
+
+
 @users_app.command("create")
 def users_create(
     email: str | None = typer.Option(None, "--email", help="Sign-in email."),
@@ -541,6 +618,7 @@ def users_create(
     if not _run(create()):
         typer.secho(f"An account for {normalize_email(email)} already exists.", fg=typer.colors.RED)
         raise typer.Exit(code=1)
+    _audit_cli(settings, "user.created", normalize_email(email))
     typer.secho(
         f"Created {normalize_email(email)} — sign in at /dashboard/.", fg=typer.colors.GREEN
     )
@@ -576,6 +654,7 @@ def users_passwd(email: str = typer.Argument(..., help="The account's email.")) 
     if not _run(_with_session(settings, change)):
         typer.secho(f"No account for {normalize_email(email)}.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    _audit_cli(settings, "user.password_changed", normalize_email(email))
     typer.secho("Password changed.", fg=typer.colors.GREEN)
 
 
@@ -596,7 +675,123 @@ def users_delete(email: str = typer.Argument(..., help="The account's email.")) 
     if not _run(_with_session(settings, remove)):
         typer.secho(f"No account for {normalize_email(email)}.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    _audit_cli(settings, "user.deleted", normalize_email(email))
     typer.secho(f"Deleted {normalize_email(email)}.", fg=typer.colors.GREEN)
+
+
+# ---------------------------------------------------------------------- service
+
+
+def _service_plan(serve_args: list[str]) -> Any:
+    from localgate import service  # noqa: PLC0415
+
+    try:
+        return service.plan(serve_args)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _run_steps(steps: list[list[str]], *, check: bool = True) -> bool:
+    for step in steps:
+        try:
+            done = subprocess.run(step, check=False, capture_output=True, text=True)  # noqa: S603
+        except FileNotFoundError:
+            typer.secho(f"  {step[0]} isn't available on this machine.", fg=typer.colors.RED)
+            return False
+        if done.returncode != 0 and check:
+            typer.secho(
+                f"  `{' '.join(step)}` failed: {(done.stderr or done.stdout).strip()}",
+                fg=typer.colors.RED,
+            )
+            return False
+    return True
+
+
+@service_app.command("install")
+def service_install(
+    share: bool = typer.Option(
+        False, "--share", help="Serve other devices too (see `serve --share`)."
+    ),
+    host: str | None = typer.Option(None, "--host", help="Interface to bind."),
+    port: int | None = typer.Option(None, "--port", help="Port to bind."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be installed."),
+) -> None:
+    """Start `localgate serve` at login and keep it running."""
+    serve_args = (
+        (["--share"] if share else [])
+        + (["--host", host] if host else [])
+        + (["--port", str(port)] if port else [])
+    )
+    plan = _service_plan(serve_args)
+    if dry_run:
+        typer.secho(f"{plan.platform}" + (f" — {plan.path}" if plan.path else ""), bold=True)
+        typer.echo(plan.content)
+        for step in plan.install:
+            typer.echo("$ " + " ".join(step))
+        return
+    # The service runs without a terminal, so it can't ask for anything: make sure
+    # there's an admin key and a migrated database before it starts.
+    _ensure_admin_key()
+    paths.log_dir().mkdir(parents=True, exist_ok=True)
+    if plan.path is not None:
+        plan.path.parent.mkdir(parents=True, exist_ok=True)
+        _run_steps(plan.uninstall, check=False)  # replace an older install cleanly
+        plan.path.write_text(plan.content, encoding="utf-8")
+    if not _run_steps(plan.install):
+        raise typer.Exit(code=1)
+    typer.secho(f"Installed: {plan.platform}.", fg=typer.colors.GREEN)
+    typer.echo("  localgate starts now and at every login. `localgate service status` checks it.")
+    if sys.platform.startswith("linux"):
+        typer.echo("  To keep it running while logged out: loginctl enable-linger $USER")
+
+
+@service_app.command("uninstall")
+def service_uninstall() -> None:
+    """Stop the background gateway and remove it from login."""
+    plan = _service_plan([])
+    _run_steps(plan.uninstall, check=False)
+    if plan.path is not None and plan.path.exists():
+        plan.path.unlink()
+    typer.secho("Removed the localgate service.", fg=typer.colors.GREEN)
+
+
+@service_app.command("status")
+def service_status() -> None:
+    """Whether the background gateway is installed and running."""
+    plan = _service_plan([])
+    if plan.path is not None and not plan.path.exists():
+        typer.echo("Not installed. Install it with: localgate service install")
+        raise typer.Exit(code=1)
+    result = subprocess.run(plan.status, check=False, capture_output=True, text=True)  # noqa: S603
+    typer.echo((result.stdout or result.stderr).strip() or "(no output)")
+    raise typer.Exit(code=0 if result.returncode == 0 else 1)
+
+
+@service_app.command("logs")
+def service_logs() -> None:
+    """The background gateway's recent log output."""
+    plan = _service_plan([])
+    result = subprocess.run(plan.logs, check=False, capture_output=True, text=True)  # noqa: S603
+    typer.echo((result.stdout or result.stderr).strip() or "(no log output yet)")
+
+
+@app.command()
+def audit(
+    limit: int = typer.Option(30, "--limit", "-n", help="How many recent actions to show."),
+) -> None:
+    """Recent admin actions: keys created, changed, revealed or revoked; sign-ins; accounts."""
+    from localgate.db.repositories.audit import AuditRepository  # noqa: PLC0415
+
+    settings = _settings()
+    events = _run(_with_session(settings, lambda s: AuditRepository(s).recent(limit)))
+    if not events:
+        typer.echo("No admin actions recorded yet.")
+        return
+    for event in events:
+        when = as_utc(event.at).strftime("%Y-%m-%d %H:%M") if event.at else "?"
+        target = f" {event.target}" if event.target else ""
+        typer.echo(f"  {when}  {event.actor:<24} {event.action}{target}")
 
 
 # ---------------------------------------------------------------------------- doctor
@@ -678,6 +873,30 @@ def doctor() -> None:
     else:
         _check("admin key", "set (non-default)")
 
+    typer.secho("\n--- network exposure ---", bold=True)
+    if is_loopback_host(settings.host):
+        _check("listens on", f"{settings.host} (this machine only; `serve --share` to share)")
+    else:
+        _check("listens on", f"{settings.host} (reachable from the network)", warn=True)
+    everyone = "0.0.0.0/0" in settings.admin_allowed_networks
+    _check(
+        "dashboard, /admin, /docs",
+        "anyone (LOCALGATE_ADMIN_ALLOWED_NETWORKS=*)"
+        if everyone
+        else "trusted networks only: " + ", ".join(settings.admin_allowed_networks),
+        warn=everyone,
+    )
+    _check(
+        "public URL",
+        settings.public_url or "not set (devices use this machine's address; plain HTTP)",
+        warn=bool(settings.public_url and settings.public_url.startswith("http://")),
+    )
+    _check(
+        "inference queue",
+        f"{settings.max_concurrent_requests} at once, wait up to "
+        f"{settings.queue_timeout:.0f} s, at most {settings.max_queue} waiting",
+    )
+
     typer.secho("\n--- database ---", bold=True)
 
     async def check_db() -> tuple[str | None, str | None]:
@@ -725,7 +944,7 @@ def login(
     url: str = typer.Option(
         ...,
         "--url",
-        help="Base URL of the gateway, e.g. https://gw.example.com",
+        help="The gateway's URL (http://192.168.1.20:8000), or a name from `localgate discover`.",
     ),
     api_key: str = typer.Option(
         ...,
@@ -743,7 +962,7 @@ def login(
     and checks the gateway version via /health/live.
     After login, `localgate code --remote` will route to this gateway.
     """
-    base = url.rstrip("/")
+    base = _resolve_gateway_url(url)
 
     if api_key == INSECURE_ADMIN_KEY or api_key.startswith("X-Admin-Key"):
         typer.secho(
@@ -777,16 +996,13 @@ def login(
                 raise typer.Exit(code=1)
             resp.raise_for_status()
 
-            from localgate import __version__ as local_version  # noqa: PLC0415
-
-            major_mismatch = (
-                remote_version != "unknown"
-                and remote_version.split(".")[0] != local_version.split(".")[0]
-            )
-            if major_mismatch:
+            # 0.x and 1.x speak the same API; a pre-1.0 gateway only lacks the model
+            # details and limits a 1.x client can show. Warn about that, not about
+            # every difference in version numbers.
+            if remote_version != "unknown" and remote_version.split(".")[0] == "0":
                 typer.secho(
-                    f"Warning: local version {local_version} and gateway version {remote_version} "
-                    "have different major versions — some features may not work.",
+                    f"Note: the gateway runs localgate {remote_version}. Upgrading it to 1.x "
+                    "gives `localgate code --remote` model details and context sizing.",
                     fg=typer.colors.YELLOW,
                 )
 
@@ -804,6 +1020,49 @@ def login(
 
     typer.secho(f"Logged in to {base}", fg=typer.colors.GREEN)
     typer.echo("Run `localgate whoami` to verify, or `localgate code --remote` to use the gateway.")
+
+
+@app.command()
+def discover(
+    timeout: float = typer.Option(3.0, "--timeout", help="Seconds to listen for gateways."),
+) -> None:
+    """List localgate gateways on this network (ones started with `serve --share`)."""
+    from localgate.core.discovery import DiscoveryUnavailable, discover  # noqa: PLC0415
+
+    try:
+        found = _run(discover(timeout))
+    except DiscoveryUnavailable as exc:
+        typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=2) from exc
+    if not found:
+        typer.echo("No gateways found. On the GPU machine, run: localgate serve --share")
+        raise typer.Exit(code=1)
+    for gateway in found:
+        typer.echo(f"  {gateway.name:<24} {gateway.url:<28} v{gateway.version}")
+    typer.echo(f"\nConnect: localgate login --url {found[0].name} --api-key <key>")
+
+
+def _resolve_gateway_url(url: str) -> str:
+    """A URL as given, or a gateway name found on the local network."""
+    if "://" in url:
+        return url.rstrip("/")
+    from localgate.core.discovery import DiscoveryUnavailable, discover  # noqa: PLC0415
+
+    try:
+        found = {g.name: g.url for g in _run(discover(3.0))}
+    except DiscoveryUnavailable as exc:
+        typer.secho(f"{url!r} isn't a URL. {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    if url not in found:
+        typer.secho(
+            f"No gateway called {url!r} on this network. `localgate discover` lists them; "
+            "or pass a URL like http://192.168.1.20:8000.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    typer.echo(f"Found {url} at {found[url]}")
+    return found[url]
 
 
 @app.command()
@@ -831,8 +1090,28 @@ def whoami() -> None:
         typer.secho(f"Could not reach gateway: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=6) from exc
 
-    typer.echo(f"Gateway: {base}")
-    typer.echo(json.dumps(data, indent=2))
+    typer.echo(f"Gateway   {base}")
+    if data.get("name"):
+        typer.echo(f"Key       {data['name']}")
+    typer.echo(
+        f"Usage     {data.get('request_count', 0):,} requests, "
+        f"{data.get('total_tokens', 0):,} tokens"
+    )
+    limits = data.get("limits") or {}
+    models = limits.get("allowed_models")
+    typer.echo(f"Models    {', '.join(models) if models else 'any'}")
+    quota = limits.get("token_quota")
+    if quota:
+        used = data.get("tokens_this_period") or 0
+        typer.echo(
+            f"Quota     {used:,} / {quota:,} tokens this {limits.get('quota_period', 'month')}"
+        )
+    if limits.get("max_tokens"):
+        typer.echo(f"Replies   up to {limits['max_tokens']:,} tokens")
+    if limits.get("expires_at"):
+        typer.echo(f"Expires   {limits['expires_at'][:10]}")
+    if limits.get("store_conversations") is False:
+        typer.echo("History   not stored on the gateway")
 
 
 # ---------------------------------------------------------------------------- agent
@@ -1020,7 +1299,7 @@ def code(
             raise typer.Exit(code=2)
         gw_url, gw_key = gateway_creds
         backend = get_backend(
-            "openai_compat",
+            "localgate",
             gw_url,
             api_key=gw_key,
             timeout=settings.backend_timeout,
@@ -1052,7 +1331,7 @@ def code(
         try:
             supports_tools = await backend.check_tool_support(resolved_model)
             native_tools = True
-            if supports_tools is False and backend.name == "ollama":
+            if supports_tools is False and backend.accepts_options:
                 # Ollama can grammar-constrain replies, so a model without native
                 # tools still gets a working (if slower) JSON tool protocol.
                 native_tools = False
@@ -1374,6 +1653,84 @@ def voice_listen(
     typer.echo(result.text)
 
 
+# ------------------------------------------------------------------ key limits
+
+_DURATION_UNITS = {"h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def _parse_expires(text: str) -> datetime | None:
+    """`30d`, `12h`, `2w`, `2026-12-31`, or `never` (no expiry)."""
+    value = text.strip().lower()
+    if value in ("never", "none", ""):
+        return None
+    if value[-1:] in _DURATION_UNITS and value[:-1].isdigit():
+        return datetime.now(timezone.utc) + timedelta(
+            seconds=int(value[:-1]) * _DURATION_UNITS[value[-1]]
+        )
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "use a duration like 30d / 12h / 2w, a date like 2026-12-31, or 'never'"
+        ) from exc
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _parse_models(text: str) -> list[str] | None:
+    """Comma-separated model names; `any` (or empty) means no restriction."""
+    names = [name.strip() for name in text.split(",") if name.strip()]
+    return None if not names or names == ["any"] else names
+
+
+def _limit_columns(
+    *,
+    models: str | None,
+    max_tokens: int | None,
+    quota: int | None,
+    quota_period: str | None,
+    expires: str | None,
+    max_concurrent: int | None,
+    store_conversations: bool | None,
+) -> dict[str, Any]:
+    """Only the limits that were given. For numbers, 0 removes the limit."""
+    columns: dict[str, Any] = {}
+    if models is not None:
+        columns["allowed_models"] = _parse_models(models)
+    for column, value in (
+        ("max_tokens", max_tokens),
+        ("token_quota", quota),
+        ("max_concurrent", max_concurrent),
+    ):
+        if value is not None:
+            columns[column] = value or None
+    if quota_period is not None:
+        if quota_period not in QUOTA_PERIODS:
+            raise typer.BadParameter("--quota-period must be 'day' or 'month'")
+        columns["quota_period"] = quota_period
+    if expires is not None:
+        columns["expires_at"] = _parse_expires(expires)
+    if store_conversations is not None:
+        columns["store_conversations"] = store_conversations
+    return columns
+
+
+def _describe_limits(key: Any) -> list[str]:
+    parts = []
+    if key.allowed_models:
+        parts.append("models " + ",".join(key.allowed_models))
+    if key.max_tokens:
+        parts.append(f"max {key.max_tokens} tokens/reply")
+    if key.token_quota:
+        parts.append(f"{key.token_quota:,} tokens/{key.quota_period or 'month'}")
+    if key.expires_at:
+        parts.append(f"expires {as_utc(key.expires_at):%Y-%m-%d}")
+    if key.max_concurrent:
+        parts.append(f"{key.max_concurrent} at once")
+    if key.store_conversations is False:
+        parts.append("conversations not stored")
+    return parts
+
+
 @keys_app.command("create")
 def keys_create(
     name: str = typer.Option(..., "--name", "-n", help="A label, e.g. the app that will use it."),
@@ -1382,32 +1739,57 @@ def keys_create(
         "--rate-limit",
         help="Requests per minute. Defaults to LOCALGATE_DEFAULT_RATE_LIMIT_PER_MIN.",
     ),
+    models: str | None = typer.Option(
+        None, "--models", help="Only these models (comma-separated). Default: any."
+    ),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", help="Cap on reply length."),
+    quota: int | None = typer.Option(None, "--quota", help="Tokens allowed per quota period."),
+    quota_period: str | None = typer.Option(None, "--quota-period", help="'day' or 'month'."),
+    expires: str | None = typer.Option(
+        None, "--expires", help="When the key stops working: 30d, 12h, 2w or 2026-12-31."
+    ),
+    max_concurrent: int | None = typer.Option(
+        None, "--max-concurrent", help="Requests this key may have running at once."
+    ),
+    store_conversations: bool = typer.Option(
+        True,
+        "--store-conversations/--no-store-conversations",
+        help="Keep this key's conversations for memory (the owner can read them).",
+    ),
 ) -> None:
     """Create an API key and print it. This is the only time it is ever shown."""
     settings = _settings()
     limit = rate_limit or settings.default_rate_limit_per_min
+    policy = _limit_columns(
+        models=models,
+        max_tokens=max_tokens,
+        quota=quota,
+        quota_period=quota_period,
+        expires=expires,
+        max_concurrent=max_concurrent,
+        store_conversations=None if store_conversations else False,
+    )
 
-    async def create(session: Any) -> tuple[str, str]:
+    async def create(session: Any) -> tuple[Any, str]:
         vault_key = settings.admin_key if settings.api_key_reveal_enabled else None
-        key, raw = await APIKeyRepository(session).create(name, limit, admin_key=vault_key)
-        return key.id, raw
+        return await APIKeyRepository(session).create(
+            name, limit, admin_key=vault_key, policy=policy
+        )
 
-    async def migrate_then_create() -> tuple[str, str]:
+    async def migrate_then_create() -> tuple[Any, str]:
         # A first-run `keys create` shouldn't fail just because nobody has run
         # `db upgrade` yet — creating your first key is how you start.
-        engine = make_engine(resolve_database_url(settings))
-        try:
-            await init_models(engine)
-        finally:
-            await engine.dispose()
+        await _migrate(settings)
         return await _with_session(settings, create)
 
-    key_id, raw_key = _run(migrate_then_create())
+    key, raw_key = _run(migrate_then_create())
 
     typer.secho(f"\n  {raw_key}\n", fg=typer.colors.GREEN, bold=True)
-    typer.echo(f"  id           {key_id}")
+    typer.echo(f"  id           {key.id}")
     typer.echo(f"  name         {name}")
     typer.echo(f"  rate limit   {limit}/min")
+    for part in _describe_limits(key):
+        typer.echo(f"  limit        {part}")
     typer.secho(
         "\n  Store it now — only its hash is kept, so it cannot be shown again.\n",
         fg=typer.colors.YELLOW,
@@ -1430,6 +1812,8 @@ def keys_list(
                 "revoked": key.revoked,
                 "rate_limit_per_min": key.rate_limit_per_min,
                 "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
+                "limits": _describe_limits(key),
+                "expired": is_expired(key),
             }
             for key in await APIKeyRepository(session).list_all()
         ]
@@ -1446,15 +1830,18 @@ def keys_list(
 
     typer.echo(f"{'ID':<38} {'NAME':<20} {'PREFIX':<13} {'LIMIT':<7} STATUS")
     for row in rows:
-        status = (
-            typer.style("revoked", fg=typer.colors.RED)
-            if row["revoked"]
-            else typer.style("active", fg=typer.colors.GREEN)
-        )
+        if row["revoked"]:
+            status = typer.style("revoked", fg=typer.colors.RED)
+        elif row["expired"]:
+            status = typer.style("expired", fg=typer.colors.YELLOW)
+        else:
+            status = typer.style("active", fg=typer.colors.GREEN)
         typer.echo(
             f"{row['id']:<38} {row['name'][:19]:<20} {row['prefix']:<13} "
             f"{str(row['rate_limit_per_min']) + '/min':<7} {status}"
         )
+        if row["limits"]:
+            typer.secho(f"{'':<38} " + " · ".join(row["limits"]), fg=typer.colors.BRIGHT_BLACK)
 
 
 @keys_app.command("revoke")
@@ -1475,21 +1862,58 @@ def keys_revoke(key_id: str = typer.Argument(..., help="The key's id (from `keys
 @keys_app.command("update")
 def keys_update(
     key_id: str = typer.Argument(..., help="The key's id (from `keys list`)."),
-    rate_limit: int = typer.Option(
-        ..., "--rate-limit", help="New requests-per-minute limit for this key."
+    rate_limit: int | None = typer.Option(
+        None, "--rate-limit", help="New requests-per-minute limit for this key."
+    ),
+    models: str | None = typer.Option(
+        None, "--models", help="Only these models (comma-separated); 'any' removes the limit."
+    ),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", help="Reply cap; 0 removes it."),
+    quota: int | None = typer.Option(None, "--quota", help="Tokens per period; 0 removes it."),
+    quota_period: str | None = typer.Option(None, "--quota-period", help="'day' or 'month'."),
+    expires: str | None = typer.Option(
+        None, "--expires", help="30d, 12h, 2w, 2026-12-31, or 'never'."
+    ),
+    max_concurrent: int | None = typer.Option(
+        None, "--max-concurrent", help="Requests at once; 0 removes the limit."
+    ),
+    store_conversations: bool | None = typer.Option(
+        None, "--store-conversations/--no-store-conversations", help="Keep conversations."
     ),
 ) -> None:
-    """Update a key's rate limit."""
+    """Change a key's rate limit or other limits without reissuing it."""
     settings = _settings()
+    columns = _limit_columns(
+        models=models,
+        max_tokens=max_tokens,
+        quota=quota,
+        quota_period=quota_period,
+        expires=expires,
+        max_concurrent=max_concurrent,
+        store_conversations=store_conversations,
+    )
+    if rate_limit is not None:
+        columns["rate_limit_per_min"] = rate_limit
+    if not columns:
+        typer.secho("Nothing to change — pass at least one option.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=2)
 
-    async def update(session: Any) -> bool:
-        return await APIKeyRepository(session).set_rate_limit(key_id, rate_limit)
+    async def update(session: Any) -> Any:
+        repo = APIKeyRepository(session)
+        if not await repo.update_policy(key_id, columns):
+            return None
+        key = await repo.get(key_id)
+        if key is not None:
+            await session.refresh(key)
+        return key
 
-    if not _run(_with_session(settings, update)):
+    key = _run(_with_session(settings, update))
+    if key is None:
         typer.secho(f"No API key with id {key_id!r}.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    typer.secho(f"Updated {key_id}: rate limit is now {rate_limit}/min.", fg=typer.colors.GREEN)
+    summary = [f"{key.rate_limit_per_min}/min", *_describe_limits(key)]
+    typer.secho(f"Updated {key_id}: " + " · ".join(summary), fg=typer.colors.GREEN)
 
 
 @keys_app.command("usage")
@@ -1657,22 +2081,26 @@ def deploy(
     # Generate a fresh admin key for this deployment.
     deploy_admin_key = secrets.token_urlsafe(32)
 
+    # Caddy runs next to the gateway: in its own container for compose (so the
+    # gateway is `localgate:8000` on the compose network), on the host for systemd.
+    upstream = "localgate:8000" if target == "compose" else "localhost:8000"
+
     # --- Caddyfile ---
     admin_routes = ""
     if expose_admin:
-        admin_routes = """
+        admin_routes = f"""
     # Admin and dashboard — restrict to trusted IPs or remove this block and use SSH tunnelling.
-    @admin {
+    @admin {{
         path /admin* /dashboard* /metrics /docs /redoc
-    }
+    }}
     # Uncomment and fill in your IP:
-    # @allowed_admin { remote_ip <your-ip> }
-    # handle @admin {
-    #     reverse_proxy localhost:8000
-    # }
-    handle @admin {
+    # @allowed_admin {{ remote_ip <your-ip> }}
+    # handle @admin {{
+    #     reverse_proxy {upstream}
+    # }}
+    handle @admin {{
         respond "Forbidden" 403
-    }
+    }}
 """
     caddyfile_content = f"""{domain} {{
     # Expose only the client-facing API and health by default.
@@ -1680,7 +2108,7 @@ def deploy(
         path /v1/* /health*
     }}
     handle @public {{
-        reverse_proxy localhost:8000
+        reverse_proxy {upstream}
     }}
 {admin_routes}
     # Block everything else.
@@ -1694,7 +2122,8 @@ def deploy(
     env_content = (
         f"LOCALGATE_ADMIN_KEY={deploy_admin_key}\n"
         "LOCALGATE_ENVIRONMENT=production\n"
-        "LOCALGATE_HOST=127.0.0.1\n"
+        # Inside a container 127.0.0.1 is the container itself, unreachable from Caddy.
+        f"LOCALGATE_HOST={'0.0.0.0' if target == 'compose' else '127.0.0.1'}\n"  # noqa: S104
         f"LOCALGATE_DATABASE_URL=sqlite+aiosqlite:////data/localgate.db\n"
     )
 
@@ -1704,6 +2133,9 @@ def deploy(
     image: ghcr.io/anjallll/localgate:latest
     restart: unless-stopped
     env_file: localgate.env
+    # Behind Caddy every request comes from Caddy's address; trusting its
+    # X-Forwarded-For is what lets the gateway see — and restrict — real clients.
+    command: ["localgate", "serve", "--proxy-headers", "--forwarded-allow-ips", "*"]
     volumes:
       - localgate_data:/data
     ports:
@@ -1740,7 +2172,7 @@ After=network.target
 Type=simple
 User=localgate
 EnvironmentFile=/etc/localgate/localgate.env
-ExecStart=/usr/local/bin/localgate serve
+ExecStart=/usr/local/bin/localgate serve --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=on-failure
 RuntimeDirectory=localgate
 StateDirectory=localgate

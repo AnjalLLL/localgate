@@ -52,6 +52,21 @@ class RateLimiter:
         used = sum(1 for t in self._hits.get(key_id, ()) if t > window_start)
         return max(limit_per_window - used, 0)
 
+    def retry_after(self, key_id: str) -> float:
+        """Seconds until the oldest hit in ``key_id``'s window expires — when one
+        more request will be allowed again. 0 when the window is empty."""
+        hits = self._hits.get(key_id)
+        if not hits:
+            return 0.0
+        return max(0.0, hits[0] + self.window_seconds - time.monotonic())
+
+    async def check(self, key_id: str, limit_per_window: int) -> tuple[bool, float]:
+        """`allow` plus, when refused, how long until a request would pass — the
+        interface `enforce_rate_limit` uses, shared with `RedisRateLimiter`."""
+        if self.allow(key_id, limit_per_window):
+            return True, 0.0
+        return False, self.retry_after(key_id)
+
     def reset(self, key_id: str | None = None) -> None:
         if key_id is None:
             self._hits.clear()

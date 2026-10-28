@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localgate"
-version = "0.14.0"
+version = "1.0.0"
 description = "A local-first API gateway for open-source LLMs: auth, RAG memory extension, DB connectors, token accounting, and a built-in coding agent."
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,7 +22,7 @@ keywords = [
     "coding-agent",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -52,10 +52,15 @@ dependencies = [
     "mcp>=1.0",
     "caniollama>=0.1.0",
     "cryptography>=42",
+    "segno>=1.6",  # QR codes for the dashboard's Share page (pure Python, no deps)
 ]
 
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.29"]
+# Rate limits and per-key concurrency shared across worker processes (LOCALGATE_REDIS_URL).
+redis = ["redis>=5"]
+# Find gateways on the local network (`serve --share` advertises, `localgate discover` lists).
+discovery = ["zeroconf>=0.130"]
 # Local voice: Piper TTS (GPL-3.0, optional) and faster-whisper STT.
 voice = [
   "piper-tts>=1.3",
@@ -95,6 +100,7 @@ ollama = "localgate.backends.ollama:OllamaBackend"
 vllm = "localgate.backends.vllm:VLLMBackend"
 llamacpp = "localgate.backends.llamacpp:LlamaCppBackend"
 openai_compat = "localgate.backends.openai_compat:OpenAICompatBackend"
+localgate = "localgate.backends.localgate_remote:LocalgateBackend"
 fake = "localgate.backends.fake:FakeBackend"
 
 [tool.hatch.build.targets.wheel]

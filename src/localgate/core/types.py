@@ -124,6 +124,13 @@ class ModelCard(BaseModel):
     object: Literal["model"] = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "localgate"
+    # localgate extensions — OpenAI SDKs ignore unknown fields on model objects.
+    # `localgate code --remote` reads them to size prompts and pick a tool mode.
+    context_window: int | None = None
+    capabilities: list[str] | None = None
+    parameter_size: str | None = None
+    quantization: str | None = None
+    size_human: str | None = None
 
 
 class ModelList(BaseModel):

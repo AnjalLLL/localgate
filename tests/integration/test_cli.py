@@ -5,6 +5,8 @@ The CLI talks to the database directly rather than to a running server, because
 the server won't start. These tests drive it the same way, against a temp database.
 """
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
@@ -58,7 +60,7 @@ def test_db_upgrade_then_current(env):
 
     current = runner.invoke(app, ["db", "current"])
     assert current.exit_code == 0
-    assert "0007" in current.stdout
+    assert "0009" in current.stdout
 
 
 def test_db_current_on_an_unmigrated_database_says_what_to_do(env):
@@ -271,3 +273,98 @@ def test_users_create_rejects_a_short_password(env):
     )
     assert result.exit_code == 0
     assert "at least 8 characters" in result.stdout
+
+
+# ---------------------------------------------------------------- key limits
+
+
+def test_keys_create_and_update_set_limits(env):
+    created = runner.invoke(
+        app,
+        [
+            "keys", "create", "--name", "phone", "--models", "llama3,qwen2.5-coder:7b",
+            "--max-tokens", "256", "--quota", "100000", "--quota-period", "day",
+            "--expires", "30d", "--no-store-conversations",
+        ],
+    )  # fmt: skip
+    assert created.exit_code == 0, created.output
+    assert "models llama3,qwen2.5-coder:7b" in created.stdout
+    assert "100,000 tokens/day" in created.stdout
+    assert "conversations not stored" in created.stdout
+
+    rows = json.loads(runner.invoke(app, ["keys", "list", "--json"]).stdout)
+    key_id = rows[0]["id"]
+    updated = runner.invoke(
+        app,
+        ["keys", "update", key_id, "--models", "any", "--max-tokens", "0", "--expires", "never"],
+    )
+    assert updated.exit_code == 0, updated.output
+    assert "models" not in updated.stdout and "max 256" not in updated.stdout
+    assert "100,000 tokens/day" in updated.stdout  # untouched
+
+
+def test_keys_update_with_nothing_to_change_says_so(env):
+    runner.invoke(app, ["keys", "create", "--name", "x"])
+    key_id = json.loads(runner.invoke(app, ["keys", "list", "--json"]).stdout)[0]["id"]
+    result = runner.invoke(app, ["keys", "update", key_id])
+    assert result.exit_code == 2
+
+
+def test_bad_expiry_is_rejected(env):
+    result = runner.invoke(app, ["keys", "create", "--name", "x", "--expires", "soonish"])
+    assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------- sharing
+
+
+def test_serve_share_listens_on_the_network_and_prints_addresses(fresh, monkeypatch):
+    started: list[dict] = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: started.append(kwargs))
+    monkeypatch.setattr(
+        "localgate.cli.share_urls",
+        lambda port, public_url=None: [
+            {"label": "Local network", "url": f"http://192.168.1.20:{port}"}
+        ],
+    )
+    result = runner.invoke(app, ["serve", "--share"])
+    assert result.exit_code == 0, result.output
+    assert started[0]["host"] == "0.0.0.0"
+    assert "http://192.168.1.20:8000/v1" in result.stdout
+    assert "/dashboard/#/share" in result.stdout
+
+
+def test_serve_refuses_the_network_with_the_placeholder_key(fresh, monkeypatch):
+    from localgate.config import INSECURE_ADMIN_KEY
+
+    monkeypatch.setenv("LOCALGATE_ADMIN_KEY", INSECURE_ADMIN_KEY)
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: pytest.fail("must not start"))
+    result = runner.invoke(app, ["serve", "--host", "192.168.1.20"])
+    assert result.exit_code == 2
+    assert "placeholder admin key" in result.stderr
+
+
+def test_compose_deploy_reaches_the_gateway_from_caddy(env, tmp_path):
+    out = tmp_path / "deploy"
+    result = runner.invoke(
+        app,
+        ["deploy", "--domain", "gw.example.com", "--target", "compose", "--output-dir", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "reverse_proxy localgate:8000" in (out / "Caddyfile").read_text()
+    assert "LOCALGATE_HOST=0.0.0.0" in (out / "localgate.env").read_text()
+    assert "--proxy-headers" in (out / "docker-compose.yml").read_text()
+
+
+def test_account_changes_from_the_cli_are_audited(env):
+    runner.invoke(
+        app,
+        ["users", "create", "--email", "ana@example.com"],
+        input="correct horse\ncorrect horse\n",
+    )
+    runner.invoke(app, ["users", "delete", "ana@example.com"])
+    result = runner.invoke(app, ["audit"])
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert "user.deleted ana@example.com" in lines[0] and "cli" in lines[0]
+    assert "user.created ana@example.com" in lines[1]

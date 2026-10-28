@@ -7,12 +7,12 @@ embed text through the same base URL and the same key as everything else.
 
 from __future__ import annotations
 
-import httpx
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import enforce_rate_limit, get_session
-from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.backend_pool import PooledBackend, call_with_failover
+from localgate.core.key_policy import enforce_key_access
 from localgate.core.token_counter import count_tokens
 from localgate.core.types import EmbeddingItem, EmbeddingsRequest, EmbeddingsResponse, Usage
 from localgate.db.models import APIKey
@@ -29,16 +29,18 @@ async def create_embeddings(
     session: AsyncSession = Depends(get_session),
 ) -> EmbeddingsResponse:
     settings = request.app.state.settings
-    backend = request.app.state.backend
     model = settings.resolve_model(body.model) if body.model else settings.embedding_model
+    await enforce_key_access(
+        api_key, body.model, model, session, check_model=body.model is not None
+    )
 
     inputs = body.inputs()
-    try:
-        vectors = [await backend.embed(text, model) for text in inputs]
-    except httpx.HTTPError as exc:
-        raise BackendError(
-            describe_backend_failure(exc, settings.backend_url, settings.backend_type)
-        ) from exc
+    targets = await request.app.state.pool.route(model)
+
+    async def embed_all(target: PooledBackend) -> list[list[float]]:
+        return [await target.backend.embed(text, model) for text in inputs]
+
+    vectors = await call_with_failover(targets, api_key.id, api_key.max_concurrent, embed_all)
 
     # Embeddings consume backend capacity like any other call, so they are billed
     # against the key. Leaving them out would let a client embed without limit and

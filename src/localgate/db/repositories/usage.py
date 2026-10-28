@@ -36,6 +36,16 @@ class UsageRepository:
         await self.session.commit()
         return record
 
+    async def tokens_since(self, api_key_id: str, since: datetime) -> int:
+        """Tokens a key used from ``since`` on, for quotas. Cached replies are
+        left out: they cost the GPU nothing."""
+        stmt = select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(
+            UsageRecord.api_key_id == api_key_id,
+            UsageRecord.created_at >= since,
+            UsageRecord.cached.is_(False),
+        )
+        return int((await self.session.execute(stmt)).scalar_one())
+
     async def summary_for_key(self, api_key_id: str) -> dict:
         stmt = select(
             func.count(UsageRecord.id),

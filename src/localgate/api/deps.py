@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from localgate.core import metrics
 from localgate.core.auth import ADMIN_COOKIE, constant_time_equals, verify_admin_session
 from localgate.core.errors import AuthenticationError, RateLimitError
+from localgate.core.key_policy import as_utc, is_expired
 from localgate.db.models import APIKey
 from localgate.db.repositories.keys import APIKeyRepository
 
@@ -50,6 +51,13 @@ async def require_api_key(
             code="invalid_api_key",
         )
 
+    if key.expires_at is not None and is_expired(key):
+        raise AuthenticationError(
+            f"This API key expired on {as_utc(key.expires_at):%Y-%m-%d} UTC. "
+            "Ask the gateway's owner for a new one.",
+            code="key_expired",
+        )
+
     await repo.touch_last_used(key.id)
     return key
 
@@ -65,12 +73,14 @@ async def enforce_rate_limit(
     even though several dependencies ask for it.
     """
     limiter = request.app.state.rate_limiter
-    if not limiter.allow(api_key.id, api_key.rate_limit_per_min):
+    allowed, retry_after = await limiter.check(api_key.id, api_key.rate_limit_per_min)
+    if not allowed:
         metrics.rate_limited_total.inc()
         raise RateLimitError(
             f"Rate limit exceeded for this key ({api_key.rate_limit_per_min} requests/minute). "
             "Raise it with `localgate keys update <id> --rate-limit N`, or retry shortly.",
             code="rate_limit_exceeded",
+            retry_after=retry_after,
         )
     return api_key
 

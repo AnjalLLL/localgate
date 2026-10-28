@@ -4,6 +4,89 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] — 2026-10-29 — share your GPU
+
+localgate was built for one idea: a machine with a good GPU runs the models, and every
+other device — laptops, phones, apps, teammates — uses them through it with its own API
+key. 1.0 makes that real. `localgate serve --share` puts the gateway on the network, the
+dashboard's Share page hands a device a limited key with a QR code, a fair queue shares the
+GPU, the admin side stays on your own network, and several GPUs or machines can sit behind
+one gateway.
+
+**Upgrading from 0.x:** migrations `0008` (key limits) and `0009` (audit log) run
+automatically. Two defaults change — see *Changed*: the dashboard, `/admin`, the API docs
+and `/metrics` now answer only private networks, and `/health` shows details only to them.
+Behind a reverse proxy, start with `--proxy-headers --forwarded-allow-ips <proxy>`.
+
+### Added
+
+- **`localgate serve --share`**: listens on the network and prints the LAN and Tailscale
+  addresses devices should use. `LOCALGATE_PUBLIC_URL` names a tunnel or domain address.
+- **Per-key limits**: allowed models, a `max_tokens` cap, a token quota per UTC day or
+  month, an expiry date, requests at once, and whether conversations are stored. Set them
+  when creating a key or change them later (dashboard edit dialog, `localgate keys update`,
+  `PATCH /admin/keys/{id}` — a partial update where `null` clears a limit). Refusals are
+  `403 model_not_allowed`, `429 quota_exceeded` + `Retry-After`, `401 key_expired`.
+  `/v1/models` lists only the models a key may use; `/v1/usage` and `localgate whoami`
+  show a key's limits and usage this period.
+- **Fair GPU queue**: `LOCALGATE_MAX_CONCURRENT_REQUESTS` generations per backend at once;
+  the rest wait, round-robin across keys, up to `LOCALGATE_QUEUE_TIMEOUT`, then get
+  `503` + `Retry-After`. Queue size is in the admin overview and Prometheus.
+- **Dashboard Share page**: create a device's key with limits and get its base URL,
+  connect command, snippets and a **QR code** that opens the new public **`/connect`**
+  page (the key travels in the URL fragment, never sent to a server).
+- **`localgate service install | uninstall | status | logs`**: run the gateway at login and
+  restart it if it stops — launchd on macOS, a systemd user unit on Linux, a logon task on
+  Windows. `--dry-run` shows what would be installed.
+- **Several GPUs or machines** (`LOCALGATE_BACKENDS`): each request goes to a backend
+  serving its model, least busy first, with failover when one is unreachable; each backend
+  has its own queue; `/v1/models`, `/health` and the dashboard cover all of them.
+- **Shared limits across workers** (`LOCALGATE_REDIS_URL`, `localgate[redis]`): rate limits
+  and per-key concurrency hold across worker processes.
+- **LAN discovery** (`localgate[discovery]`): `serve --share` announces the gateway over
+  mDNS; `localgate discover` lists gateways; `localgate login --url <name>` connects by name.
+- **Admin audit log**: key create / change / reveal / revoke, sign-ins (including
+  failures), accounts and settings changes, with who and from where — dashboard Activity
+  page, `GET /admin/audit`, `localgate audit`.
+- **Remote coding agent backend**: `localgate code --remote` now talks to the gateway with a
+  backend that keeps Ollama options and JSON tool mode and reads each model's context
+  window and tool support from the gateway.
+- `localgate doctor` reports network exposure: bind address, admin networks, public URL,
+  queue settings.
+
+### Changed
+
+- **Admin surfaces are private by default**: the dashboard, `/admin`, `/docs`, `/redoc`,
+  `/openapi.json` and `/metrics` answer only `LOCALGATE_ADMIN_ALLOWED_NETWORKS` (loopback,
+  private LANs, Tailscale, IPv6 ULA); other clients get `403 untrusted_network`. The `/v1`
+  API is unaffected. `*` restores the old behaviour.
+- **`/health` is minimal for untrusted clients**: `{status, version}`. Trusted networks and
+  signed-in admins still get backend, database, queue and per-backend details.
+- `/v1/models` entries carry `context_window`, `capabilities`, `parameter_size` and
+  `quantization` (OpenAI clients ignore unknown fields).
+- The gateway refuses to listen on *any* non-loopback address with the placeholder admin
+  key (it used to check only `0.0.0.0`, and missed `serve --host`).
+- CLI commands other than `serve` log only warnings (no migration chatter).
+- `Development Status :: 5 - Production/Stable`.
+
+### Fixed
+
+- **Context window through the gateway**: requests carried no `num_ctx`, so Ollama ran at
+  its small default and silently dropped the start of long prompts — including every
+  `localgate code --remote` session. Now `LOCALGATE_DEFAULT_NUM_CTX` (8192, capped at the
+  model's maximum) is sent unless the client sets one.
+- **Disconnected clients**: a dropped stream now closes the upstream request (the GPU stops
+  generating), frees its queue slot and still bills the tokens produced; a non-streaming
+  request is cancelled when its client goes away.
+- **The coding agent on small context windows** (e.g. llama3, 8K): the reply reserve now
+  scales with the window, so the agent no longer compacts after every step; it can never
+  write a compaction placeholder (`<500 chars elided>`) into a file; and repeated full
+  rewrites of one file in a task are stopped instead of asking for approval again and
+  again. Half-escaped HTML/CSS (literal `\n`) is repaired.
+- `localgate deploy --target compose`: the gateway now listens inside its container and
+  Caddy proxies to it on the compose network (it pointed at Caddy's own localhost), with
+  forwarded client addresses trusted.
+
 ## [0.14.0] — 2026-10-28 — accounts and a live input box
 
 Sign in to the dashboard with an email and password instead of copying a key, and keep typing
