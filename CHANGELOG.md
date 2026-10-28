@@ -4,6 +4,52 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-10-28 — the Claude Code-style CLI release
+
+`localgate code` now works like a modern coding-agent CLI: tab completion, `@file`
+attachments, `!` shell commands, Esc to interrupt, streaming replies, project instructions and
+custom commands. It also fixes the two problems that made it look broken: turns that
+silently wrote nothing, and turns that seemed to hang.
+
+### Added
+
+- **Autocomplete:** `/` opens a menu of commands (built-in and custom) with descriptions; `@`
+  completes project file paths, skipping anything in `.gitignore`/`.localgateignore`.
+- **`@file` attachments:** `fix the navbar in @index.html` sends the file with the message, and
+  it counts as read, so the agent can edit it straight away.
+- **Prompt history and multi-line input:** ↑/↓ recall earlier prompts (kept across sessions),
+  Ctrl+R searches them; end a line with `\` or press Esc then Enter for a new line.
+- **`!` shell mode:** `!npm test` runs a command in your own shell with live output; the agent
+  sees the output with your next message.
+- **Esc to interrupt:** Esc or Ctrl+C stops the running turn (or `!` command) and keeps the session
+  open. Half-finished tool calls are dropped from history, and sandboxed commands are killed.
+- **`LOCALGATE.md` and `/init`:** standing project instructions the agent reads every turn
+  (`AGENTS.md` or `CLAUDE.md` also work), plus a per-user `~/.config/localgate/LOCALGATE.md`.
+  `/init` has the agent explore the project and write one.
+- **Custom slash commands:** `.localgate/commands/<name>.md` (or `~/.config/localgate/commands/`)
+  becomes `/<name>`, with `$ARGUMENTS` filled in; `/commands` lists them.
+- **Streaming replies:** the answer appears as the model writes it, then is replaced by the tool
+  step or the formatted final answer.
+
+### Changed
+
+- **A cleaner REPL:** startup banner with version, model, mode, files, tools and instructions
+  file; `/model` shows an aligned table (params, quant, size, tool-calling data); final answers
+  render as Markdown; each tool step is one `● tool args` line; a summary line after every turn
+  (files written, tool calls, time); a `❯` prompt with model, mode and context use in the toolbar;
+  the to-do list shows as a ☐/◐/☑ checklist.
+- `localgate code` only logs warnings (no more structlog debug or Alembic INFO lines in the REPL)
+  unless `LOCALGATE_LOG_LEVEL=DEBUG`.
+
+### Fixed
+
+- **Turns that seemed to hang:** `run_command` and `fetch_url` confirmations were drawn over by the
+  spinner, so the agent sat waiting for a `y` the user couldn't see.
+- **Turns that wrote nothing:** a tool call with invalid JSON (often an unescaped `"` in file
+  content) was taken as the final answer. The model is now told the parse error and retries.
+- Requests phrased as "make …", "improve …", "enhance …", "redesign …" and similar are now
+  treated as change requests, so a reply that only describes a plan is sent back to do the work.
+
 ## [0.11.0] — 2026-10-28 — the agent & benchmark release
 
 The biggest update so far. `localgate code` was rebuilt around **measured** reliability on
