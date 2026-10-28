@@ -121,7 +121,12 @@ def project_session_id(root: Path) -> str:
 def list_project_sessions(root: Path) -> list[dict[str, str]]:
     """Every session id ever used in this project, most-recently-created first."""
     sessions = _load_session_store(root).get("sessions", [])
-    return sorted(sessions, key=lambda s: s["created_at"], reverse=True)
+    # Ties are broken by position in the index (sessions are appended as they're
+    # created): two sessions minted within one clock tick share a timestamp —
+    # routinely on Windows, whose clock is coarse — and a stable reverse sort would
+    # otherwise list the older one first.
+    ordered = sorted(enumerate(sessions), key=lambda p: (p[1]["created_at"], p[0]), reverse=True)
+    return [session for _, session in ordered]
 
 
 def set_current_project_session(root: Path, session_id: str) -> None:
