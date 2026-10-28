@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import enforce_rate_limit, get_session
 from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.model_info import apply_default_num_ctx
 from localgate.core.token_counter import count_tokens
 from localgate.core.types import CompletionChoice, CompletionRequest, CompletionResponse, Usage
 from localgate.db.models import APIKey
@@ -48,6 +49,9 @@ async def create_completion(
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
+    await apply_default_num_ctx(
+        payload, backend, model, settings.default_num_ctx, request.app.state.model_info
+    )
 
     started = time.perf_counter()
     try:

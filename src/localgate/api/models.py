@@ -12,7 +12,7 @@ from localgate.core.types import ModelCard, ModelList
 router = APIRouter(tags=["models"], dependencies=[Depends(require_api_key)])
 
 
-@router.get("/v1/models", response_model=ModelList)
+@router.get("/v1/models", response_model=ModelList, response_model_exclude_none=True)
 async def list_models(request: Request) -> ModelList:
     """List the backend's models, plus any aliases configured on the gateway.
 
@@ -31,7 +31,15 @@ async def list_models(request: Request) -> ModelList:
             describe_backend_failure(exc, settings.backend_url, settings.backend_type)
         ) from exc
 
-    cards = [ModelCard(id=model_id, owned_by=settings.backend_type) for model_id in model_ids]
+    info = request.app.state.model_info
+    cards = [
+        ModelCard(
+            id=model_id,
+            owned_by=settings.backend_type,
+            **(await info.get(backend, model_id)).as_card_fields(),
+        )
+        for model_id in model_ids
+    ]
     cards.extend(
         ModelCard(id=alias, owned_by=f"localgate-alias:{target}")
         for alias, target in settings.model_aliases.items()

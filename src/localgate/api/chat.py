@@ -34,6 +34,7 @@ from localgate.core import metrics
 from localgate.core.cache import cache_key
 from localgate.core.errors import BackendError, describe_backend_failure
 from localgate.core.logging import get_logger
+from localgate.core.model_info import apply_default_num_ctx
 from localgate.core.streaming import DONE, extract_delta, sse_error, sse_event
 from localgate.core.token_counter import count_message_tokens, count_tokens
 from localgate.core.types import ChatCompletionRequest, ChatMessage
@@ -95,6 +96,9 @@ async def chat_completions(
                 messages, ChatMessage(role="system", content=sources_message(sources)["content"])
             )
     payload = body.to_backend_payload(messages, model)
+    await apply_default_num_ctx(
+        payload, backend, model, settings.default_num_ctx, request.app.state.model_info
+    )
 
     # Cache entries are tenant-scoped even when two keys submit identical prompts.
     key = cache_key({"_localgate_api_key_id": api_key.id, **payload})

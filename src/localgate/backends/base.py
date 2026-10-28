@@ -17,6 +17,9 @@ class InferenceBackend(ABC):
 
     #: Short identifier used in logs, metric labels, and error messages.
     name: str = "backend"
+    #: Whether requests may carry Ollama-native ``options`` (``num_ctx``…) and
+    #: ``format``. Backends that would reject or drop them leave this False.
+    accepts_options: bool = False
 
     @abstractmethod
     async def chat(self, request: dict[str, Any]) -> dict[str, Any]:
