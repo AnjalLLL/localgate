@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import enforce_rate_limit, get_session
 from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.key_policy import enforce_key_access
 from localgate.core.token_counter import count_tokens
 from localgate.core.types import EmbeddingItem, EmbeddingsRequest, EmbeddingsResponse, Usage
 from localgate.db.models import APIKey
@@ -31,6 +32,9 @@ async def create_embeddings(
     settings = request.app.state.settings
     backend = request.app.state.backend
     model = settings.resolve_model(body.model) if body.model else settings.embedding_model
+    await enforce_key_access(
+        api_key, body.model, model, session, check_model=body.model is not None
+    )
 
     inputs = body.inputs()
     try:

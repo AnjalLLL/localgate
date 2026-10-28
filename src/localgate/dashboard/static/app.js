@@ -1176,12 +1176,81 @@ async function viewChat(root, chatId) {
 
 // ---------------------------------------------------------------- keys
 
+// ---------------------------------------------------------------- key limits
+
+// Model names for the "Models" suggestions — fetched once per page load.
+let modelNamesPromise = null;
+function modelNames() {
+  modelNamesPromise ||= api("/admin/models").then((rows) => rows.map((m) => m.name)).catch(() => []);
+  return modelNamesPromise;
+}
+
+function field(label, control, hint) {
+  return h("label", { class: "field" }, h("span", { text: label }), control, hint ? h("small", { class: "field-hint", text: hint }) : null);
+}
+
+/** The optional per-key limits, shared by the create form, the edit dialog and
+ *  the Share page. `values()` returns them in the /admin/keys shape (null = no limit). */
+function limitsFields(initial = {}) {
+  const listId = `models-${Math.random().toString(36).slice(2)}`;
+  const datalist = h("datalist", { id: listId });
+  modelNames().then((names) => datalist.replaceChildren(...names.map((n) => h("option", { value: n }))));
+  const models = h("input", { type: "text", placeholder: "any model", list: listId, value: (initial.allowed_models || []).join(", ") });
+  const maxTokens = h("input", { type: "number", min: "1", placeholder: "no cap", value: initial.max_tokens ?? "" });
+  const quota = h("input", { type: "number", min: "1", placeholder: "unlimited", value: initial.token_quota ?? "" });
+  const period = h("select", {}, h("option", { value: "month", text: "per month" }), h("option", { value: "day", text: "per day" }));
+  period.value = initial.quota_period || "month";
+  const expires = h("input", { type: "date", value: initial.expires_at ? initial.expires_at.slice(0, 10) : "" });
+  const concurrent = h("input", { type: "number", min: "1", placeholder: "no limit", value: initial.max_concurrent ?? "" });
+  const store = h("input", { type: "checkbox" });
+  store.checked = initial.store_conversations !== false;
+  const element = h(
+    "div",
+    { class: "limits" },
+    h("div", { class: "field-row" }, field("Models", models, "Comma-separated; empty = any"), field("Max reply tokens", maxTokens)),
+    h("div", { class: "field-row" }, field("Token quota", quota), field("Quota period", period)),
+    h("div", { class: "field-row" }, field("Expires", expires), field("Requests at once", concurrent)),
+    h("label", { class: "check" }, store, h("span", { text: "Store conversations for memory (you can read them in Sessions)" })),
+    datalist,
+  );
+  const num = (input) => (input.value === "" ? null : Number(input.value));
+  return {
+    element,
+    values: () => {
+      const names = models.value.split(",").map((m) => m.trim()).filter(Boolean);
+      return {
+        allowed_models: names.length ? names : null,
+        max_tokens: num(maxTokens),
+        token_quota: num(quota),
+        quota_period: period.value,
+        // The whole chosen day counts: the key stops at the end of it, UTC.
+        expires_at: expires.value ? new Date(`${expires.value}T23:59:59Z`).toISOString() : null,
+        max_concurrent: num(concurrent),
+        store_conversations: store.checked,
+      };
+    },
+  };
+}
+
+/** One-line summary of a key's limits for tables. */
+function limitsSummary(k) {
+  const parts = [`${k.rate_limit_per_min}/min`];
+  if (k.allowed_models?.length) parts.push(k.allowed_models.length === 1 ? k.allowed_models[0] : `${k.allowed_models.length} models`);
+  if (k.max_tokens) parts.push(`≤${compact(k.max_tokens)} tokens/reply`);
+  if (k.token_quota) parts.push(`${compact(k.tokens_this_period || 0)} / ${compact(k.token_quota)} per ${k.quota_period}`);
+  if (k.max_concurrent) parts.push(`${k.max_concurrent} at once`);
+  if (k.expires_at) parts.push(`${k.expired ? "expired" : "until"} ${fmtDate(k.expires_at).split(",")[0]}`);
+  if (k.store_conversations === false) parts.push("no history");
+  return parts.join(" · ");
+}
+
 async function viewKeys(root) {
   const listBody = h("div", {}, loading());
   const usagePanel = h("div", { class: "card-body" }, h("p", { class: "muted", text: "Select a key to see its usage." }));
   const reveal = h("div", {});
   const nameInput = h("input", { type: "text", placeholder: "my-app", required: true, maxlength: "100" });
   const limitInput = h("input", { type: "number", min: "1", value: "60" });
+  const createLimits = limitsFields();
 
   const createForm = h(
     "form",
@@ -1192,7 +1261,7 @@ async function viewKeys(root) {
         const name = nameInput.value.trim();
         if (!name) return;
         try {
-          const key = await api("/admin/keys", { method: "POST", body: { name, rate_limit_per_min: Number(limitInput.value) || undefined } });
+          const key = await api("/admin/keys", { method: "POST", body: { name, rate_limit_per_min: Number(limitInput.value) || undefined, ...createLimits.values() } });
           nameInput.value = "";
           showReveal(key);
           toast("Key created.", "ok");
@@ -1207,6 +1276,7 @@ async function viewKeys(root) {
       h("label", { class: "field" }, h("span", { text: "Requests / min" }), limitInput),
       h("button", { class: "btn primary", type: "submit", text: "Create key" }),
     ),
+    h("details", { class: "more-limits" }, h("summary", { text: "More limits — models, quota, expiry…" }), createLimits.element),
     reveal,
   );
 
@@ -1266,25 +1336,34 @@ async function viewKeys(root) {
     }
   }
 
-  function editLimit(k, cell) {
-    const input = h("input", { type: "number", min: "1", value: String(k.rate_limit_per_min), "aria-label": `Rate limit for ${k.name}` });
-    input.style.width = "90px";
-    const save = async () => {
-      const value = Number(input.value);
-      if (!value || value < 1) { toast("Rate limit must be at least 1.", "bad"); return; }
-      try {
-        await api(`/admin/keys/${encodeURIComponent(k.id)}`, { method: "PATCH", body: { rate_limit_per_min: value } });
-        toast("Rate limit updated.", "ok");
-        load();
-      } catch (err) { toast(err.message, "bad"); }
-    };
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") save();
-      if (e.key === "Escape") load();
+  function editLimits(k) {
+    const limits = limitsFields(k);
+    const rate = h("input", { type: "number", min: "1", value: String(k.rate_limit_per_min) });
+    const dialog = h(
+      "dialog",
+      { class: "dialog wide", "aria-label": `Limits for ${k.name}` },
+      h(
+        "form",
+        { method: "dialog" },
+        h("h2", { text: `Limits for “${k.name}”` }),
+        h("p", { class: "muted small", text: "Changes apply on the next request — the key itself stays the same." }),
+        h("div", { class: "field-row" }, field("Requests / min", rate)),
+        limits.element,
+        h("div", { class: "dialog-actions" }, h("button", { value: "cancel", class: "btn ghost", text: "Cancel" }), h("button", { value: "ok", class: "btn primary", text: "Save limits" })),
+      ),
+    );
+    dialog.addEventListener("close", async () => {
+      if (dialog.returnValue === "ok") {
+        try {
+          await api(`/admin/keys/${encodeURIComponent(k.id)}`, { method: "PATCH", body: { rate_limit_per_min: Number(rate.value) || k.rate_limit_per_min, ...limits.values() } });
+          toast("Limits updated.", "ok");
+          load();
+        } catch (err) { toast(err.message, "bad"); }
+      }
+      dialog.remove();
     });
-    cell.textContent = "";
-    cell.append(h("div", { class: "actions" }, input, h("button", { class: "btn sm", type: "button", text: "Save", onclick: save })));
-    input.focus();
+    document.body.append(dialog);
+    dialog.showModal();
   }
 
   async function revealKey(k) {
@@ -1313,20 +1392,19 @@ async function viewKeys(root) {
         table(
           [
             { label: "Name", value: (k) => h("span", {}, k.name, h("span", { class: "cell-sub mono", text: k.key_prefix ? `${k.key_prefix}…` : "issued before v0.6" })) },
-            { label: "Status", value: (k) => (k.revoked ? badge("revoked", "bad") : badge("active", "ok")) },
+            { label: "Status", value: (k) => (k.revoked ? badge("revoked", "bad") : k.expired ? badge("expired", "warn") : badge("active", "ok")) },
             {
-              label: "Rate limit",
-              num: true,
+              label: "Limits",
               value: (k) => {
-                const span = h("span", {}, `${k.rate_limit_per_min}/min `);
+                const span = h("span", { class: "limits-cell" }, limitsSummary(k), " ");
                 if (!k.revoked) {
                   span.append(
                     h("button", {
                       class: "link-btn small",
                       type: "button",
                       text: "edit",
-                      "aria-label": `Edit rate limit for ${k.name}`,
-                      onclick: (e) => { e.stopPropagation(); editLimit(k, span.parentElement); },
+                      "aria-label": `Edit limits for ${k.name}`,
+                      onclick: (e) => { e.stopPropagation(); editLimits(k); },
                     }),
                   );
                 }
@@ -1368,7 +1446,7 @@ async function viewKeys(root) {
   }
 
   root.append(
-    pageHead("API keys", "Issue, rate-limit and revoke the keys clients use."),
+    pageHead("API keys", "Issue, limit and revoke the keys clients and devices use."),
     h("div", { class: "grid split" }, card("Keys", listBody), card("Usage for selected key", usagePanel)),
     card("Create a key", createForm),
   );
