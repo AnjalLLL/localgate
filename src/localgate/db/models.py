@@ -54,6 +54,19 @@ class APIKey(Base):
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # --- Per-key policy (0008). NULL means "no limit" for every one of these. ---
+    #: Models this key may call (after alias resolution); NULL = any.
+    allowed_models: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    #: Upper bound on max_tokens per request; requests without one get this.
+    max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Total tokens allowed per `quota_period` ("day" or "month", UTC calendar).
+    token_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quota_period: Mapped[str] = mapped_column(String, default="month")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Requests this key may have in flight at once (the GPU queue enforces it).
+    max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: False: never store this key's conversations or memories (usage is still counted).
+    store_conversations: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class UsageRecord(Base):
@@ -201,3 +214,18 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditEvent(Base):
+    """One administrative action (0009): who did what to which object, from where."""
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    #: The signed-in account's email, "admin-key" or "cli".
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    target: Mapped[str | None] = mapped_column(String, nullable=True)
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    ip: Mapped[str | None] = mapped_column(String, nullable=True)

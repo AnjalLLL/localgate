@@ -71,6 +71,7 @@ async def enforce_rate_limit(
             f"Rate limit exceeded for this key ({api_key.rate_limit_per_min} requests/minute). "
             "Raise it with `localgate keys update <id> --rate-limit N`, or retry shortly.",
             code="rate_limit_exceeded",
+            retry_after=limiter.retry_after(api_key.id),
         )
     return api_key
 
