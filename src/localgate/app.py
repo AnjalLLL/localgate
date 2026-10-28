@@ -93,6 +93,27 @@ def _untrusted_response(path: str) -> Response:
     )
 
 
+async def _advertise(settings: Settings, logger: Any) -> Any:
+    """Announce this gateway on the local network; never fail startup over it."""
+    from localgate.core.discovery import Advertisement, DiscoveryUnavailable  # noqa: PLC0415
+    from localgate.core.netinfo import lan_address  # noqa: PLC0415
+
+    address = lan_address()
+    if address is None:
+        return None
+    advertisement = Advertisement(settings.port, address)
+    try:
+        await advertisement.start()
+    except DiscoveryUnavailable as exc:
+        logger.warning("discovery_unavailable", message=str(exc))
+        return None
+    except Exception as exc:  # noqa: BLE001 — mDNS trouble must not stop the gateway
+        logger.warning("discovery_failed", error=str(exc))
+        return None
+    logger.info("discovery_advertised", address=address, port=settings.port)
+    return advertisement
+
+
 def resolve_database_url(settings: Settings, config_path: Path | None = None) -> str:
     """A database established through the admin UI outranks ``LOCALGATE_DATABASE_URL``.
 
@@ -176,6 +197,8 @@ def create_app(
             max_entries=settings.cache_max_entries, ttl_seconds=settings.cache_ttl_seconds
         )
 
+        advertisement = await _advertise(settings, logger) if settings.discovery_enabled else None
+
         logger.info(
             "localgate_started",
             version=__version__,
@@ -201,6 +224,8 @@ def create_app(
         # Uvicorn stops accepting connections and drains in-flight requests before
         # running this, so nothing is still using these when they close. That is what
         # makes SIGTERM graceful rather than abrupt.
+        if advertisement is not None:
+            await advertisement.close()
         await app.state.pool.aclose()
         for client in shared:
             await client.aclose()
