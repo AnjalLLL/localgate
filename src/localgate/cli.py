@@ -270,7 +270,12 @@ def serve(
         # rather than forking a supervisor that exits immediately after handing off.
         from localgate.app import create_app  # noqa: PLC0415
 
-        uvicorn.run(create_app(), reload=reload, **common)
+        # The app needs the port it's actually on (for the LAN announcement), and
+        # --share turns that announcement on.
+        app_settings = settings.model_copy(
+            update={"port": bind_port, "discovery_enabled": settings.discovery_enabled or share}
+        )
+        uvicorn.run(create_app(app_settings), reload=reload, **common)
     else:
         # Multi-worker: must use a string import path + factory so each worker
         # forks and calls create_app() independently.
@@ -899,7 +904,7 @@ def login(
     url: str = typer.Option(
         ...,
         "--url",
-        help="Base URL of the gateway, e.g. https://gw.example.com",
+        help="The gateway's URL (http://192.168.1.20:8000), or a name from `localgate discover`.",
     ),
     api_key: str = typer.Option(
         ...,
@@ -917,7 +922,7 @@ def login(
     and checks the gateway version via /health/live.
     After login, `localgate code --remote` will route to this gateway.
     """
-    base = url.rstrip("/")
+    base = _resolve_gateway_url(url)
 
     if api_key == INSECURE_ADMIN_KEY or api_key.startswith("X-Admin-Key"):
         typer.secho(
@@ -975,6 +980,49 @@ def login(
 
     typer.secho(f"Logged in to {base}", fg=typer.colors.GREEN)
     typer.echo("Run `localgate whoami` to verify, or `localgate code --remote` to use the gateway.")
+
+
+@app.command()
+def discover(
+    timeout: float = typer.Option(3.0, "--timeout", help="Seconds to listen for gateways."),
+) -> None:
+    """List localgate gateways on this network (ones started with `serve --share`)."""
+    from localgate.core.discovery import DiscoveryUnavailable, discover  # noqa: PLC0415
+
+    try:
+        found = _run(discover(timeout))
+    except DiscoveryUnavailable as exc:
+        typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=2) from exc
+    if not found:
+        typer.echo("No gateways found. On the GPU machine, run: localgate serve --share")
+        raise typer.Exit(code=1)
+    for gateway in found:
+        typer.echo(f"  {gateway.name:<24} {gateway.url:<28} v{gateway.version}")
+    typer.echo(f"\nConnect: localgate login --url {found[0].name} --api-key <key>")
+
+
+def _resolve_gateway_url(url: str) -> str:
+    """A URL as given, or a gateway name found on the local network."""
+    if "://" in url:
+        return url.rstrip("/")
+    from localgate.core.discovery import DiscoveryUnavailable, discover  # noqa: PLC0415
+
+    try:
+        found = {g.name: g.url for g in _run(discover(3.0))}
+    except DiscoveryUnavailable as exc:
+        typer.secho(f"{url!r} isn't a URL. {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    if url not in found:
+        typer.secho(
+            f"No gateway called {url!r} on this network. `localgate discover` lists them; "
+            "or pass a URL like http://192.168.1.20:8000.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    typer.echo(f"Found {url} at {found[url]}")
+    return found[url]
 
 
 @app.command()

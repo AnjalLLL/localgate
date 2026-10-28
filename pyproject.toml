@@ -59,6 +59,8 @@ dependencies = [
 postgres = ["asyncpg>=0.29"]
 # Rate limits and per-key concurrency shared across worker processes (LOCALGATE_REDIS_URL).
 redis = ["redis>=5"]
+# Find gateways on the local network (`serve --share` advertises, `localgate discover` lists).
+discovery = ["zeroconf>=0.130"]
 # Local voice: Piper TTS (GPL-3.0, optional) and faster-whisper STT.
 voice = [
   "piper-tts>=1.3",
