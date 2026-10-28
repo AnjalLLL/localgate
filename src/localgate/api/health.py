@@ -14,6 +14,7 @@ conflating them causes outages:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -70,6 +71,9 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
             "url": settings.backend_url,
             "reachable": backend_ok,
         },
+        # Every inference backend with its queue — one entry unless LOCALGATE_BACKENDS
+        # lists several GPUs or machines.
+        "backends": await _backend_statuses(app),
         "database": {
             "dialect": settings.database_url.split("://", 1)[0],
             "connected": database_ok,
@@ -141,3 +145,32 @@ def _is_admin(request: Request) -> bool:
     except AuthenticationError:
         return False
     return True
+
+
+async def _backend_statuses(app: Any) -> list[dict[str, Any]]:
+    pool = app.state.pool
+    if len(pool.members) == 1:
+        member = pool.primary
+        return [_status(member, await _check_backend(app))]
+    results = await asyncio.gather(*(_reachable(m.backend) for m in pool.members))
+    return [_status(m, ok) for m, ok in zip(pool.members, results, strict=True)]
+
+
+async def _reachable(backend: Any) -> bool:
+    try:
+        return bool(await asyncio.wait_for(backend.health(), timeout=3.0))
+    except Exception:  # noqa: BLE001 — a health check that raises has answered "no"
+        return False
+
+
+def _status(member: Any, reachable: bool) -> dict[str, Any]:
+    queue = member.scheduler.stats()
+    return {
+        "name": member.name,
+        "type": member.spec.type,
+        "url": member.spec.url,
+        "reachable": reachable,
+        "active": queue["active"],
+        "queued": queue["queued"],
+        "max_concurrent": queue["max_concurrent"],
+    }

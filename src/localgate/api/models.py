@@ -24,24 +24,31 @@ async def list_models(request: Request, api_key: APIKey = Depends(require_api_ke
     unsupported.
     """
     settings = request.app.state.settings
-    backend = request.app.state.backend
-
-    try:
-        model_ids = await backend.list_models()
-    except httpx.HTTPError as exc:
-        raise BackendError(
-            describe_backend_failure(exc, settings.backend_url, settings.backend_type)
-        ) from exc
-
+    pool = request.app.state.pool
     info = request.app.state.model_info
-    cards = [
-        ModelCard(
-            id=model_id,
-            owned_by=settings.backend_type,
-            **(await info.get(backend, model_id)).as_card_fields(),
-        )
-        for model_id in model_ids
-    ]
+
+    cards: list[ModelCard] = []
+    seen: set[str] = set()
+    failures: list[BaseException] = []
+    for member in pool.members:
+        try:
+            model_ids = await member.backend.list_models()
+        except httpx.HTTPError as exc:
+            if len(pool.members) == 1:
+                raise BackendError(
+                    describe_backend_failure(exc, member.spec.url, member.spec.type)
+                ) from exc
+            failures.append(exc)  # one machine down shouldn't hide the others' models
+            continue
+        owner = settings.backend_type if len(pool.members) == 1 else member.name
+        for model_id in model_ids:
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            details = await info.get(member.backend, model_id)
+            cards.append(ModelCard(id=model_id, owned_by=owner, **details.as_card_fields()))
+    if failures and len(failures) == len(pool.members):
+        raise BackendError("None of this gateway's inference backends answered.")
     cards.extend(
         ModelCard(id=alias, owned_by=f"localgate-alias:{target}")
         for alias, target in settings.model_aliases.items()
