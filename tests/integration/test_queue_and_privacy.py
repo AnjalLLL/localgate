@@ -104,6 +104,8 @@ async def test_a_dropped_stream_frees_its_slot_closes_upstream_and_is_billed(app
     lease = await scheduler.acquire(key_id)
     stream = chat_module._stream_and_record(
         lease=lease,
+        targets=app.state.pool.members,
+        per_key_limit=None,
         store_conversations=True,
         backend=app.state.backend,
         settings=app.state.settings,

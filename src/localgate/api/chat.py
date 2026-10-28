@@ -34,12 +34,13 @@ from localgate.api.deps import enforce_rate_limit, get_session
 from localgate.backends.base import InferenceBackend
 from localgate.config import Settings
 from localgate.core import metrics
+from localgate.core.backend_pool import FAILOVER_ERRORS, PooledBackend, call_with_failover
 from localgate.core.cache import cache_key
-from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.errors import ServiceBusyError, describe_backend_failure
 from localgate.core.key_policy import clamp_max_tokens, enforce_key_access
 from localgate.core.logging import get_logger
 from localgate.core.model_info import apply_default_num_ctx
-from localgate.core.scheduler import InferenceScheduler, Lease
+from localgate.core.scheduler import Lease
 from localgate.core.streaming import (
     DONE,
     ClientGone,
@@ -115,8 +116,11 @@ async def chat_completions(
             )
     payload = body.to_backend_payload(messages, model)
     clamp_max_tokens(api_key, payload)
+    # Which inference backend(s) serve this model, least busy first. Memory and
+    # web search above stay on the primary; only the generation itself is routed.
+    targets: list[PooledBackend] = await request.app.state.pool.route(model)
     await apply_default_num_ctx(
-        payload, backend, model, settings.default_num_ctx, request.app.state.model_info
+        payload, targets[0].backend, model, settings.default_num_ctx, request.app.state.model_info
     )
 
     # Cache entries are tenant-scoped even when two keys submit identical prompts.
@@ -157,13 +161,13 @@ async def chat_completions(
 
     started = time.perf_counter()
 
-    scheduler: InferenceScheduler = request.app.state.scheduler
-    lease = await scheduler.acquire(api_key.id, api_key.max_concurrent)
-
     if body.stream:
+        lease = await targets[0].scheduler.acquire(api_key.id, api_key.max_concurrent)
         return StreamingResponse(
             _stream_and_record(
                 lease=lease,
+                targets=targets,
+                per_key_limit=api_key.max_concurrent,
                 store_conversations=store,
                 backend=backend,
                 settings=settings,
@@ -186,16 +190,14 @@ async def chat_completions(
         )
 
     try:
-        response = await until_disconnected(request, backend.chat(payload))
-    except httpx.HTTPError as exc:
-        metrics.backend_errors_total.labels(backend=settings.backend_type).inc()
-        raise BackendError(
-            describe_backend_failure(exc, settings.backend_url, settings.backend_type)
-        ) from exc
+        response = await call_with_failover(
+            targets,
+            api_key.id,
+            api_key.max_concurrent,
+            lambda target: until_disconnected(request, target.backend.chat(payload)),
+        )
     except ClientGone:
         return Response(status_code=499)  # nobody is listening; the GPU is freed
-    finally:
-        lease.release()
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     assistant_text = _assistant_text(response)
@@ -324,6 +326,8 @@ async def _augment_with_memory(
 
 async def _stream_and_record(
     lease: Lease,
+    targets: list[PooledBackend],
+    per_key_limit: int | None,
     store_conversations: bool,
     backend: InferenceBackend,
     settings: Settings,
@@ -346,7 +350,8 @@ async def _stream_and_record(
     """
     assistant_text = ""
     finished = False
-    stream = backend.chat_stream(payload)
+    current = 0
+    stream = targets[0].backend.chat_stream(payload)
 
     def record(text: str) -> Any:
         return _record_turn(
@@ -369,16 +374,31 @@ async def _stream_and_record(
 
     try:
         try:
-            async for chunk in stream:
-                assistant_text += extract_delta(chunk)
-                yield sse_event(chunk)
+            while True:
+                try:
+                    async for chunk in stream:
+                        assistant_text += extract_delta(chunk)
+                        yield sse_event(chunk)
+                    break
+                except FAILOVER_ERRORS:
+                    # Unreachable before the first token: another backend can still
+                    # take the whole request. After it, the reply is half-sent.
+                    if assistant_text or current + 1 >= len(targets):
+                        raise
+                    lease.release()
+                    current += 1
+                    lease = await targets[current].scheduler.acquire(api_key_id, per_key_limit)
+                    stream = targets[current].backend.chat_stream(payload)
         except httpx.HTTPError as exc:
-            metrics.backend_errors_total.labels(backend=settings.backend_type).inc()
+            spec = targets[current].spec
+            metrics.backend_errors_total.labels(backend=spec.name).inc()
             # The 200 and its headers are already on the wire, so this can't become a
             # 502. It has to be reported inside the stream — see core/streaming.py.
-            yield sse_error(
-                describe_backend_failure(exc, settings.backend_url, settings.backend_type)
-            )
+            yield sse_error(describe_backend_failure(exc, spec.url, spec.type))
+            yield DONE
+            return
+        except ServiceBusyError as exc:
+            yield sse_error(exc.message)
             yield DONE
             return
 

@@ -163,6 +163,7 @@ async def overview(request: Request, session: AsyncSession = Depends(get_session
             "success_rate": round(tool_ok / len(tool_rows), 3) if tool_rows else None,
         },
         "queue": request.app.state.scheduler.stats(),
+        "backends": request.app.state.pool.stats(),
     }
 
 
@@ -170,14 +171,20 @@ async def overview(request: Request, session: AsyncSession = Depends(get_session
 async def models(request: Request) -> list[dict[str, Any]]:
     """Models the backend serves, with tool support and context window when the
     backend can report them cheaply."""
-    backend: InferenceBackend = request.app.state.backend
-    try:
-        listed = await backend.list_models_detailed()
-    except httpx.HTTPError as exc:
-        raise LocalgateError(f"Couldn't list models from the backend: {exc}") from exc
+    pool = request.app.state.pool
+    listed: list[tuple[InferenceBackend, str, dict[str, Any]]] = []
+    for member in pool.members:
+        try:
+            rows = await member.backend.list_models_detailed()
+        except httpx.HTTPError as exc:
+            if len(pool.members) == 1:
+                raise LocalgateError(f"Couldn't list models from the backend: {exc}") from exc
+            continue
+        listed.extend((member.backend, member.name, row) for row in rows)
     limit = asyncio.Semaphore(4)
 
-    async def describe(entry: dict[str, Any]) -> dict[str, Any]:
+    async def describe(item: tuple[InferenceBackend, str, dict[str, Any]]) -> dict[str, Any]:
+        backend, backend_name, entry = item
         async with limit:
             try:
                 tools, window, caps = await asyncio.gather(
@@ -192,6 +199,7 @@ async def models(request: Request) -> list[dict[str, Any]]:
         can_chat = caps is None or "completion" in caps
         return {
             **entry,
+            "backend": backend_name,
             "tool_support": tools,
             "context_window": window,
             "capabilities": caps,

@@ -18,8 +18,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from localgate import __version__
-from localgate.backends import available_backends, get_backend
+from localgate.backends import available_backends
 from localgate.config import Settings, load_settings
+from localgate.core.backend_pool import BackendPool
 from localgate.core.cache import PromptCache
 from localgate.core.db_config_store import (
     _default_config_path,
@@ -31,7 +32,6 @@ from localgate.core.logging import configure_logging, get_logger
 from localgate.core.model_info import ModelInfoCache
 from localgate.core.netinfo import is_loopback_host
 from localgate.core.rate_limiter import RateLimiter
-from localgate.core.scheduler import InferenceScheduler
 from localgate.db.engine import init_models, make_engine, make_session_factory
 from localgate.middleware import RequestContextMiddleware
 
@@ -127,6 +127,13 @@ def create_app(
             f"Available backends: {', '.join(available_backends())}."
         )
 
+    for spec in settings.backends:
+        if spec.type not in available_backends():
+            raise ConfigurationError(
+                f"LOCALGATE_BACKENDS: {spec.name!r} has type {spec.type!r}, which is not "
+                f"installed. Available backends: {', '.join(available_backends())}."
+            )
+
     if not is_loopback_host(settings.host) and settings.uses_insecure_admin_key:
         raise ConfigurationError(
             f"Refusing to listen on {settings.host} with the default admin key. "
@@ -144,20 +151,14 @@ def create_app(
         await init_models(engine)
 
         app.state.session_factory = make_session_factory(engine)
-        app.state.backend = get_backend(
-            settings.backend_type,
-            settings.backend_url,
-            timeout=settings.backend_timeout,
-            api_key=settings.backend_api_key,
-        )
+        # Every inference backend, each with its own fair queue. The primary also
+        # does gateway-internal work (memory embeddings, summaries); with one
+        # backend configured it is the only one.
+        app.state.pool = BackendPool.from_settings(settings)
+        app.state.backend = app.state.pool.primary.backend
+        app.state.scheduler = app.state.pool.primary.scheduler
         app.state.rate_limiter = RateLimiter()
         app.state.model_info = ModelInfoCache()
-        app.state.scheduler = InferenceScheduler(
-            settings.max_concurrent_requests,
-            settings.queue_timeout,
-            settings.max_queue,
-            name=settings.backend_type,
-        )
         app.state.cache = PromptCache(
             max_entries=settings.cache_max_entries, ttl_seconds=settings.cache_ttl_seconds
         )
@@ -187,7 +188,7 @@ def create_app(
         # Uvicorn stops accepting connections and drains in-flight requests before
         # running this, so nothing is still using these when they close. That is what
         # makes SIGTERM graceful rather than abrupt.
-        await app.state.backend.aclose()
+        await app.state.pool.aclose()
         await engine.dispose()
         logger.info("localgate_stopped")
 

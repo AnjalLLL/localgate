@@ -1845,6 +1845,8 @@ async function viewModels(root) {
     table(
       [
         { label: "Model", value: (m) => h("span", { class: "mono", text: m.name }) },
+        // Only worth a column when several machines serve models (LOCALGATE_BACKENDS).
+        ...(new Set(models.map((m) => m.backend)).size > 1 ? [{ label: "Backend", value: (m) => m.backend }] : []),
         { label: "Parameters", value: (m) => m.parameter_size || "—" },
         { label: "Quantization", value: (m) => m.quantization || "—" },
         { label: "Size", value: (m) => m.size_human || "—", num: true },
