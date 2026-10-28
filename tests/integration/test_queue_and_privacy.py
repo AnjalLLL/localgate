@@ -29,6 +29,16 @@ def settings(tmp_path) -> Settings:
     )
 
 
+async def _until(condition, timeout: float = 10.0) -> None:
+    """Wait for the queue to reach a state — never a fixed sleep: CI runners
+    (Windows especially) can take far longer than a laptop to get there."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "timed out waiting for the queue"
+        await asyncio.sleep(0.01)
+
+
 def _chat(text="hello"):
     return {"model": "fake-model", "messages": [{"role": "user", "content": text}]}
 
@@ -47,11 +57,11 @@ def gate(app):
     return release
 
 
-async def test_a_busy_gpu_queues_then_answers_503_with_retry_after(client, auth_headers, gate):
+async def test_a_busy_gpu_queues_then_answers_503_with_retry_after(client, auth_headers, gate, app):
     first = asyncio.create_task(
         client.post("/v1/chat/completions", headers=auth_headers, json=_chat())
     )
-    await asyncio.sleep(0.05)
+    await _until(lambda: app.state.scheduler.active == 1)  # the first holds the slot
     second = await client.post("/v1/chat/completions", headers=auth_headers, json=_chat())
     assert second.status_code == 503
     assert second.json()["error"]["code"] == "queue_timeout"
@@ -68,7 +78,7 @@ async def test_a_queued_request_runs_once_a_slot_frees(client, auth_headers, gat
     second = asyncio.create_task(
         client.post("/v1/chat/completions", headers=auth_headers, json=_chat())
     )
-    await asyncio.sleep(0.05)
+    await _until(lambda: app.state.scheduler.queued == 1)
     assert app.state.scheduler.stats()["queued"] == 1
     gate.set()
     assert [(await t).status_code for t in (first, second)] == [200, 200]
@@ -82,7 +92,7 @@ async def test_a_keys_own_concurrency_limit_queues_it(client, admin_headers, gat
     )
     headers = {"Authorization": f"Bearer {created.json()['api_key']}"}
     first = asyncio.create_task(client.post("/v1/chat/completions", headers=headers, json=_chat()))
-    await asyncio.sleep(0.05)
+    await _until(lambda: app.state.scheduler.active == 1)
     second = await client.post("/v1/chat/completions", headers=headers, json=_chat())
     assert second.status_code == 503  # …but this key may only run one at a time
     gate.set()
