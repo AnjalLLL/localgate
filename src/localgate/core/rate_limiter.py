@@ -60,6 +60,13 @@ class RateLimiter:
             return 0.0
         return max(0.0, hits[0] + self.window_seconds - time.monotonic())
 
+    async def check(self, key_id: str, limit_per_window: int) -> tuple[bool, float]:
+        """`allow` plus, when refused, how long until a request would pass — the
+        interface `enforce_rate_limit` uses, shared with `RedisRateLimiter`."""
+        if self.allow(key_id, limit_per_window):
+            return True, 0.0
+        return False, self.retry_after(key_id)
+
     def reset(self, key_id: str | None = None) -> None:
         if key_id is None:
             self._hits.clear()

@@ -23,10 +23,32 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 from localgate.core import metrics
 from localgate.core.errors import ServiceBusyError
+
+
+class RemoteLeases(Protocol):
+    async def try_acquire(self, key_id: str, limit: int) -> bool: ...
+    async def release(self, key_id: str) -> None: ...
+
+
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _background(coro: Coroutine[Any, Any, Any]) -> None:
+    """Run a cleanup coroutine from sync code (a lease's release), keeping a
+    reference so it isn't garbage-collected half way."""
+    try:
+        task = asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:  # no loop (shutdown): the lease's TTL cleans up instead
+        coro.close()
+        return
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 @dataclass(eq=False)
@@ -44,11 +66,15 @@ class Lease:
     key_id: str
     started: float = field(default_factory=time.monotonic)
     released: bool = False
+    #: Also holds the key's cross-process lease (Redis), to give back on release.
+    remote: bool = False
 
     def release(self) -> None:
         if not self.released:
             self.released = True
             self.scheduler._release(self.key_id, time.monotonic() - self.started)
+            if self.remote and self.scheduler.remote is not None:
+                _background(self.scheduler.remote.release(self.key_id))
 
 
 class InferenceScheduler:
@@ -70,12 +96,40 @@ class InferenceScheduler:
         self._turns: deque[str] = deque()
         #: Smoothed seconds a slot is held — for Retry-After estimates.
         self._avg_hold = 5.0
+        #: Per-key in-flight counts shared across worker processes (Redis), if any.
+        self.remote: RemoteLeases | None = None
 
     # -- public -----------------------------------------------------------------
 
     async def acquire(self, key_id: str, per_key_limit: int | None = None) -> Lease:
         """Wait (fairly) for a slot. Raises `ServiceBusyError` when the queue is
         full or the wait passes `queue_timeout`."""
+        if self.remote is not None and per_key_limit is not None:
+            await self._acquire_remote(key_id, per_key_limit)
+            try:
+                lease = await self._acquire_local(key_id, per_key_limit)
+            except BaseException:
+                _background(self.remote.release(key_id))
+                raise
+            lease.remote = True
+            return lease
+        return await self._acquire_local(key_id, per_key_limit)
+
+    async def _acquire_remote(self, key_id: str, limit: int) -> None:
+        """Wait for one of the key's cross-process slots (polled; rare and short)."""
+        assert self.remote is not None
+        deadline = time.monotonic() + self.queue_timeout
+        while not await self.remote.try_acquire(key_id, limit):
+            if time.monotonic() >= deadline:
+                metrics.queue_rejected_total.labels(self.name, "key_busy").inc()
+                raise ServiceBusyError(
+                    "This API key already has as many requests running as it's allowed.",
+                    code="key_busy",
+                    retry_after=self.retry_after(),
+                )
+            await asyncio.sleep(0.2)
+
+    async def _acquire_local(self, key_id: str, per_key_limit: int | None) -> Lease:
         if self.queued >= self.max_queue:
             metrics.queue_rejected_total.labels(self.name, "queue_full").inc()
             raise ServiceBusyError(
