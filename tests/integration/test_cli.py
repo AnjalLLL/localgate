@@ -58,7 +58,7 @@ def test_db_upgrade_then_current(env):
 
     current = runner.invoke(app, ["db", "current"])
     assert current.exit_code == 0
-    assert "0006" in current.stdout
+    assert "0007" in current.stdout
 
 
 def test_db_current_on_an_unmigrated_database_says_what_to_do(env):
@@ -236,3 +236,38 @@ def test_admin_key_rotate_refuses_when_the_key_is_set_elsewhere(fresh, monkeypat
     result = runner.invoke(app, ["admin-key", "--rotate"])
     assert result.exit_code == 2
     assert "environment variable" in result.stderr
+
+
+# ---------------------------------------------------------------- accounts
+
+
+def test_users_create_list_passwd_delete(env):
+    created = runner.invoke(
+        app,
+        ["users", "create", "--email", "Ana@Example.com"],
+        input="correct horse\ncorrect horse\n",
+    )
+    assert created.exit_code == 0, created.output
+    assert "ana@example.com" in runner.invoke(app, ["users", "list"]).stdout
+
+    duplicate = runner.invoke(
+        app, ["users", "create", "--email", "ana@example.com"], input="another one\nanother one\n"
+    )
+    assert duplicate.exit_code == 1
+
+    changed = runner.invoke(
+        app, ["users", "passwd", "ana@example.com"], input="new password\nnew password\n"
+    )
+    assert changed.exit_code == 0
+    assert runner.invoke(app, ["users", "delete", "ana@example.com"]).exit_code == 0
+    assert "No accounts yet" in runner.invoke(app, ["users", "list"]).stdout
+
+
+def test_users_create_rejects_a_short_password(env):
+    result = runner.invoke(
+        app,
+        ["users", "create", "--email", "ana@example.com"],
+        input="short\nshort\ncorrect horse\ncorrect horse\n",
+    )
+    assert result.exit_code == 0
+    assert "at least 8 characters" in result.stdout

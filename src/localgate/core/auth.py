@@ -13,6 +13,7 @@ in docs/decisions/0003-sha256-for-api-keys.md.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import secrets
@@ -51,27 +52,51 @@ ADMIN_COOKIE = "lg_admin"
 ADMIN_SESSION_SECONDS = 12 * 60 * 60
 
 
-def _admin_signature(admin_key: str, expires: int) -> str:
-    return hmac.new(
-        admin_key.encode(), f"localgate-admin-session:{expires}".encode(), "sha256"
-    ).hexdigest()
+def _admin_signature(admin_key: str, expires: int, subject: str = "") -> str:
+    message = f"localgate-admin-session:{expires}"
+    if subject:
+        message += f":{subject}"
+    return hmac.new(admin_key.encode(), message.encode(), "sha256").hexdigest()
 
 
-def issue_admin_session(admin_key: str, now: float, lifetime: int = ADMIN_SESSION_SECONDS) -> str:
-    """A stateless admin session token: ``<expiry>.<HMAC(admin key, expiry)>``.
+def issue_admin_session(
+    admin_key: str, now: float, lifetime: int = ADMIN_SESSION_SECONDS, subject: str = ""
+) -> str:
+    """A stateless admin session token: ``<expiry>.<HMAC(admin key, expiry)>``, or
+    ``<expiry>.<subject>.<HMAC>`` when an account signed in (``subject`` is its
+    email, base64url-encoded so the dots in it can't confuse the parser).
 
     Signed with the admin key itself, so rotating the key logs every dashboard
     session out, and the key never has to be stored in the browser.
     """
     expires = int(now) + lifetime
-    return f"{expires}.{_admin_signature(admin_key, expires)}"
+    signature = _admin_signature(admin_key, expires, subject)
+    if not subject:
+        return f"{expires}.{signature}"
+    encoded = base64.urlsafe_b64encode(subject.encode()).decode().rstrip("=")
+    return f"{expires}.{encoded}.{signature}"
+
+
+def admin_session_subject(token: str, admin_key: str, now: float) -> str | None:
+    """Who a valid session belongs to: the account's email, ``""`` for an
+    admin-key sign-in, or ``None`` when the token is invalid or expired."""
+    parts = token.split(".")
+    if len(parts) == 2:
+        expires_text, signature = parts
+        subject = ""
+    elif len(parts) == 3:
+        expires_text, encoded, signature = parts
+        try:
+            subject = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        except (ValueError, UnicodeDecodeError):
+            return None
+    else:
+        return None
+    if not expires_text.isdigit() or not signature or int(expires_text) < now:
+        return None
+    expected = _admin_signature(admin_key, int(expires_text), subject)
+    return subject if constant_time_equals(signature, expected) else None
 
 
 def verify_admin_session(token: str, admin_key: str, now: float) -> bool:
-    expires_text, _, signature = token.partition(".")
-    if not expires_text.isdigit() or not signature:
-        return False
-    expires = int(expires_text)
-    if expires < now:
-        return False
-    return constant_time_equals(signature, _admin_signature(admin_key, expires))
+    return admin_session_subject(token, admin_key, now) is not None

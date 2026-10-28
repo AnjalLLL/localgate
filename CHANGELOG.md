@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] — 2026-10-28 — accounts and a live input box
+
+Sign in to the dashboard with an email and password instead of copying a key, and keep typing
+while the agent works: the input box stays on screen, queues your next message, and still
+switches the write mode.
+
+### Added
+
+- **Email and password sign-in for the dashboard.** The first `localgate serve` in a terminal asks
+  you to create a login (email + password); `localgate users create | list | passwd | delete`
+  manage accounts. Passwords are stored only as salted scrypt hashes (standard library, no new
+  dependency) in a new `users` table (migration `0007`). The admin key still signs in and still
+  authenticates scripts. Repeated failed sign-ins from one address are throttled (429).
+- **The input box stays on screen while the agent works**: a spinner with elapsed time, a line to
+  type your next message into (Enter queues it; queued messages run in order after the task),
+  and the status line with the write mode — Shift+Tab switches it mid-task. Esc clears a
+  half-typed line, then interrupts.
+
+### Changed
+
+- The dashboard and landing page default to the **sunrise** palette (a palette you picked is kept).
+- The landing page no longer links the API reference, and explains the email sign-in.
+
 ## [0.13.0] — 2026-10-28 — onboarding, landing page and agent output
 
 Getting started from `pip install` no longer needs a `.env`: the first `localgate serve` makes a

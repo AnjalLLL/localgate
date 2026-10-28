@@ -12,7 +12,7 @@
    Neutrals are mixed from the accent, so each palette tints the whole UI slightly
    and every theme feels like one piece in both modes. */
 
-:root, :root[data-palette="jade"] {
+:root[data-palette="jade"] {
   --p-light: #0d7a62; --p-light-hover: #0a664f; --p-dark: #3ad2a5; --p-dark-hover: #5fe0b9;
   --p2-light: #c98d1f; --p2-dark: #f0b54f;
 }
@@ -28,7 +28,8 @@
   --p-light: #b8325a; --p-light-hover: #9c2749; --p-dark: #ff7fa3; --p-dark-hover: #ff9db8;
   --p2-light: #2b8a8a; --p2-dark: #5fd0c8;
 }
-:root[data-palette="sunrise"] {
+/* Sunrise is the default, so it also applies before app.js sets a palette. */
+:root, :root[data-palette="sunrise"] {
   --p-light: #a8590e; --p-light-hover: #8d4a0b; --p-dark: #ffb454; --p-dark-hover: #ffc477;
   --p2-light: #2f6fb5; --p2-dark: #78b1f0;
 }
