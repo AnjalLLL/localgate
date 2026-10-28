@@ -272,7 +272,7 @@ async def run_bench(
     reports: list[ModelReport] = []
     for model in models:
         supports = await backend.check_tool_support(model)
-        native = not (supports is False and backend.name == "ollama")
+        native = not (supports is False and backend.accepts_options)
         report = ModelReport(model)
         for task in tasks:
             result = await run_task(backend, model, task, settings=settings, native_tools=native)

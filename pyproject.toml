@@ -95,6 +95,7 @@ ollama = "localgate.backends.ollama:OllamaBackend"
 vllm = "localgate.backends.vllm:VLLMBackend"
 llamacpp = "localgate.backends.llamacpp:LlamaCppBackend"
 openai_compat = "localgate.backends.openai_compat:OpenAICompatBackend"
+localgate = "localgate.backends.localgate_remote:LocalgateBackend"
 fake = "localgate.backends.fake:FakeBackend"
 
 [tool.hatch.build.targets.wheel]

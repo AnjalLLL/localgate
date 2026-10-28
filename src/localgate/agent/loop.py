@@ -744,7 +744,7 @@ class AgentSession:
             window = None
         if window:
             self.num_ctx = min(window, cap)
-        elif self.backend.name == "ollama":
+        elif self.backend.accepts_options:
             self.num_ctx = cap
         budget = self.num_ctx or window
         if budget:
