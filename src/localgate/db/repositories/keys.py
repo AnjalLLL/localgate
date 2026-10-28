@@ -19,7 +19,12 @@ class APIKeyRepository:
         self.session = session
 
     async def create(
-        self, name: str, rate_limit_per_min: int = 60, *, admin_key: str | None = None
+        self,
+        name: str,
+        rate_limit_per_min: int = 60,
+        *,
+        admin_key: str | None = None,
+        policy: dict[str, Any] | None = None,
     ) -> tuple[APIKey, str]:
         """Create a key. Returns ``(record, raw_key)``.
 
@@ -34,6 +39,7 @@ class APIKeyRepository:
             key_hash=hash_key(raw_key),
             key_prefix=key_prefix(raw_key),
             rate_limit_per_min=rate_limit_per_min,
+            **(policy or {}),
         )
         if admin_key is not None:
             key.key_ciphertext = key_vault.seal(raw_key, key.id, admin_key)
@@ -78,6 +84,17 @@ class APIKeyRepository:
                 .where(APIKey.id == key_id)
                 .values(rate_limit_per_min=rate_limit_per_min)
             ),
+        )
+        await self.session.commit()
+        return bool(result.rowcount)
+
+    async def update_policy(self, key_id: str, fields: dict[str, Any]) -> bool:
+        """Set any of the key's limits (None clears one). Returns whether it exists."""
+        if not fields:
+            return await self.get(key_id) is not None
+        result = cast(
+            CursorResult[Any],
+            await self.session.execute(update(APIKey).where(APIKey.id == key_id).values(**fields)),
         )
         await self.session.commit()
         return bool(result.rowcount)

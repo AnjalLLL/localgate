@@ -33,6 +33,7 @@ from localgate.config import Settings
 from localgate.core import metrics
 from localgate.core.cache import cache_key
 from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.key_policy import clamp_max_tokens, enforce_key_access
 from localgate.core.logging import get_logger
 from localgate.core.model_info import apply_default_num_ctx
 from localgate.core.streaming import DONE, extract_delta, sse_error, sse_event
@@ -79,6 +80,7 @@ async def chat_completions(
 
     session_id = x_session_id or str(uuid.uuid4())
     model = settings.resolve_model(body.model)
+    await enforce_key_access(api_key, body.model, model, session)
     user_text = body.latest_user_text()
 
     extension = _pop_extension(body)
@@ -96,6 +98,7 @@ async def chat_completions(
                 messages, ChatMessage(role="system", content=sources_message(sources)["content"])
             )
     payload = body.to_backend_payload(messages, model)
+    clamp_max_tokens(api_key, payload)
     await apply_default_num_ctx(
         payload, backend, model, settings.default_num_ctx, request.app.state.model_info
     )

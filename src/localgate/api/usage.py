@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import get_session, require_admin, require_api_key
+from localgate.core.key_policy import policy_dict, tokens_this_period
 from localgate.db.models import APIKey
 from localgate.db.repositories.usage import UsageRepository
 
@@ -23,8 +24,15 @@ async def my_usage(
     api_key: APIKey = Depends(require_api_key),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """The calling key's own request/token totals — no admin key required."""
-    return await UsageRepository(session).summary_for_key(api_key.id)
+    """The calling key's own request/token totals and limits — no admin key
+    required. `localgate whoami` shows this to the person holding the key."""
+    summary = await UsageRepository(session).summary_for_key(api_key.id)
+    return {
+        **summary,
+        "name": api_key.name,
+        "limits": policy_dict(api_key),
+        "tokens_this_period": await tokens_this_period(session, api_key),
+    }
 
 
 @router.get("/usage")

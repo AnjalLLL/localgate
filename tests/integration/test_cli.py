@@ -5,6 +5,8 @@ The CLI talks to the database directly rather than to a running server, because
 the server won't start. These tests drive it the same way, against a temp database.
 """
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
@@ -271,3 +273,43 @@ def test_users_create_rejects_a_short_password(env):
     )
     assert result.exit_code == 0
     assert "at least 8 characters" in result.stdout
+
+
+# ---------------------------------------------------------------- key limits
+
+
+def test_keys_create_and_update_set_limits(env):
+    created = runner.invoke(
+        app,
+        [
+            "keys", "create", "--name", "phone", "--models", "llama3,qwen2.5-coder:7b",
+            "--max-tokens", "256", "--quota", "100000", "--quota-period", "day",
+            "--expires", "30d", "--no-store-conversations",
+        ],
+    )  # fmt: skip
+    assert created.exit_code == 0, created.output
+    assert "models llama3,qwen2.5-coder:7b" in created.stdout
+    assert "100,000 tokens/day" in created.stdout
+    assert "conversations not stored" in created.stdout
+
+    rows = json.loads(runner.invoke(app, ["keys", "list", "--json"]).stdout)
+    key_id = rows[0]["id"]
+    updated = runner.invoke(
+        app,
+        ["keys", "update", key_id, "--models", "any", "--max-tokens", "0", "--expires", "never"],
+    )
+    assert updated.exit_code == 0, updated.output
+    assert "models" not in updated.stdout and "max 256" not in updated.stdout
+    assert "100,000 tokens/day" in updated.stdout  # untouched
+
+
+def test_keys_update_with_nothing_to_change_says_so(env):
+    runner.invoke(app, ["keys", "create", "--name", "x"])
+    key_id = json.loads(runner.invoke(app, ["keys", "list", "--json"]).stdout)[0]["id"]
+    result = runner.invoke(app, ["keys", "update", key_id])
+    assert result.exit_code == 2
+
+
+def test_bad_expiry_is_rejected(env):
+    result = runner.invoke(app, ["keys", "create", "--name", "x", "--expires", "soonish"])
+    assert result.exit_code != 0

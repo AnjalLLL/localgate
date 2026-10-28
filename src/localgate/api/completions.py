@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from localgate.api.deps import enforce_rate_limit, get_session
 from localgate.core.errors import BackendError, describe_backend_failure
+from localgate.core.key_policy import clamp_max_tokens, enforce_key_access
 from localgate.core.model_info import apply_default_num_ctx
 from localgate.core.token_counter import count_tokens
 from localgate.core.types import CompletionChoice, CompletionRequest, CompletionResponse, Usage
@@ -41,6 +42,7 @@ async def create_completion(
     settings = request.app.state.settings
     backend = request.app.state.backend
     model = settings.resolve_model(body.model)
+    await enforce_key_access(api_key, body.model, model, session)
     prompt = body.prompt_text()
 
     payload = body.model_dump(exclude_none=True, exclude={"prompt", "stream"})
@@ -49,6 +51,7 @@ async def create_completion(
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
+    clamp_max_tokens(api_key, payload)
     await apply_default_num_ctx(
         payload, backend, model, settings.default_num_ctx, request.app.state.model_info
     )

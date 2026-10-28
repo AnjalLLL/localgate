@@ -15,6 +15,7 @@ import os
 import secrets
 import sys
 from collections.abc import Awaitable, Callable, Coroutine
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -32,6 +33,7 @@ from localgate.core.db_config_store import (
     redact_database_url,
     save_database_url,
 )
+from localgate.core.key_policy import QUOTA_PERIODS, as_utc, is_expired
 from localgate.core.passwords import password_problem
 from localgate.db.engine import current_revision, init_models, make_engine, make_session_factory
 from localgate.db.repositories.keys import APIKeyRepository
@@ -1374,6 +1376,84 @@ def voice_listen(
     typer.echo(result.text)
 
 
+# ------------------------------------------------------------------ key limits
+
+_DURATION_UNITS = {"h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def _parse_expires(text: str) -> datetime | None:
+    """`30d`, `12h`, `2w`, `2026-12-31`, or `never` (no expiry)."""
+    value = text.strip().lower()
+    if value in ("never", "none", ""):
+        return None
+    if value[-1:] in _DURATION_UNITS and value[:-1].isdigit():
+        return datetime.now(timezone.utc) + timedelta(
+            seconds=int(value[:-1]) * _DURATION_UNITS[value[-1]]
+        )
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "use a duration like 30d / 12h / 2w, a date like 2026-12-31, or 'never'"
+        ) from exc
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _parse_models(text: str) -> list[str] | None:
+    """Comma-separated model names; `any` (or empty) means no restriction."""
+    names = [name.strip() for name in text.split(",") if name.strip()]
+    return None if not names or names == ["any"] else names
+
+
+def _limit_columns(
+    *,
+    models: str | None,
+    max_tokens: int | None,
+    quota: int | None,
+    quota_period: str | None,
+    expires: str | None,
+    max_concurrent: int | None,
+    store_conversations: bool | None,
+) -> dict[str, Any]:
+    """Only the limits that were given. For numbers, 0 removes the limit."""
+    columns: dict[str, Any] = {}
+    if models is not None:
+        columns["allowed_models"] = _parse_models(models)
+    for column, value in (
+        ("max_tokens", max_tokens),
+        ("token_quota", quota),
+        ("max_concurrent", max_concurrent),
+    ):
+        if value is not None:
+            columns[column] = value or None
+    if quota_period is not None:
+        if quota_period not in QUOTA_PERIODS:
+            raise typer.BadParameter("--quota-period must be 'day' or 'month'")
+        columns["quota_period"] = quota_period
+    if expires is not None:
+        columns["expires_at"] = _parse_expires(expires)
+    if store_conversations is not None:
+        columns["store_conversations"] = store_conversations
+    return columns
+
+
+def _describe_limits(key: Any) -> list[str]:
+    parts = []
+    if key.allowed_models:
+        parts.append("models " + ",".join(key.allowed_models))
+    if key.max_tokens:
+        parts.append(f"max {key.max_tokens} tokens/reply")
+    if key.token_quota:
+        parts.append(f"{key.token_quota:,} tokens/{key.quota_period or 'month'}")
+    if key.expires_at:
+        parts.append(f"expires {as_utc(key.expires_at):%Y-%m-%d}")
+    if key.max_concurrent:
+        parts.append(f"{key.max_concurrent} at once")
+    if key.store_conversations is False:
+        parts.append("conversations not stored")
+    return parts
+
+
 @keys_app.command("create")
 def keys_create(
     name: str = typer.Option(..., "--name", "-n", help="A label, e.g. the app that will use it."),
@@ -1382,32 +1462,57 @@ def keys_create(
         "--rate-limit",
         help="Requests per minute. Defaults to LOCALGATE_DEFAULT_RATE_LIMIT_PER_MIN.",
     ),
+    models: str | None = typer.Option(
+        None, "--models", help="Only these models (comma-separated). Default: any."
+    ),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", help="Cap on reply length."),
+    quota: int | None = typer.Option(None, "--quota", help="Tokens allowed per quota period."),
+    quota_period: str | None = typer.Option(None, "--quota-period", help="'day' or 'month'."),
+    expires: str | None = typer.Option(
+        None, "--expires", help="When the key stops working: 30d, 12h, 2w or 2026-12-31."
+    ),
+    max_concurrent: int | None = typer.Option(
+        None, "--max-concurrent", help="Requests this key may have running at once."
+    ),
+    store_conversations: bool = typer.Option(
+        True,
+        "--store-conversations/--no-store-conversations",
+        help="Keep this key's conversations for memory (the owner can read them).",
+    ),
 ) -> None:
     """Create an API key and print it. This is the only time it is ever shown."""
     settings = _settings()
     limit = rate_limit or settings.default_rate_limit_per_min
+    policy = _limit_columns(
+        models=models,
+        max_tokens=max_tokens,
+        quota=quota,
+        quota_period=quota_period,
+        expires=expires,
+        max_concurrent=max_concurrent,
+        store_conversations=None if store_conversations else False,
+    )
 
-    async def create(session: Any) -> tuple[str, str]:
+    async def create(session: Any) -> tuple[Any, str]:
         vault_key = settings.admin_key if settings.api_key_reveal_enabled else None
-        key, raw = await APIKeyRepository(session).create(name, limit, admin_key=vault_key)
-        return key.id, raw
+        return await APIKeyRepository(session).create(
+            name, limit, admin_key=vault_key, policy=policy
+        )
 
-    async def migrate_then_create() -> tuple[str, str]:
+    async def migrate_then_create() -> tuple[Any, str]:
         # A first-run `keys create` shouldn't fail just because nobody has run
         # `db upgrade` yet — creating your first key is how you start.
-        engine = make_engine(resolve_database_url(settings))
-        try:
-            await init_models(engine)
-        finally:
-            await engine.dispose()
+        await _migrate(settings)
         return await _with_session(settings, create)
 
-    key_id, raw_key = _run(migrate_then_create())
+    key, raw_key = _run(migrate_then_create())
 
     typer.secho(f"\n  {raw_key}\n", fg=typer.colors.GREEN, bold=True)
-    typer.echo(f"  id           {key_id}")
+    typer.echo(f"  id           {key.id}")
     typer.echo(f"  name         {name}")
     typer.echo(f"  rate limit   {limit}/min")
+    for part in _describe_limits(key):
+        typer.echo(f"  limit        {part}")
     typer.secho(
         "\n  Store it now — only its hash is kept, so it cannot be shown again.\n",
         fg=typer.colors.YELLOW,
@@ -1430,6 +1535,8 @@ def keys_list(
                 "revoked": key.revoked,
                 "rate_limit_per_min": key.rate_limit_per_min,
                 "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
+                "limits": _describe_limits(key),
+                "expired": is_expired(key),
             }
             for key in await APIKeyRepository(session).list_all()
         ]
@@ -1446,15 +1553,18 @@ def keys_list(
 
     typer.echo(f"{'ID':<38} {'NAME':<20} {'PREFIX':<13} {'LIMIT':<7} STATUS")
     for row in rows:
-        status = (
-            typer.style("revoked", fg=typer.colors.RED)
-            if row["revoked"]
-            else typer.style("active", fg=typer.colors.GREEN)
-        )
+        if row["revoked"]:
+            status = typer.style("revoked", fg=typer.colors.RED)
+        elif row["expired"]:
+            status = typer.style("expired", fg=typer.colors.YELLOW)
+        else:
+            status = typer.style("active", fg=typer.colors.GREEN)
         typer.echo(
             f"{row['id']:<38} {row['name'][:19]:<20} {row['prefix']:<13} "
             f"{str(row['rate_limit_per_min']) + '/min':<7} {status}"
         )
+        if row["limits"]:
+            typer.secho(f"{'':<38} " + " · ".join(row["limits"]), fg=typer.colors.BRIGHT_BLACK)
 
 
 @keys_app.command("revoke")
@@ -1475,21 +1585,58 @@ def keys_revoke(key_id: str = typer.Argument(..., help="The key's id (from `keys
 @keys_app.command("update")
 def keys_update(
     key_id: str = typer.Argument(..., help="The key's id (from `keys list`)."),
-    rate_limit: int = typer.Option(
-        ..., "--rate-limit", help="New requests-per-minute limit for this key."
+    rate_limit: int | None = typer.Option(
+        None, "--rate-limit", help="New requests-per-minute limit for this key."
+    ),
+    models: str | None = typer.Option(
+        None, "--models", help="Only these models (comma-separated); 'any' removes the limit."
+    ),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", help="Reply cap; 0 removes it."),
+    quota: int | None = typer.Option(None, "--quota", help="Tokens per period; 0 removes it."),
+    quota_period: str | None = typer.Option(None, "--quota-period", help="'day' or 'month'."),
+    expires: str | None = typer.Option(
+        None, "--expires", help="30d, 12h, 2w, 2026-12-31, or 'never'."
+    ),
+    max_concurrent: int | None = typer.Option(
+        None, "--max-concurrent", help="Requests at once; 0 removes the limit."
+    ),
+    store_conversations: bool | None = typer.Option(
+        None, "--store-conversations/--no-store-conversations", help="Keep conversations."
     ),
 ) -> None:
-    """Update a key's rate limit."""
+    """Change a key's rate limit or other limits without reissuing it."""
     settings = _settings()
+    columns = _limit_columns(
+        models=models,
+        max_tokens=max_tokens,
+        quota=quota,
+        quota_period=quota_period,
+        expires=expires,
+        max_concurrent=max_concurrent,
+        store_conversations=store_conversations,
+    )
+    if rate_limit is not None:
+        columns["rate_limit_per_min"] = rate_limit
+    if not columns:
+        typer.secho("Nothing to change — pass at least one option.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=2)
 
-    async def update(session: Any) -> bool:
-        return await APIKeyRepository(session).set_rate_limit(key_id, rate_limit)
+    async def update(session: Any) -> Any:
+        repo = APIKeyRepository(session)
+        if not await repo.update_policy(key_id, columns):
+            return None
+        key = await repo.get(key_id)
+        if key is not None:
+            await session.refresh(key)
+        return key
 
-    if not _run(_with_session(settings, update)):
+    key = _run(_with_session(settings, update))
+    if key is None:
         typer.secho(f"No API key with id {key_id!r}.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    typer.secho(f"Updated {key_id}: rate limit is now {rate_limit}/min.", fg=typer.colors.GREEN)
+    summary = [f"{key.rate_limit_per_min}/min", *_describe_limits(key)]
+    typer.secho(f"Updated {key_id}: " + " · ".join(summary), fg=typer.colors.GREEN)
 
 
 @keys_app.command("usage")
