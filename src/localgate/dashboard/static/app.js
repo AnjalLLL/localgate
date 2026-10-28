@@ -2313,6 +2313,53 @@ async function viewShare(root) {
   await loadAddresses();
 }
 
+// ---------------------------------------------------------------- activity
+
+const ACTION_LABELS = {
+  "key.created": "created key",
+  "key.updated": "changed limits of key",
+  "key.revealed": "viewed key",
+  "key.revoked": "revoked key",
+  sign_in: "signed in",
+  "sign_in.failed": "failed sign-in",
+  "user.created": "created account",
+  "user.deleted": "deleted account",
+  "user.password_changed": "changed password of",
+  "config.database_url": "changed database to",
+};
+
+/** Who did what to the gateway: keys, sign-ins, accounts, settings. */
+async function viewActivity(root) {
+  const body = h("div", {}, loading());
+  root.append(pageHead("Activity", "Admin actions on this gateway — who did what, and from where."), card("Recent actions", body));
+  try {
+    const events = await api("/admin/audit?limit=200");
+    body.replaceChildren(
+      table(
+        [
+          { label: "When", value: (e) => when(e.at) },
+          { label: "Who", value: (e) => h("span", { class: e.actor === "admin-key" || e.actor === "cli" ? "muted" : "", text: e.actor }) },
+          {
+            label: "What",
+            value: (e) =>
+              h(
+                "span",
+                {},
+                e.action === "sign_in.failed" ? badge("failed sign-in", "bad") : ACTION_LABELS[e.action] || e.action,
+                e.target && e.action !== "sign_in.failed" ? h("span", { class: "mono", text: ` ${e.details?.name || e.target}` }) : null,
+              ),
+          },
+          { label: "From", value: (e) => h("span", { class: "mono cell-sub", text: e.ip || "this machine" }) },
+        ],
+        events,
+        { emptyText: "No admin actions yet." },
+      ),
+    );
+  } catch (err) {
+    body.replaceChildren(errorState(err));
+  }
+}
+
 const ROUTES = {
   overview: viewOverview,
   chat: viewChat,
@@ -2323,6 +2370,7 @@ const ROUTES = {
   agent: viewAgent,
   models: viewModels,
   settings: viewSettings,
+  activity: viewActivity,
 };
 
 let routeToken = 0;

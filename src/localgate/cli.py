@@ -10,6 +10,7 @@ useless in exactly the situations you reach for it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
@@ -573,6 +574,17 @@ def _first_account_setup(settings: Settings) -> str | None:
     return normalize_email(email)
 
 
+def _audit_cli(settings: Settings, action: str, target: str | None, **details: Any) -> None:
+    """Record an admin action taken from this terminal (actor "cli")."""
+    from localgate.db.repositories.audit import AuditRepository  # noqa: PLC0415
+
+    async def write(session: Any) -> None:
+        await AuditRepository(session).record("cli", action, target, details or None)
+
+    with contextlib.suppress(Exception):  # auditing must never break the action
+        _run(_with_session(settings, write))
+
+
 @users_app.command("create")
 def users_create(
     email: str | None = typer.Option(None, "--email", help="Sign-in email."),
@@ -599,6 +611,7 @@ def users_create(
     if not _run(create()):
         typer.secho(f"An account for {normalize_email(email)} already exists.", fg=typer.colors.RED)
         raise typer.Exit(code=1)
+    _audit_cli(settings, "user.created", normalize_email(email))
     typer.secho(
         f"Created {normalize_email(email)} — sign in at /dashboard/.", fg=typer.colors.GREEN
     )
@@ -634,6 +647,7 @@ def users_passwd(email: str = typer.Argument(..., help="The account's email.")) 
     if not _run(_with_session(settings, change)):
         typer.secho(f"No account for {normalize_email(email)}.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    _audit_cli(settings, "user.password_changed", normalize_email(email))
     typer.secho("Password changed.", fg=typer.colors.GREEN)
 
 
@@ -654,6 +668,7 @@ def users_delete(email: str = typer.Argument(..., help="The account's email.")) 
     if not _run(_with_session(settings, remove)):
         typer.secho(f"No account for {normalize_email(email)}.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    _audit_cli(settings, "user.deleted", normalize_email(email))
     typer.secho(f"Deleted {normalize_email(email)}.", fg=typer.colors.GREEN)
 
 
@@ -752,6 +767,24 @@ def service_logs() -> None:
     plan = _service_plan([])
     result = subprocess.run(plan.logs, check=False, capture_output=True, text=True)  # noqa: S603
     typer.echo((result.stdout or result.stderr).strip() or "(no log output yet)")
+
+
+@app.command()
+def audit(
+    limit: int = typer.Option(30, "--limit", "-n", help="How many recent actions to show."),
+) -> None:
+    """Recent admin actions: keys created, changed, revealed or revoked; sign-ins; accounts."""
+    from localgate.db.repositories.audit import AuditRepository  # noqa: PLC0415
+
+    settings = _settings()
+    events = _run(_with_session(settings, lambda s: AuditRepository(s).recent(limit)))
+    if not events:
+        typer.echo("No admin actions recorded yet.")
+        return
+    for event in events:
+        when = as_utc(event.at).strftime("%Y-%m-%d %H:%M") if event.at else "?"
+        target = f" {event.target}" if event.target else ""
+        typer.echo(f"  {when}  {event.actor:<24} {event.action}{target}")
 
 
 # ---------------------------------------------------------------------------- doctor

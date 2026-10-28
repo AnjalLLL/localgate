@@ -14,6 +14,7 @@ from localgate.core.errors import InvalidRequestError
 from localgate.core.key_policy import as_utc, is_expired, tokens_this_period
 from localgate.core.logging import get_logger
 from localgate.db.models import APIKey
+from localgate.db.repositories.audit import audit
 from localgate.db.repositories.keys import APIKeyRepository
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
@@ -135,6 +136,7 @@ async def create_key(
     key, raw_key = await APIKeyRepository(session).create(
         body.name, limit, admin_key=vault_key, policy=body.columns(only_set=False)
     )
+    await audit(request, "key.created", key.id, name=key.name, limits=_loggable(body))
     return CreatedKeyResponse(**KeyResponse.of(key, 0).model_dump(), api_key=raw_key)
 
 
@@ -181,6 +183,7 @@ async def reveal_key(
             code="key_not_recoverable",
         )
     logger.info("api_key_revealed", key_id=key_id)
+    await audit(request, "key.revealed", key_id, name=key.name)
     return RevealedKey(id=key_id, api_key=raw)
 
 
@@ -194,7 +197,10 @@ async def get_key(key_id: str, session: AsyncSession = Depends(get_session)) -> 
 
 @router.patch("/keys/{key_id}", response_model=KeyResponse)
 async def update_key(
-    key_id: str, body: UpdateKeyRequest, session: AsyncSession = Depends(get_session)
+    key_id: str,
+    body: UpdateKeyRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
 ) -> KeyResponse:
     """Change a key's rate limit and other limits without reissuing it. Only the
     fields sent change; null clears a limit."""
@@ -211,11 +217,14 @@ async def update_key(
     if key is None:  # pragma: no cover — it was updated one statement ago
         raise InvalidRequestError(f"No API key with id {key_id!r}.", code="key_not_found")
     await session.refresh(key)
+    await audit(request, "key.updated", key_id, name=key.name, changes=_loggable(body))
     return KeyResponse.of(key, await _period_usage(session, key))
 
 
 @router.delete("/keys/{key_id}")
-async def revoke_key(key_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+async def revoke_key(
+    key_id: str, request: Request, session: AsyncSession = Depends(get_session)
+) -> dict:
     """Revoke a key.
 
     Revocation sets a flag rather than deleting the row: usage records reference the
@@ -224,4 +233,10 @@ async def revoke_key(key_id: str, session: AsyncSession = Depends(get_session)) 
     """
     if not await APIKeyRepository(session).revoke(key_id):
         raise InvalidRequestError(f"No API key with id {key_id!r}.", code="key_not_found")
+    await audit(request, "key.revoked", key_id)
     return {"id": key_id, "revoked": True}
+
+
+def _loggable(body: BaseModel) -> dict[str, Any]:
+    """The fields a request set, JSON-safe, for the audit log."""
+    return body.model_dump(mode="json", include=body.model_fields_set)

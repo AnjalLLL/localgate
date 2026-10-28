@@ -29,6 +29,7 @@ from localgate.core.auth import (
     issue_admin_session,
 )
 from localgate.core.errors import AuthenticationError, LocalgateError, RateLimitError
+from localgate.db.repositories.audit import AuditRepository, audit
 from localgate.db.repositories.conversations import ConversationRepository, SummaryRepository
 from localgate.db.repositories.embeddings import EmbeddingRepository
 from localgate.db.repositories.keys import APIKeyRepository
@@ -100,10 +101,18 @@ async def sign_in(
         subject = ""
     if subject is None:
         _failed_sign_ins[client].append(now)
+        await audit(
+            request,
+            "sign_in.failed",
+            body.email or None,
+            actor=body.email or "admin-key",
+            method="password" if body.email else "admin_key",
+        )
         if body.email:
             raise AuthenticationError("Wrong email or password.", code="invalid_credentials")
         raise AuthenticationError("Invalid admin key.", code="invalid_admin_key")
     _failed_sign_ins.pop(client, None)
+    await audit(request, "sign_in", subject or None, actor=subject or "admin-key")
     response.set_cookie(
         ADMIN_COOKIE,
         issue_admin_session(settings.admin_key, now, subject=subject),
@@ -343,3 +352,24 @@ async def search_test(body: SearchProbe, request: Request) -> dict:
         "error": error,
         "results": [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in results],
     }
+
+
+@router.get("/audit")
+async def audit_log(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Recent admin actions, newest first."""
+    events = await AuditRepository(session).recent(limit, offset)
+    return [
+        {
+            "at": event.at,
+            "actor": event.actor,
+            "action": event.action,
+            "target": event.target,
+            "details": event.details,
+            "ip": event.ip,
+        }
+        for event in events
+    ]
