@@ -21,7 +21,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from localgate.agent.context import (
@@ -31,6 +31,7 @@ from localgate.agent.context import (
     ledger_message,
     make_llm_ledger_updater,
 )
+from localgate.agent.input import project_files
 from localgate.agent.instructions import load_instructions
 from localgate.agent.mcp import McpRegistry, is_mcp_tool_name
 from localgate.agent.tool_executor import (
@@ -322,24 +323,55 @@ _FILENAME_HINT_RE = re.compile(
 )
 
 
-def _extract_code_block_as_write(content: str) -> dict[str, Any] | None:
-    """If model output contains a named code block (filename hint + fence),
-    synthesize a write_file tool call from the first one found.
+#: A fenced block labelled by a comment on its first line — the other common way
+#: models name a file: ```html / <!-- src/index.html -->, /* styles.css */,
+#: // app.js or # main.py. The label line is dropped from the written content.
+_PATH_COMMENT_BLOCK_RE = re.compile(
+    r"```\w*[ \t]*\n"
+    r"[ \t]*(?:<!--|/\*|//|#)[ \t]*(?:[Ff]ile:\s*)?"
+    r"((?:\./)?[\w][\w./-]*\."
+    r"(?:html|css|js|jsx|tsx|ts|py|json|md|txt|yml|yaml|toml|cfg|ini|sh))"
+    r"[ \t]*(?:-->|\*/)?[ \t]*\n"
+    r"(.*?)"
+    r"\n```",
+    re.DOTALL,
+)
+
+
+def _named_code_blocks(content: str) -> list[tuple[str, str]]:
+    """(path, code) for every code block the reply names a file for, in order.
+
+    A block named both ways (a heading and a comment label) is counted once —
+    both matches end at the same closing fence.
     """
-    for match in _FILENAME_HINT_RE.finditer(content):
-        path = match.group(1).strip()
-        code = match.group(2)
-        if len(code.strip()) < 50:
-            continue
-        return {
-            "id": f"synthetic-{uuid.uuid4().hex[:8]}",
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "arguments": json.dumps({"path": path, "content": code}),
-            },
-        }
-    return None
+    found: dict[int, tuple[int, str, str]] = {}
+    for pattern in (_PATH_COMMENT_BLOCK_RE, _FILENAME_HINT_RE):
+        for match in pattern.finditer(content):
+            code = match.group(2)
+            if len(code.strip()) < 50:
+                continue
+            found.setdefault(match.end(), (match.start(), match.group(1).strip(), code))
+    return [(path, code) for _start, path, code in sorted(found.values())]
+
+
+def _write_call(path: str, code: str) -> dict[str, Any]:
+    return {
+        "id": f"synthetic-{uuid.uuid4().hex[:8]}",
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "arguments": json.dumps({"path": path, "content": code}),
+        },
+    }
+
+
+def _extract_code_block_as_write(content: str) -> dict[str, Any] | None:
+    """If model output contains a named code block (filename hint + fence, or a
+    path comment as the block's first line), synthesize a write_file tool call
+    from the first one found.
+    """
+    blocks = _named_code_blocks(content)
+    return _write_call(*blocks[0]) if blocks else None
 
 
 #: A SEARCH/REPLACE block — the edit format Aider popularized, which many coding
@@ -382,23 +414,20 @@ def _extract_search_replace_edits(content: str) -> list[dict[str, Any]]:
 
 def _extract_all_code_blocks_as_writes(content: str) -> list[dict[str, Any]]:
     """Extract ALL named code blocks from model output as write_file calls."""
-    writes: list[dict[str, Any]] = []
-    for match in _FILENAME_HINT_RE.finditer(content):
-        path = match.group(1).strip()
-        code = match.group(2)
-        if len(code.strip()) < 50:
-            continue
-        writes.append(
-            {
-                "id": f"synthetic-{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": "write_file",
-                    "arguments": json.dumps({"path": path, "content": code}),
-                },
-            }
-        )
-    return writes
+    return [_write_call(path, code) for path, code in _named_code_blocks(content)]
+
+
+#: Fence language tag -> the file extension that kind of code lives in.
+_LANGUAGE_EXTENSIONS = {
+    "html": ".html", "htm": ".html", "css": ".css", "scss": ".scss",
+    "js": ".js", "javascript": ".js", "jsx": ".jsx", "ts": ".ts", "typescript": ".ts",
+    "tsx": ".tsx", "py": ".py", "python": ".py", "json": ".json", "go": ".go",
+    "rs": ".rs", "rust": ".rs", "java": ".java", "rb": ".rb", "ruby": ".rb",
+    "php": ".php", "vue": ".vue", "svelte": ".svelte",
+}  # fmt: skip
+_FENCED_BLOCK_RE = re.compile(r"```(\w*)[^\n]*\n(.*?)\n```", re.DOTALL)
+#: A block at least this long reads as file content rather than an illustration.
+_FILE_LIKE_BLOCK_LINES = 8
 
 
 class AgentTurnLimitExceeded(RuntimeError):
@@ -896,6 +925,7 @@ class AgentSession:
                     elif synthetic_name == "write_file":
                         all_writes = _extract_all_code_blocks_as_writes(content)
                         tool_calls = all_writes if len(all_writes) > 1 else [synthetic]
+                        tool_calls = [self._retarget_write(call) for call in tool_calls]
                     else:
                         tool_calls = [synthetic]
                     message = {
@@ -1041,6 +1071,13 @@ class AgentSession:
                 "describe a plan — make the change with a tool call." + first_step + " If no "
                 "change is needed, say so plainly and explain why."
             )
+        if self._task_mutations == 0 and self._has_project_code(final_answer):
+            return (
+                "CHECK: your reply contains code for this project, but no file was changed. "
+                "If that code belongs in the project, apply it now: edit_file for a small "
+                "change, write_file to replace a whole file, using the real paths from the file "
+                "list. If the user only asked to see code, say so in one line without repeating it."
+            )
         if self._task_mutations == 0 and self._last_mutation_error:
             return (
                 "CHECK: no file was changed in this task; your last change failed with: "
@@ -1052,6 +1089,45 @@ class AgentSession:
     def _has_done_work(self) -> bool:
         """Check if any tool calls have been made in this conversation."""
         return self._task_tool_calls > 0
+
+    def _existing_target(self, path: str) -> str:
+        """Models often guess a directory for a file that lives elsewhere
+        ("src/index.html" when it's at the root). A labelled code block for a path
+        that doesn't exist goes to the one project file with that name, if exactly
+        one exists; otherwise the path is kept (a genuinely new file)."""
+        try:
+            if resolve_within(self.root, path).exists():
+                return path
+        except ValueError:
+            return path
+        name = PurePosixPath(path).name
+        matches = [f for f in project_files(self.root) if PurePosixPath(f).name == name]
+        return matches[0] if len(matches) == 1 else path
+
+    def _retarget_write(self, call: dict[str, Any]) -> dict[str, Any]:
+        fn = call["function"]
+        arguments = _parse_arguments(fn["arguments"])
+        path = arguments.get("path")
+        if not isinstance(path, str):
+            return call
+        target = self._existing_target(path)
+        if target == path:
+            return call
+        arguments["path"] = target
+        return {**call, "function": {**fn, "arguments": json.dumps(arguments)}}
+
+    def _has_project_code(self, answer: str) -> bool:
+        """Whether ``answer`` holds file-sized code in a language this project
+        uses — the sign of a change written into chat instead of into a file."""
+        blocks = [
+            (lang.lower(), code)
+            for lang, code in _FENCED_BLOCK_RE.findall(answer)
+            if code.count("\n") + 1 >= _FILE_LIKE_BLOCK_LINES
+        ]
+        if not blocks:
+            return False
+        extensions = {PurePosixPath(f).suffix for f in project_files(self.root)}
+        return any(_LANGUAGE_EXTENSIONS.get(lang) in extensions for lang, _code in blocks)
 
     def _attachment_text(self, attachments: Sequence[str]) -> str:
         """File contents for the user's `@path` attachments, marked as read."""
