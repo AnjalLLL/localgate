@@ -1372,6 +1372,12 @@ async def run_turn(
     elif hidden_code:
         # Say it plainly: code in the chat is not code in the project.
         summary.append("[yellow]⚠ no files changed — the code above is only in the reply[/yellow]")
+    elif not interrupted and not gate.plan_mode and session.described_without_changing:
+        # The model only said what it would do; don't let that read as done.
+        summary.append(
+            "[yellow]⚠ nothing was changed — the model only described the change. Ask again "
+            '("do it now"), or switch to a model that handles tools better (/model)[/yellow]'
+        )
     else:
         summary.append("[dim]no files changed[/dim]")
     if tool_calls:

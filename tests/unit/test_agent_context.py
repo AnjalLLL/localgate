@@ -101,6 +101,8 @@ async def test_folding_keeps_user_words_and_feeds_the_ledger():
     assert seen and "write_file" in seen[0]
     joined = "\n".join(m.get("content") or "" for m in out)
     assert "Build the login page with OAuth, no passwords." in joined
+    # Folded requests are marked as done, so a small model doesn't start them over.
+    assert "already handled" in joined
     assert ledger.decisions == ["OAuth only"]
     assert_tool_pairs_intact(out)
     roles = [m["role"] for m in out]
