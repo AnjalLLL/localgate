@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — 2026-10-29
+
+### Fixed
+
+- **The coding agent no longer loops on "a file must be read before write_file".** What the
+  session had read was forgotten at every new message, so a file read in one turn was refused
+  again in the next; small models echoed the refusal and stopped, turn after turn. The session
+  now remembers each file's content hash across turns: a file it has seen and nobody has
+  changed since can be rewritten directly, while one changed in between (e.g. by you) must
+  still be read again. Paths are compared normalised (`./src/a.html` = `src/a.html`).
+
 ## [1.1.0] — 2026-10-29 — share with one command, from anywhere
 
 `localgate serve` now shares with your network by default, the dashboard can give the gateway
