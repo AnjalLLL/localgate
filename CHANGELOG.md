@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Connecting a device takes one command.** `localgate code` on a machine without a model
+  server asks where models should run; choosing a shared gateway asks for its address
+  (`192.168.1.20` is enough — gateways announced on the network are offered by number) and
+  the API key, checks them, saves them, and starts the session on the gateway. Inside a
+  session, `/connect` moves to a gateway and `/disconnect` back to this machine; the banner
+  shows which gateway is in use. `localgate logout` forgets it.
+- Connection errors say what to do — e.g. "refused to connect" now explains that the GPU
+  machine must run `localgate serve --share`.
+
+### Changed
+
+- `localgate login --url` accepts a bare address (`192.168.1.20`, `gpu-box:9000`).
+- On a gateway, `localgate code` keeps your default model when the gateway has it (`llama3`
+  matches `llama3:latest`), else picks one your key may use, preferring tool-capable models.
+
 ## [1.0.0] — 2026-10-29 — share your GPU
 
 localgate was built for one idea: a machine with a good GPU runs the models, and every

@@ -9,6 +9,7 @@ another machine `localgate discover` lists what's out there and
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,9 @@ class DiscoveryUnavailable(RuntimeError):
 
 
 def _zeroconf() -> Any:
+    # zeroconf logs a traceback for every interface it can't probe ("No route to
+    # host" on a VPN or inactive adapter). Harmless — and not for the user's terminal.
+    logging.getLogger("zeroconf").setLevel(logging.CRITICAL)
     try:
         from zeroconf import asyncio as zc_asyncio  # noqa: PLC0415
     except ImportError as exc:

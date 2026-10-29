@@ -50,14 +50,29 @@ from openai import OpenAI
 client = OpenAI(base_url="http://192.168.1.20:8000/v1", api_key="lg_...")
 ```
 
-or the localgate CLI, including the coding agent:
+or the localgate coding agent. Install it and just run it:
 
 ```bash
-localgate discover                       # gateways on this network (optional extra)
-localgate login --url http://192.168.1.20:8000 --api-key lg_...
-localgate whoami                         # your limits and usage
-localgate code --remote                  # the agent edits files here, the GPU there
+pip install localgate
+localgate code
 ```
+
+With no model server on that device, it asks where models should run — pick **a shared
+gateway**, type the address (`192.168.1.20` is enough; gateways announced on the network
+are listed by number) and the API key. The connection is checked, saved, and used from
+then on. Inside a session, `/connect` switches to a gateway and `/disconnect` back to the
+device's own models. From scripts: `localgate login --url 192.168.1.20 --api-key lg_...`,
+`localgate whoami` (your limits and usage), `localgate logout`.
+
+### Same network, or not?
+
+`serve --share` works for devices on the **same network** (home or office Wi-Fi, LAN).
+For a device somewhere else, use Tailscale or a tunnel — see section 5.
+
+If a device gets **"refused to connect"** / **"Nothing answered"**: the gateway is
+running without `--share` (it then accepts connections from its own machine only),
+isn't running, or uses another port. Check on the GPU machine that `serve --share`
+printed a *Local network* address, and use exactly that address and port.
 
 ## 3. Limits per key
 
