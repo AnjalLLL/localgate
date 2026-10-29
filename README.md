@@ -157,12 +157,9 @@ models, reply length, monthly tokens and lifetime you choose — and shows a QR 
 sets the device up. Requests from every device share the GPU fairly (a queue that takes
 turns across keys, `503` + `Retry-After` when it's full), long prompts keep their start
 (localgate sends Ollama a real context window), and the dashboard and admin API stay on
-your own network. On another machine:
-
-```bash
-localgate login --url http://192.168.1.20:8000 --api-key lg_...
-localgate code --remote                 # the coding agent, on the GPU machine's models
-```
+your own network. On another machine, just run `localgate code`: it asks where models
+should run, takes the gateway's address and your API key, and remembers them
+(`/connect` and `/disconnect` switch inside a session).
 
 Tailscale, Cloudflare Tunnel, several GPUs or machines, and running with Redis:
 **[Sharing your GPU](docs/sharing.md)**.
@@ -272,6 +269,7 @@ localgate db set-url <url>               # test and save a new database URL
 localgate discover                       # gateways on this network (pip install 'localgate[discovery]')
 localgate login --url https://gw.example.com --api-key <key>   # connect to a remote gateway
 localgate whoami                         # your limits and usage on the connected gateway
+localgate logout                         # forget the gateway; use this machine's models
 
 localgate code                           # interactive coding session in the current directory
 localgate code "add a health check"      # one-off task, then exit
