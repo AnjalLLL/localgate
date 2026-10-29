@@ -496,3 +496,59 @@ def test_half_escaped_html_is_repaired_but_code_strings_are_not():
 
     code = 'import sys\nprint("a\\nb")\nprint("c\\nd")\n'
     assert unescape_text_arguments({"path": "app.py", "content": code})["content"] == code
+
+
+# ------------------------------------- reading before rewriting, across turns
+
+
+def _read(path: str) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "r1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": json.dumps({"path": path})},
+            }
+        ],
+    }
+
+
+async def test_a_file_seen_in_an_earlier_turn_can_be_rewritten(site):
+    """Turn 1 reads the page; turn 2 rewrites it. The session still knows the
+    content (nothing changed it), so there's no "read it first" refusal — which
+    small models answered by echoing the error and stopping, turn after turn."""
+    backend = ScriptedBackend(
+        [
+            _read("index.html"),
+            final_text("It has a body that says old."),
+            _write("./index.html", "<html><body>new</body></html>\n"),
+            final_text("Updated."),
+        ]
+    )
+    session = AgentSession(backend, "scripted-model", site, confirm_write=lambda *_: True)
+    await session.send("what's in index.html?")
+    assert await session.send("rewrite index.html") == "Updated."
+    assert (site / "index.html").read_text() == "<html><body>new</body></html>\n"
+
+
+async def test_a_file_changed_by_someone_else_must_be_read_again(site):
+    backend = ScriptedBackend(
+        [
+            _read("index.html"),
+            final_text("Read it."),
+            _write("index.html", "<html>agent version</html>\n"),
+            final_text("done"),
+            final_text("left it"),
+        ]
+    )
+    session = AgentSession(backend, "scripted-model", site, confirm_write=lambda *_: True)
+    await session.send("look at index.html")
+    (site / "index.html").write_text("<html>the user's own edit</html>\n")  # between turns
+    await session.send("rewrite index.html")
+    assert (site / "index.html").read_text() == "<html>the user's own edit</html>\n"
+    refusal = [m for m in backend.requests[3]["messages"] if m["role"] == "tool"][-1]
+    assert (
+        "must be read before" in refusal["content"] and "the user's own edit" in refusal["content"]
+    )

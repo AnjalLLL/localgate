@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import time
@@ -697,6 +698,10 @@ class AgentSession:
         self._task_tool_calls = 0
         self._task_mutations = 0
         self._read_paths: set[str] = set()
+        #: What each file looked like when this session last saw it (read, attached or
+        #: written), by content hash. Kept across turns: a file the model has seen and
+        #: nobody has changed since may be rewritten without reading it again.
+        self._seen: dict[str, str] = {}
         self._last_mutation_error: str | None = None
         self._broken_files: set[str] = set()
         self._task_changed_paths: set[str] = set()
@@ -725,6 +730,37 @@ class AgentSession:
         """Drop history, starting a new conversation in the same session."""
         self.messages = [{"role": "system", "content": self.system_prompt()}]
         self.ledger = SessionLedger()
+        self._seen = {}
+
+    def _key(self, path: str) -> str:
+        """One spelling per file: "./src/a.html" and "src/a.html" are the same."""
+        try:
+            return resolve_within(self.root, path).relative_to(self.root.resolve()).as_posix()
+        except ValueError:
+            return path
+
+    def _fingerprint(self, path: str) -> str | None:
+        try:
+            data = resolve_within(self.root, path).read_bytes()
+        except (OSError, ValueError):
+            return None
+        return hashlib.sha256(data).hexdigest()
+
+    def _mark_seen(self, path: str) -> None:
+        """The model now knows this file's content (it read, was shown, or wrote it)."""
+        self._read_paths.add(path)
+        fingerprint = self._fingerprint(path)
+        if fingerprint is not None:
+            self._seen[self._key(path)] = fingerprint
+
+    def _known(self, path: str) -> bool:
+        """Whether rewriting ``path`` can't clobber content the model never saw:
+        it saw the file this turn, or saw it earlier and it hasn't changed since.
+        A file changed by someone else in between must be read again."""
+        if path in self._read_paths:
+            return True
+        seen = self._seen.get(self._key(path))
+        return seen is not None and seen == self._fingerprint(path)
 
     def switch_model(self, model: str, *, native_tools: bool = True) -> None:
         """Change model; the context window and tool protocol are re-derived."""
@@ -832,7 +868,7 @@ class AgentSession:
             total_chars += len(content)
             parts.append(f"\nContents of {entry}:\n```\n{content}\n```")
             # The model has seen it in full, so it counts as read for edits.
-            self._read_paths.add(entry)
+            self._mark_seen(entry)
 
         return "\n".join(parts)
 
@@ -1185,7 +1221,7 @@ class AgentSession:
                 content = read_file(self.root, path)
             except (OSError, ValueError):
                 continue
-            self._read_paths.add(path)
+            self._mark_seen(path)
             self.ledger.observe_tool("read_file", {"path": path}, True, content)
             blocks.append(f"Contents of {path} (attached by the user):\n```\n{content}\n```")
         return "\n\n".join(blocks)
@@ -1230,7 +1266,7 @@ class AgentSession:
                 "content": _cap_tool_result(content),
             }
         )
-        self._read_paths.add(path)
+        self._mark_seen(path)
         self.ledger.observe_tool("read_file", {"path": path}, True, "")
         if self.on_event is not None:
             self.on_event(f"read_file(path={path!r})")
@@ -1372,7 +1408,7 @@ class AgentSession:
                 pass
         if needs_prior_read:
             path = arguments.get("path")
-            if not isinstance(path, str) or path not in self._read_paths:
+            if not isinstance(path, str) or not self._known(path):
                 await self._log_tool(name, arguments, False, started, error="not read first")
                 if not isinstance(path, str):
                     return reply(f"Error: {name} needs a 'path' string.")
@@ -1382,7 +1418,7 @@ class AgentSession:
                     current = read_file_page(self.root, path)
                 except (OSError, ValueError) as exc:
                     return reply(f"Error: {name} failed: {type(exc).__name__}: {exc}")
-                self._read_paths.add(path)
+                self._mark_seen(path)
                 self.ledger.observe_tool("read_file", {"path": path}, True, "")
                 self._last_mutation_error = f"{name} on {path} was refused: not read first"
                 return reply(
@@ -1513,7 +1549,7 @@ class AgentSession:
         if not result.is_error and name == "read_file":
             path = arguments.get("path")
             if isinstance(path, str):
-                self._read_paths.add(path)
+                self._mark_seen(path)
         if name in MUTATING_TOOL_NAMES:
             path_arg = arguments.get("path")
             if result.is_error:
@@ -1530,7 +1566,7 @@ class AgentSession:
             if isinstance(path, str) and name != "delete_file":
                 # The model just wrote it, so its content is known: a follow-up
                 # edit needn't re-read the file first.
-                self._read_paths.add(path)
+                self._mark_seen(path)
 
         content = result.content
         if not result.is_error and name == "edit_file":
