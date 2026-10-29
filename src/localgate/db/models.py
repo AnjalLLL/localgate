@@ -67,6 +67,9 @@ class APIKey(Base):
     max_concurrent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: False: never store this key's conversations or memories (usage is still counted).
     store_conversations: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: Where the key works (0010): "local" (the owner's network, Tailscale), "internet"
+    #: (through the `serve --public` tunnel or from a public address), or "both".
+    network_access: Mapped[str] = mapped_column(String, default="both")
 
 
 class UsageRecord(Base):

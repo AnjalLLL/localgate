@@ -1366,6 +1366,7 @@ dependencies = [
     { name = "tiktoken" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "zeroconf" },
 ]
 
 [package.optional-dependencies]
@@ -1435,6 +1436,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+    { name = "zeroconf", specifier = ">=0.130" },
     { name = "zeroconf", marker = "extra == 'discovery'", specifier = ">=0.130" },
 ]
 provides-extras = ["postgres", "redis", "discovery", "voice", "dev"]

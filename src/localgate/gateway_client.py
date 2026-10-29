@@ -95,10 +95,10 @@ async def verify(
             live = await client.get("/health/live")
         except httpx.ConnectError as exc:
             raise GatewayError(
-                f"Nothing answered at {url}. On the GPU machine, start the gateway with "
-                "`localgate serve --share` (plain `localgate serve` only accepts connections "
-                f"from that machine itself), and check this device can reach {host}: same "
-                "network, or Tailscale / a tunnel for a different one."
+                f"Nothing answered at {url}. On the GPU machine, run `localgate serve` (not "
+                "with --local, which only accepts that machine itself) and use the address it "
+                f"prints. If this device isn't on the same network as {host}, use the internet "
+                "address instead: Dashboard → Share → Internet access."
             ) from exc
         except httpx.TimeoutException as exc:
             raise GatewayError(

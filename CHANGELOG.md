@@ -8,6 +8,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Sharing needs no flag:** `localgate serve` shares with your network by default;
+  `--local` keeps it to this machine (an explicit `LOCALGATE_HOST` is still respected).
+- **Internet access, built in:** `localgate serve --public`, or the **Internet access**
+  switch on Dashboard → Share, opens a free Cloudflare quick tunnel — an
+  `https://….trycloudflare.com` address that works from any network, no account or router
+  setup. `cloudflared` is used if installed, otherwise downloaded once from Cloudflare's
+  release and checked against its published SHA-256. Behind the tunnel the real visitor
+  address (`CF-Connecting-IP`) is used for every trust decision.
+- **Per-key network access** (migration `0010`): a key works on the **local network**,
+  over the **internet**, or **both** — `403 network_not_allowed` elsewhere. Set it on the
+  Share page, the key editor, `--network local|internet|both`, or the API; the Share page
+  hands an internet-only key the internet address.
+- **Pick a key's models with checkboxes** on the Share page and in the key editor.
+- LAN discovery is built in (zeroconf is now a regular dependency).
+
 - **Connecting a device takes one command.** `localgate code` on a machine without a model
   server asks where models should run; choosing a shared gateway asks for its address
   (`192.168.1.20` is enough — gateways announced on the network are offered by number) and

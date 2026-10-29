@@ -138,7 +138,7 @@ part of it. See **[RAG Memory](docs/rag-memory.md)**.
 - **Production-ready** — structured JSON logs with correlation IDs, Prometheus metrics,
   liveness/readiness split, graceful shutdown, fail-fast config validation.
 - **Dashboard** — keys, usage and conversations in the browser, at `/dashboard/`.
-- **Share your GPU** — `localgate serve --share` lets other devices use this machine's
+- **Share your GPU** — `localgate serve` lets other devices use this machine's
   models: per-device keys with model, quota, reply-length and expiry limits, a fair GPU
   queue, a Share page with QR codes, several GPUs or machines behind one gateway, and an
   audit log. See **[Sharing your GPU](docs/sharing.md)**.
@@ -148,8 +148,9 @@ part of it. See **[RAG Memory](docs/rag-memory.md)**.
 Run the models on the machine with the GPU; use them from every other device.
 
 ```bash
-localgate serve --share                 # listen on the network, print the addresses
-localgate service install --share       # …and keep it running across reboots
+localgate serve                         # shared with your network; prints the address
+localgate serve --public                # …and an internet address for other networks
+localgate service install               # keep it running across reboots
 ```
 
 Then **Dashboard → Share** creates a key for each device or person — limited to the
@@ -246,9 +247,10 @@ reach.
 ```bash
 localgate init                           # first-time setup: config dir, admin key, migrations
 localgate doctor                         # diagnose your installation (paths, DB, network exposure)
-localgate serve                          # start the gateway (this machine only)
-localgate serve --share                  # …and let other devices on the network use it
-localgate service install --share        # run it in the background, at every login
+localgate serve                          # start the gateway, shared with your network
+localgate serve --public                 # …plus an internet address (free Cloudflare tunnel)
+localgate serve --local                  # this machine only
+localgate service install                # run it in the background, at every login
 localgate admin-key                      # show the admin key (scripts); --rotate replaces it
 localgate users create                   # a dashboard login (email + password)
 localgate audit                          # recent admin actions
@@ -266,7 +268,7 @@ localgate db upgrade                     # apply migrations
 localgate db current                     # current schema revision
 localgate db set-url <url>               # test and save a new database URL
 
-localgate discover                       # gateways on this network (pip install 'localgate[discovery]')
+localgate discover                       # gateways on this network
 localgate login --url https://gw.example.com --api-key <key>   # connect to a remote gateway
 localgate whoami                         # your limits and usage on the connected gateway
 localgate logout                         # forget the gateway; use this machine's models

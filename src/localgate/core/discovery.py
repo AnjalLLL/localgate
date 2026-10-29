@@ -1,9 +1,8 @@
 """Find localgate gateways on the local network (mDNS / Bonjour), optional.
 
-`localgate serve --share` advertises the gateway as `_localgate._tcp`; on
-another machine `localgate discover` lists what's out there and
-`localgate login --url <name>` connects by name instead of by IP. Needs the
-`localgate[discovery]` extra (zeroconf); without it everything else still works.
+A shared `localgate serve` advertises the gateway as `_localgate._tcp`; on
+another machine `localgate code` offers the gateways it finds, `localgate
+discover` lists them, and `localgate login --url <name>` connects by name.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ def _zeroconf() -> Any:
         from zeroconf import asyncio as zc_asyncio  # noqa: PLC0415
     except ImportError as exc:
         raise DiscoveryUnavailable(
-            "Network discovery needs an extra package: pip install 'localgate[discovery]'"
+            "Network discovery needs zeroconf: pip install zeroconf"
         ) from exc
     return zc_asyncio
 

@@ -1183,9 +1183,17 @@ async function viewChat(root, chatId) {
 // Model names for the "Models" suggestions — fetched once per page load.
 let modelNamesPromise = null;
 function modelNames() {
-  modelNamesPromise ||= api("/admin/models").then((rows) => rows.map((m) => m.name)).catch(() => []);
+  modelNamesPromise ||= api("/admin/models")
+    .then((rows) => rows.filter((m) => m.can_chat !== false).map((m) => m.name))
+    .catch(() => []);
   return modelNamesPromise;
 }
+
+const NETWORK_CHOICES = [
+  ["both", "Both", "on your network and over the internet"],
+  ["local", "Local network", "this network and Tailscale only"],
+  ["internet", "Internet", "only through the internet address"],
+];
 
 function field(label, control, hint) {
   return h("label", { class: "field" }, h("span", { text: label }), control, hint ? h("small", { class: "field-hint", text: hint }) : null);
@@ -1194,10 +1202,41 @@ function field(label, control, hint) {
 /** The optional per-key limits, shared by the create form, the edit dialog and
  *  the Share page. `values()` returns them in the /admin/keys shape (null = no limit). */
 function limitsFields(initial = {}) {
-  const listId = `models-${Math.random().toString(36).slice(2)}`;
-  const datalist = h("datalist", { id: listId });
-  modelNames().then((names) => datalist.replaceChildren(...names.map((n) => h("option", { value: n }))));
-  const models = h("input", { type: "text", placeholder: "any model", list: listId, value: (initial.allowed_models || []).join(", ") });
+  // Models: tick the ones this key may use, or "Any model".
+  const chosen = new Set(initial.allowed_models || []);
+  const anyModel = h("input", { type: "checkbox" });
+  anyModel.checked = chosen.size === 0;
+  const picks = new Map();
+  const modelGroup = h("div", { class: "model-picks", role: "group", "aria-label": "Models this key may use" }, h("span", { class: "muted small", text: "Loading models…" }));
+  anyModel.addEventListener("change", () => {
+    if (anyModel.checked) for (const box of picks.values()) box.checked = false;
+  });
+  modelNames().then((names) => {
+    const all = [...new Set([...chosen, ...names])];
+    modelGroup.replaceChildren(
+      h("label", { class: "pick" }, anyModel, h("span", { text: "Any model" })),
+      ...all.map((name) => {
+        const box = h("input", { type: "checkbox" });
+        box.checked = chosen.has(name);
+        box.addEventListener("change", () => { if (box.checked) anyModel.checked = false; });
+        picks.set(name, box);
+        return h("label", { class: "pick" }, box, h("span", { class: "mono", text: name }));
+      }),
+    );
+    if (!all.length) modelGroup.append(h("span", { class: "muted small", text: "No models found — the key will allow any model." }));
+  });
+  const network = h(
+    "div",
+    { class: "segmented", role: "radiogroup", "aria-label": "Where this key works" },
+    NETWORK_CHOICES.map(([value, label, hint]) => {
+      const radio = h("input", { type: "radio", name: `net-${Math.random().toString(36).slice(2)}`, value });
+      radio.checked = (initial.network_access || "both") === value;
+      return h("label", { class: "seg", title: hint }, radio, h("span", { text: label }));
+    }),
+  );
+  // Radios in one group share a name; give them the first one's.
+  const radios = [...network.querySelectorAll("input")];
+  for (const radio of radios) radio.name = radios[0].name;
   const maxTokens = h("input", { type: "number", min: "1", placeholder: "no cap", value: initial.max_tokens ?? "" });
   const quota = h("input", { type: "number", min: "1", placeholder: "unlimited", value: initial.token_quota ?? "" });
   const period = h("select", {}, h("option", { value: "month", text: "per month" }), h("option", { value: "day", text: "per day" }));
@@ -1209,19 +1248,21 @@ function limitsFields(initial = {}) {
   const element = h(
     "div",
     { class: "limits" },
-    h("div", { class: "field-row" }, field("Models", models, "Comma-separated; empty = any"), field("Max reply tokens", maxTokens)),
+    field("Models", modelGroup),
+    field("Works on", network, NETWORK_CHOICES.map(([, label, hint]) => `${label}: ${hint}`).join(" · ")),
+    h("div", { class: "field-row" }, field("Max reply tokens", maxTokens), field("Requests at once", concurrent)),
     h("div", { class: "field-row" }, field("Token quota", quota), field("Quota period", period)),
-    h("div", { class: "field-row" }, field("Expires", expires), field("Requests at once", concurrent)),
+    h("div", { class: "field-row" }, field("Expires", expires)),
     h("label", { class: "check" }, store, h("span", { text: "Store conversations for memory (you can read them in Sessions)" })),
-    datalist,
   );
   const num = (input) => (input.value === "" ? null : Number(input.value));
   return {
     element,
     values: () => {
-      const names = models.value.split(",").map((m) => m.trim()).filter(Boolean);
+      const names = [...picks].filter(([, box]) => box.checked).map(([name]) => name);
       return {
-        allowed_models: names.length ? names : null,
+        allowed_models: anyModel.checked || !names.length ? null : names,
+        network_access: radios.find((r) => r.checked)?.value || "both",
         max_tokens: num(maxTokens),
         token_quota: num(quota),
         quota_period: period.value,
@@ -1243,6 +1284,7 @@ function limitsSummary(k) {
   if (k.max_concurrent) parts.push(`${k.max_concurrent} at once`);
   if (k.expires_at) parts.push(`${k.expired ? "expired" : "until"} ${fmtDate(k.expires_at).split(",")[0]}`);
   if (k.store_conversations === false) parts.push("no history");
+  if (k.network_access && k.network_access !== "both") parts.push(k.network_access === "local" ? "local network only" : "internet only");
   return parts.join(" · ");
 }
 
@@ -2181,21 +2223,27 @@ async function viewSettings(root) {
  *  they need to use it — base URL, a connect link, a QR code and snippets. */
 async function viewShare(root) {
   const addressBody = h("div", { class: "card-body" }, loading());
+  const internetBody = h("div", { class: "card-body" });
   const result = h("div", {});
   let urls = [];
+  let internet = { enabled: false, starting: false, url: null, error: null };
+  let polling = null;
 
   async function loadAddresses() {
     try {
-      urls = (await api("/admin/share")).urls;
+      const share = await api("/admin/share");
+      urls = share.urls;
+      internet = share.internet || internet;
     } catch (err) {
       addressBody.replaceChildren(errorState(err));
       return;
     }
+    renderInternet();
+    if (internet.starting && !polling) polling = setTimeout(() => { polling = null; loadAddresses(); }, 1500);
     addressBody.textContent = "";
     if (!urls.length) {
       addressBody.append(
-        h("p", { class: "muted", text: "No network address found. Other devices need one of this machine's addresses — start the gateway with:" }),
-        codeBlock("localgate serve --share", "shell"),
+        h("p", { class: "muted", text: "No local network address found — is this machine on a network? Devices elsewhere can still connect: turn on Internet access above." }),
       );
     } else {
       addressBody.append(
@@ -2212,12 +2260,43 @@ async function viewShare(root) {
             ),
           ),
         ),
-        h("p", { class: "small muted", text: "Devices can't connect? Start the gateway with `localgate serve --share`. Over the internet, use Tailscale or a tunnel — see docs/sharing.md." }),
+        h("p", { class: "small muted", text: "Devices can't connect? Check the gateway wasn't started with --local, and that the device is on this network. Devices elsewhere: turn on Internet access above." }),
       );
     }
     urlSelect.replaceChildren(
       ...(urls.length ? urls : [{ label: "This browser's address", url: location.origin }]).map((u) => h("option", { value: u.url, text: `${u.label} — ${u.url}` })),
     );
+  }
+
+  function renderInternet() {
+    const toggle = h("input", { type: "checkbox", "aria-label": "Internet access" });
+    toggle.checked = internet.enabled || internet.starting;
+    toggle.disabled = internet.starting;
+    toggle.addEventListener("change", async () => {
+      toggle.disabled = true;
+      try {
+        internet = await api("/admin/share/internet", { method: "POST", body: { enabled: toggle.checked } });
+      } catch (err) { toast(err.message, "bad"); }
+      await loadAddresses();
+    });
+    let status;
+    if (internet.starting) status = h("p", { class: "muted", text: "Opening an internet address… the first time this downloads Cloudflare's tunnel program (about 40 MB)." });
+    else if (internet.enabled && internet.url)
+      status = h("div", {}, h("p", { text: "On — devices on any network can connect at:" }), h("div", { class: "actions" }, h("code", { text: `${internet.url}/v1` }), h("button", { class: "btn sm", type: "button", text: "Copy", onclick: (e) => copyText(`${internet.url}/v1`, e.currentTarget) })), h("p", { class: "small muted", text: "HTTPS through a free Cloudflare tunnel. The address changes each time the gateway restarts." }));
+    else status = h("p", { class: "muted", text: internet.error || "Off — only devices on your network (and Tailscale) can connect." });
+    internetBody.replaceChildren(
+      h("div", { class: "s-row" }, h("div", { class: "s-label" }, h("strong", { text: "Internet access" }), h("span", { text: "Let devices on other networks connect, with no setup." })), h("label", { class: "switch" }, toggle, h("span", {}))),
+      status,
+    );
+  }
+
+  /** The address a key should be given, by where it's allowed to work. */
+  function baseFor(key, chosen) {
+    const internetUrl = urls.find((u) => u.label === "Internet")?.url;
+    const localUrl = urls.find((u) => u.label !== "Internet" && u.label !== "Public")?.url;
+    if (key.network_access === "internet") return internetUrl || null;
+    if (key.network_access === "local") return localUrl || location.origin;
+    return chosen;
   }
 
   const nameInput = h("input", { type: "text", placeholder: "Ana's laptop", required: true, maxlength: "100" });
@@ -2232,9 +2311,14 @@ async function viewShare(root) {
         const name = nameInput.value.trim();
         if (!name) return;
         try {
-          const key = await api("/admin/keys", { method: "POST", body: { name, ...limits.values() } });
+          const values = limits.values();
+          if (values.network_access === "internet" && !internet.enabled) {
+            toast("Turn on Internet access first — this key only works through the internet address.", "bad");
+            return;
+          }
+          const key = await api("/admin/keys", { method: "POST", body: { name, ...values } });
           nameInput.value = "";
-          await showAccess(key, urlSelect.value || location.origin);
+          await showAccess(key, baseFor(key, urlSelect.value || location.origin));
           toast("Access created.", "ok");
         } catch (err) { toast(err.message, "bad"); }
       },
@@ -2306,6 +2390,7 @@ async function viewShare(root) {
 
   root.append(
     pageHead("Share", "Let another device or person use this machine's models — each with their own key and limits."),
+    card("Who can connect", internetBody),
     card("Where devices reach this gateway", addressBody),
     card("Add a device", form),
     result,
