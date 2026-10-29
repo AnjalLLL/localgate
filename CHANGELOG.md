@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] — 2026-10-29
+
+### Fixed
+
+- **The coding agent writes changes instead of asking you to paste them.** Small models
+  sometimes put the new version of a file in a reply and then told you to "manually update"
+  it, ending with no file changed. The agent is now told never to hand edits to the user, and
+  if it still does, localgate applies the code itself — only when the code block is clearly
+  the whole new version of one file the agent read (its language matches exactly one such
+  file, it's at least half the file's length, and it has no "rest unchanged" / `...`
+  placeholders). It goes through the usual diff and approval.
+
 ## [1.1.1] — 2026-10-29
 
 ### Fixed

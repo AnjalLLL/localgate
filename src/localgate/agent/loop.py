@@ -84,6 +84,8 @@ SYSTEM_PROMPT = (
     "most of a file changes.\n"
     "- Write complete, working code. Never leave placeholders such as '...' or "
     "'TODO: implement'.\n"
+    "- Never ask the user to edit a file or paste code themselves, and never show new "
+    "code in your reply instead of writing it: make every change with a tool.\n"
     "- If a tool returns an error, read it and fix the call instead of repeating it.\n"
     "- When the task is done, reply in plain text with a short summary of what you "
     "changed and anything left to do.\n"
@@ -426,6 +428,13 @@ _LANGUAGE_EXTENSIONS = {
     "rs": ".rs", "rust": ".rs", "java": ".java", "rb": ".rb", "ruby": ".rb",
     "php": ".php", "vue": ".vue", "svelte": ".svelte",
 }  # fmt: skip
+#: Signs a code block is an excerpt, not a whole file ("... rest unchanged").
+_ELISION_RE = re.compile(
+    r"^\s*(?:/[/*]|#|<!--)?\s*\.{3}\s*(?:\*/|-->)?\s*$"
+    r"|(?i:rest of (?:the )?(?:file|code|styles?)|(?:remains?|stays?) (?:the same|unchanged)"
+    r"|existing (?:code|styles?|rules))",
+    re.MULTILINE,
+)
 _FENCED_BLOCK_RE = re.compile(r"```(\w*)[^\n]*\n(.*?)\n```", re.DOTALL)
 #: A block at least this long reads as file content rather than an illustration.
 _FILE_LIKE_BLOCK_LINES = 8
@@ -926,6 +935,8 @@ class AgentSession:
             if self.auto_read:
                 self._auto_read_first_file()
         self.messages.append({"role": "user", "content": user_input})
+        turn_start = len(self.messages)
+        salvage_tried = False
 
         def _noop(_text: str) -> None:
             pass
@@ -1036,6 +1047,23 @@ class AgentSession:
                     unverified_claim_nudged = True
                     self.messages.append({"role": "user", "content": problem})
                     continue
+                if self._task_is_mutation and self._task_mutations == 0 and not salvage_tried:
+                    # The model wrote the change into chat and, even when told, asked
+                    # the user to apply it by hand. If that code is clearly the whole
+                    # new version of one file it read, apply it — through the normal
+                    # diff and approval — instead of ending with nothing done.
+                    salvage_tried = True
+                    salvaged = self._salvage_write(self.messages[turn_start:])
+                    if salvaged is not None:
+                        if self.on_event is not None:
+                            path = _parse_arguments(salvaged["function"]["arguments"])["path"]
+                            self.on_event(f"applying the code from the reply to {path}")
+                        self.messages.append(
+                            {"role": "assistant", "content": None, "tool_calls": [salvaged]}
+                        )
+                        for result in await self._run_tool_calls([salvaged]):
+                            self.messages.append(result)
+                        continue
                 # Final answer — show it to user
                 if self.on_token and content:
                     self.on_token(content)
@@ -1211,6 +1239,46 @@ class AgentSession:
                     "answer now, or make one specific change with edit_file."
                 )
             self._task_rewrites[path] = done + 1
+        return None
+
+    def _salvage_write(self, turn: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """A write_file for code the model put in a reply this turn, when it is
+        unmistakably the whole new version of one project file it read: its language
+        matches exactly one such file, it's file-sized, at least half the length of
+        the current file (a snippet would wipe the rest), and has no "rest unchanged"
+        placeholders. None when any of that is unclear."""
+        blocks: list[tuple[str, str]] = []
+        for message in turn:
+            if message.get("role") == "assistant" and isinstance(message.get("content"), str):
+                blocks.extend(_FENCED_BLOCK_RE.findall(message["content"]))
+        known = {self._key(p) for p in self._read_paths} | set(self._seen)
+        for lang, code in reversed(blocks):  # the latest version first
+            extension = _LANGUAGE_EXTENSIONS.get(lang.lower())
+            if extension is None or code.count("\n") + 1 < _FILE_LIKE_BLOCK_LINES:
+                continue
+            if _ELISION_RE.search(code):
+                continue
+            targets = [p for p in known if PurePosixPath(p).suffix == extension]
+            if len(targets) != 1:
+                continue
+            path = targets[0]
+            try:
+                current = resolve_within(self.root, path).read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                continue
+            new = code if code.endswith("\n") else code + "\n"
+            if new.strip() == current.strip():
+                continue
+            if len(new.splitlines()) < 0.5 * len(current.splitlines()):
+                continue
+            return {
+                "id": f"salvaged-{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": path, "content": new}),
+                },
+            }
         return None
 
     def _attachment_text(self, attachments: Sequence[str]) -> str:

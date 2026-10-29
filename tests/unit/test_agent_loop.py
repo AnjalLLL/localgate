@@ -818,3 +818,94 @@ async def test_make_request_without_any_change_is_pushed_to_act(project):
     )
     assert result == "done"
     assert "no file has been changed yet" in backend.requests[2]["messages"][-1]["content"]
+
+
+_OLD_CSS = "".join(f".c{i} {{ color: red; }}\n" for i in range(10))
+_NEW_CSS = "".join(f".c{i} {{ color: #334; padding: {i}px; }}\n" for i in range(10))
+
+
+def _css_project(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "styles.css").write_text(_OLD_CSS)
+    (tmp_path / "src" / "index.html").write_text("<html></html>\n")
+    return tmp_path
+
+
+async def test_code_left_in_a_reply_is_applied_when_the_model_asks_the_user_to(tmp_path):
+    root = _css_project(tmp_path)
+    backend = ScriptedBackend(
+        [
+            tool_call("r", "read_file", {"path": "src/styles.css"}),
+            final_text(f"Here is the improved theme:\n```css\n{_NEW_CSS}```\n"),
+            final_text(
+                "I have provided the updated CSS code. Please manually update src/styles.css."
+            ),
+            final_text("The new theme is in src/styles.css."),
+        ]
+    )
+    events: list[str] = []
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        root,
+        "please enhance the theme of this site",
+        confirm_write=lambda *_: True,
+        on_event=events.append,
+    )
+    assert (root / "src" / "styles.css").read_text() == _NEW_CSS
+    assert any("applying the code from the reply to src/styles.css" in e for e in events)
+    assert result == "The new theme is in src/styles.css."
+
+
+async def test_a_snippet_in_a_reply_is_never_written_over_the_whole_file(tmp_path):
+    root = _css_project(tmp_path)
+    (root / "src" / "styles.css").write_text(_OLD_CSS * 3)
+    backend = ScriptedBackend(
+        [
+            tool_call("r", "read_file", {"path": "src/styles.css"}),
+            final_text(f"Change these rules:\n```css\n{_NEW_CSS}```\n"),
+            final_text("Please update src/styles.css with the rules above."),
+        ]
+    )
+    await run_agent(
+        backend, "scripted-model", root, "please enhance the theme", confirm_write=lambda *_: True
+    )
+    assert (root / "src" / "styles.css").read_text() == _OLD_CSS * 3
+
+
+async def test_code_with_rest_unchanged_placeholders_is_not_applied(tmp_path):
+    root = _css_project(tmp_path)
+    elided = _NEW_CSS + "/* ... rest of the file unchanged */\n"
+    backend = ScriptedBackend(
+        [
+            tool_call("r", "read_file", {"path": "src/styles.css"}),
+            final_text(f"```css\n{elided}```"),
+            final_text("Please paste that into src/styles.css."),
+        ]
+    )
+    await run_agent(
+        backend, "scripted-model", root, "please enhance the theme", confirm_write=lambda *_: True
+    )
+    assert (root / "src" / "styles.css").read_text() == _OLD_CSS
+
+
+async def test_code_is_not_applied_when_it_could_belong_to_several_files(tmp_path):
+    root = _css_project(tmp_path)
+    (root / "src" / "extra.css").write_text(_OLD_CSS)
+    backend = ScriptedBackend(
+        [
+            tool_call("r1", "read_file", {"path": "src/styles.css"}),
+            tool_call("r2", "read_file", {"path": "src/extra.css"}),
+            final_text(f"```css\n{_NEW_CSS}```"),
+            final_text("Please update the stylesheet yourself."),
+        ]
+    )
+    await run_agent(
+        backend, "scripted-model", root, "please enhance the theme", confirm_write=lambda *_: True
+    )
+    assert (root / "src" / "styles.css").read_text() == _OLD_CSS
+    assert (root / "src" / "extra.css").read_text() == _OLD_CSS
+
+
+def test_the_system_prompt_forbids_handing_edits_to_the_user():
+    assert "Never ask the user to edit a file" in SYSTEM_PROMPT
