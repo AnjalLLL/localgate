@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from localgate.core import metrics
 from localgate.core.auth import ADMIN_COOKIE, constant_time_equals, verify_admin_session
 from localgate.core.errors import AuthenticationError, RateLimitError
-from localgate.core.key_policy import as_utc, is_expired
+from localgate.core.key_policy import as_utc, check_network_access, is_expired
+from localgate.core.netinfo import is_internet_request
 from localgate.db.models import APIKey
 from localgate.db.repositories.keys import APIKeyRepository
 
@@ -33,6 +34,7 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 async def require_api_key(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     session: AsyncSession = Depends(get_session),
 ) -> APIKey:
@@ -57,6 +59,8 @@ async def require_api_key(
             "Ask the gateway's owner for a new one.",
             code="key_expired",
         )
+
+    check_network_access(key, is_internet_request(request))
 
     await repo.touch_last_used(key.id)
     return key

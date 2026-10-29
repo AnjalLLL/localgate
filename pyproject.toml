@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localgate"
-version = "1.0.0"
+version = "1.1.0"
 description = "A local-first API gateway for open-source LLMs: auth, RAG memory extension, DB connectors, token accounting, and a built-in coding agent."
 readme = "README.md"
 license = { text = "MIT" }
@@ -53,13 +53,14 @@ dependencies = [
     "caniollama>=0.1.0",
     "cryptography>=42",
     "segno>=1.6",  # QR codes for the dashboard's Share page (pure Python, no deps)
+    "zeroconf>=0.130",  # find gateways on the local network (`localgate discover`)
 ]
 
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.29"]
 # Rate limits and per-key concurrency shared across worker processes (LOCALGATE_REDIS_URL).
 redis = ["redis>=5"]
-# Find gateways on the local network (`serve --share` advertises, `localgate discover` lists).
+# Kept so `pip install 'localgate[discovery]'` still works; discovery is built in now.
 discovery = ["zeroconf>=0.130"]
 # Local voice: Piper TTS (GPL-3.0, optional) and faster-whisper STT.
 voice = [

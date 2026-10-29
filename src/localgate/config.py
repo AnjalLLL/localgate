@@ -241,8 +241,11 @@ class Settings(BaseSettings):
     backends: Annotated[list[BackendSpec], NoDecode] = Field(default_factory=list)
     #: Share rate limits and per-key concurrency across worker processes.
     redis_url: str | None = None
-    #: Advertise this gateway on the local network (needs `localgate[discovery]`).
+    #: Advertise this gateway on the local network (on whenever it's shared).
     discovery_enabled: bool = False
+    #: Set by `serve --public`: requests arrive through a Cloudflare tunnel, so the
+    #: real client address is the one Cloudflare adds (`CF-Connecting-IP`).
+    behind_tunnel: bool = False
 
     # --- Observability ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"

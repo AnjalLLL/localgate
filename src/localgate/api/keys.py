@@ -31,6 +31,8 @@ class KeyLimits(BaseModel):
     expires_at: datetime | None = None
     max_concurrent: int | None = Field(default=None, ge=1)
     store_conversations: bool | None = None
+    #: Where the key works: the owner's local network, the internet address, or both.
+    network_access: Literal["local", "internet", "both"] | None = None
 
     @field_validator("allowed_models")
     @classmethod
@@ -49,6 +51,8 @@ class KeyLimits(BaseModel):
             values["quota_period"] = "month"
         if "store_conversations" in values and values["store_conversations"] is None:
             values["store_conversations"] = True
+        if "network_access" in values and values["network_access"] is None:
+            values["network_access"] = "both"
         if not only_set:
             values = {k: v for k, v in values.items() if v is not None}
         return values
@@ -91,6 +95,7 @@ class KeyResponse(BaseModel):
     expired: bool = False
     max_concurrent: int | None = None
     store_conversations: bool = True
+    network_access: str = "both"
     #: Tokens used in the current quota period (day or month, UTC).
     tokens_this_period: int | None = None
 
@@ -105,6 +110,7 @@ class KeyResponse(BaseModel):
             expired=is_expired(key),
             max_concurrent=key.max_concurrent,
             store_conversations=key.store_conversations is not False,
+            network_access=key.network_access or "both",
             tokens_this_period=tokens_this_period,
             id=key.id,
             name=key.name,

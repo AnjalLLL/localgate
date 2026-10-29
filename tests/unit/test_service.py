@@ -52,8 +52,10 @@ def test_unknown_platforms_are_refused():
 
 
 def test_dry_run_writes_nothing(tmp_path):
-    result = CliRunner().invoke(app, ["service", "install", "--dry-run", "--share"])
+    result = CliRunner().invoke(app, ["service", "install", "--dry-run", "--public"])
     assert result.exit_code == 0, result.output
-    assert "serve" in result.stdout and "--share" in result.stdout
+    assert "serve" in result.stdout and "--public" in result.stdout
+    local = CliRunner().invoke(app, ["service", "install", "--dry-run", "--local"])
+    assert "--local" in local.stdout
     assert not (tmp_path / "LaunchAgents").exists()
     assert not (tmp_path / "systemd").exists()

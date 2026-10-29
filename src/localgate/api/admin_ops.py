@@ -29,6 +29,7 @@ from localgate.core.auth import (
     issue_admin_session,
 )
 from localgate.core.errors import AuthenticationError, LocalgateError, RateLimitError
+from localgate.core.netinfo import client_address
 from localgate.db.repositories.audit import AuditRepository, audit
 from localgate.db.repositories.conversations import ConversationRepository, SummaryRepository
 from localgate.db.repositories.embeddings import EmbeddingRepository
@@ -87,7 +88,7 @@ async def sign_in(
     cookie — the dashboard's login."""
     settings = request.app.state.settings
     now = time.time()
-    client = request.client.host if request.client else "unknown"
+    client = client_address(request) or "unknown"
     if _too_many_failures(client, now):
         raise RateLimitError(
             "Too many failed sign-ins. Wait a few minutes and try again.",

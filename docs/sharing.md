@@ -15,10 +15,11 @@ On the GPU machine:
 
 ```bash
 ollama serve                      # or llama.cpp / vLLM — see LOCALGATE_BACKEND_*
-localgate serve --share
+localgate serve
 ```
 
-`--share` listens on the network and prints the addresses other devices can use:
+That's it: `localgate serve` shares with the other devices on your network and prints
+the address to give them:
 
 ```
 Sharing this machine's models
@@ -26,7 +27,9 @@ Sharing this machine's models
   Give each device its own key: http://127.0.0.1:8000/dashboard/#/share
 ```
 
-Without `--share` the gateway stays on this machine only (`127.0.0.1`).
+`localgate serve --local` keeps the gateway to this machine only. `localgate serve
+--public` also opens an internet address right away (see section 5) — or turn it on later
+with the **Internet access** switch on the Share page.
 
 ## 2. Give a device access
 
@@ -50,14 +53,28 @@ from openai import OpenAI
 client = OpenAI(base_url="http://192.168.1.20:8000/v1", api_key="lg_...")
 ```
 
-or the localgate CLI, including the coding agent:
+or the localgate coding agent. Install it and just run it:
 
 ```bash
-localgate discover                       # gateways on this network (optional extra)
-localgate login --url http://192.168.1.20:8000 --api-key lg_...
-localgate whoami                         # your limits and usage
-localgate code --remote                  # the agent edits files here, the GPU there
+pip install localgate
+localgate code
 ```
+
+With no model server on that device, it asks where models should run — pick **a shared
+gateway**, type the address (`192.168.1.20` is enough; gateways announced on the network
+are listed by number) and the API key. The connection is checked, saved, and used from
+then on. Inside a session, `/connect` switches to a gateway and `/disconnect` back to the
+device's own models. From scripts: `localgate login --url 192.168.1.20 --api-key lg_...`,
+`localgate whoami` (your limits and usage), `localgate logout`.
+
+### Same network, or not?
+
+`localgate serve` works for devices on the **same network** (home or office Wi-Fi, LAN).
+For a device somewhere else, turn on **Internet access** — see section 5.
+
+If a device gets **"refused to connect"** / **"Nothing answered"**: the gateway was
+started with `--local` (it then accepts connections from its own machine only), isn't
+running, or uses another port. Use exactly the address `localgate serve` printed.
 
 ## 3. Limits per key
 
@@ -70,6 +87,7 @@ localgate code --remote                  # the agent edits files here, the GPU t
 | Expiry | `401 key_expired` |
 | Requests at once | extra requests from that key wait in the queue |
 | Store conversations | off: no history or memory is kept for the key — only usage |
+| Works on | local network, internet or both; elsewhere `403 network_not_allowed` |
 
 Change any of them later without reissuing the key: Dashboard → API keys → **edit**, or
 `localgate keys update <id> --quota 0` (0 removes a numeric limit, `--models any` removes
@@ -88,7 +106,7 @@ Match the limit to what Ollama runs in parallel:
 
 ```bash
 OLLAMA_NUM_PARALLEL=2 OLLAMA_MAX_LOADED_MODELS=2 ollama serve
-LOCALGATE_MAX_CONCURRENT_REQUESTS=2 localgate serve --share
+LOCALGATE_MAX_CONCURRENT_REQUESTS=2 localgate serve
 ```
 
 Every request also carries a context window (`LOCALGATE_DEFAULT_NUM_CTX`, 8192, capped at
@@ -100,18 +118,27 @@ and the tokens produced so far are still counted.
 
 ## 5. Beyond your own network
 
-`--share` speaks plain HTTP, which is fine on a home or office network. For anything else:
+Devices on **other networks** connect through the gateway's **internet address**. Turn it
+on with the **Internet access** switch on Dashboard → Share (or start with
+`localgate serve --public`): localgate opens a free Cloudflare tunnel — no account, no
+router changes, HTTPS included — and shows the `https://….trycloudflare.com` address
+there and in every QR code. The first time, it downloads Cloudflare's `cloudflared`
+program (about 40 MB, checked against Cloudflare's published SHA-256) unless it's already
+installed. The address changes whenever the gateway restarts; the Share page always has
+the current one, and devices reconnect with `/connect` in `localgate code`.
 
-- **Tailscale (recommended).** Install it on the GPU machine and the devices; use the
-  machine's Tailscale address (`100.x.y.z`, shown by `serve --share`). Encrypted, private,
-  no ports opened, and the dashboard stays reachable because Tailscale's range is trusted
-  by default.
-- **Cloudflare Tunnel.** `cloudflared tunnel --url http://localhost:8000` gives an HTTPS
-  address without opening ports. Set `LOCALGATE_PUBLIC_URL` to it so the Share page uses
-  it.
-- **Your own domain.** `localgate deploy --domain gw.example.com` generates Docker
-  Compose + Caddy (automatic HTTPS) or a systemd unit. Only `/v1` and `/health` are
-  exposed publicly.
+Choose per key where it works: **Local network** (this network and Tailscale), **Internet**
+(only through the internet address), or **Both**. A key used where it isn't allowed gets
+`403 network_not_allowed`.
+
+For a fixed address:
+
+- **Tailscale.** Install it on the GPU machine and the devices; use the machine's
+  Tailscale address (`100.x.y.z`, printed by `localgate serve`). Private and encrypted;
+  counts as the local network.
+- **A named Cloudflare tunnel or your own domain.** Set `LOCALGATE_PUBLIC_URL` to the
+  address so the Share page uses it. `localgate deploy --domain gw.example.com` generates
+  Docker Compose + Caddy (automatic HTTPS) or a systemd unit.
 
 ## 6. What the internet can't reach
 
@@ -128,7 +155,7 @@ recorded: Dashboard → **Activity**, or `localgate audit`.
 ## 7. Keep it running
 
 ```bash
-localgate service install --share     # start at login, restart if it stops
+localgate service install             # start at login, restart if it stops (add --public for internet)
 localgate service status
 localgate service logs
 localgate service uninstall
@@ -147,7 +174,7 @@ least busy first, failing over when one is unreachable:
 LOCALGATE_BACKENDS='[
   {"name": "big-gpu", "type": "ollama", "url": "http://10.0.0.5:11434", "models": ["llama3:70b"], "max_concurrent": 4},
   {"name": "desk",    "type": "ollama", "url": "http://localhost:11434", "max_concurrent": 2}
-]' localgate serve --share
+]' localgate serve
 ```
 
 A backend without `models` is asked for its list (refreshed every minute). Each has its

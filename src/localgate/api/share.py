@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from localgate import __version__
 from localgate.api.deps import require_admin
 from localgate.core.netinfo import is_loopback_host, share_urls
+from localgate.db.repositories.audit import audit
 
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -34,7 +35,27 @@ async def share_info(request: Request) -> dict[str, Any]:
     hostname = request.url.hostname
     if hostname and not is_loopback_host(hostname) and all(entry["url"] != here for entry in urls):
         urls.insert(0, {"label": "This address", "url": here})
-    return {"urls": urls, "version": __version__}
+    tunnel = request.app.state.tunnel
+    if tunnel.url and all(entry["url"] != tunnel.url for entry in urls):
+        urls.insert(0, {"label": "Internet", "url": tunnel.url})
+    return {"urls": urls, "internet": tunnel.status(), "version": __version__}
+
+
+class InternetSwitch(BaseModel):
+    enabled: bool
+
+
+@router.post("/share/internet")
+async def switch_internet(body: InternetSwitch, request: Request) -> dict[str, Any]:
+    """Turn the gateway's internet address on or off. Opening one runs in the
+    background (the first time it downloads cloudflared); poll GET /admin/share."""
+    tunnel = request.app.state.tunnel
+    if body.enabled:
+        tunnel.start()
+    else:
+        tunnel.stop()
+    await audit(request, "share.internet_on" if body.enabled else "share.internet_off")
+    return tunnel.status()  # type: ignore[no-any-return]
 
 
 class QRRequest(BaseModel):

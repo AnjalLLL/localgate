@@ -25,6 +25,7 @@ from localgate import __version__
 from localgate.api.deps import require_admin
 from localgate.core import metrics
 from localgate.core.errors import AuthenticationError
+from localgate.core.netinfo import client_address
 
 router = APIRouter(tags=["operations"])
 
@@ -58,7 +59,7 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
 
     # Anyone may ask whether the gateway is up; only trusted networks (or a
     # signed-in admin) see where the backend lives, database errors and warnings.
-    client = request.client.host if request.client else None
+    client = client_address(request)
     if not (settings.is_trusted_address(client) or _is_admin(request)):
         return {"status": "ok" if ready else "degraded", "version": __version__}
 

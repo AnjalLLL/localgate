@@ -110,10 +110,10 @@ localgate code</code></pre>
       </div>
       <div class="card pad">
         <h2>Use it from another machine</h2>
-        <p>Run the agent on a laptop against this gateway. Ask the owner for an API key, then:</p>
-        <pre><code>localgate login --url <span data-origin>http://localhost:8000</span> --api-key lg_...
-localgate code --remote</code></pre>
-        <p class="muted">Owner: <a href="/dashboard/#/share">Dashboard → Share</a> creates a key for a device with its own limits, plus a QR code and link that set it up.</p>
+        <p>On a laptop with no models of its own, install localgate and run the agent — it asks where models should run:</p>
+        <pre><code>pip install localgate
+localgate code</code></pre>
+        <p class="muted">Owner: <a href="/dashboard/#/share">Dashboard → Share</a> creates a key for each device — which models, which networks, how many tokens — with a QR code that sets it up. Turn on Internet access there for devices on other networks.</p>
       </div>
     </section>
   </main>

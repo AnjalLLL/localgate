@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from localgate.core.auth import ADMIN_COOKIE, admin_session_subject
 from localgate.core.logging import get_logger
+from localgate.core.netinfo import client_address
 from localgate.db.models import AuditEvent
 
 logger = get_logger(__name__)
@@ -68,7 +69,7 @@ async def audit(
                 action,
                 target,
                 {k: v for k, v in details.items() if v is not None},
-                request.client.host if request.client else None,
+                client_address(request),
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("audit_write_failed", action=action, error=str(exc))

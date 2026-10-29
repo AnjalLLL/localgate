@@ -19,6 +19,7 @@ from localgate.db.models import APIKey
 from localgate.db.repositories.usage import UsageRepository
 
 QUOTA_PERIODS = ("day", "month")
+NETWORK_ACCESS = ("local", "internet", "both")
 
 
 def as_utc(moment: datetime) -> datetime:
@@ -111,5 +112,21 @@ def policy_dict(key: APIKey) -> dict[str, Any]:
         "expires_at": as_utc(key.expires_at).isoformat() if key.expires_at else None,
         "max_concurrent": key.max_concurrent,
         "store_conversations": key.store_conversations is not False,
+        "network_access": key.network_access or "both",
         "rate_limit_per_min": key.rate_limit_per_min,
     }
+
+
+def check_network_access(key: APIKey, from_internet: bool) -> None:
+    """Refuse a key used where its owner didn't allow it."""
+    access = key.network_access or "both"
+    if access == "local" and from_internet:
+        raise PermissionDeniedError(
+            "This API key only works on the owner's local network, not over the internet.",
+            code="network_not_allowed",
+        )
+    if access == "internet" and not from_internet:
+        raise PermissionDeniedError(
+            "This API key only works through the gateway's internet address.",
+            code="network_not_allowed",
+        )
