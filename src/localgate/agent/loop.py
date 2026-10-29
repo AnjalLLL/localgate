@@ -937,6 +937,7 @@ class AgentSession:
         self.messages.append({"role": "user", "content": user_input})
         turn_start = len(self.messages)
         salvage_tried = False
+        act_now_nudged = False
 
         def _noop(_text: str) -> None:
             pass
@@ -1064,6 +1065,12 @@ class AgentSession:
                         for result in await self._run_tool_calls([salvaged]):
                             self.messages.append(result)
                         continue
+                if self.described_without_changing and not act_now_nudged:
+                    # Small models often answer a nudge with the same plan again.
+                    # Once more, as a bare instruction with a concrete first call.
+                    act_now_nudged = True
+                    self.messages.append({"role": "user", "content": self._act_now()})
+                    continue
                 # Final answer — show it to user
                 if self.on_token and content:
                     self.on_token(content)
@@ -1168,6 +1175,24 @@ class AgentSession:
                 "plainly that the change was not made."
             )
         return None
+
+    @property
+    def described_without_changing(self) -> bool:
+        """This task asked for a change, and no change was even attempted."""
+        return self._task_is_mutation and self._task_mutation_attempts == 0
+
+    def _act_now(self) -> str:
+        target = next((p for p in reversed(self.ledger.files_read) if p in self._read_paths), None)
+        call = (
+            f"edit_file on {target} (or write_file to replace it)"
+            if target
+            else "read_file on the file to change, then edit_file"
+        )
+        return (
+            "You still have not changed any file; describing a plan does nothing. Reply now "
+            f"with a tool call only — {call} — with no explanation. Do the first step of "
+            "the newest request only."
+        )
 
     def _has_done_work(self) -> bool:
         """Check if any tool calls have been made in this conversation."""
