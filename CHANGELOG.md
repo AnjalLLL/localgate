@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] — 2026-10-29
+
+### Fixed
+
+- **A model that only describes a change is pushed to make it.** Asked for a change, small
+  models often reply with a plan ("I will make the following changes…"), and after being told
+  no file changed, give the same plan again. They now get one more, blunter instruction naming
+  the first tool call to make.
+- **"Nothing was changed" is said plainly.** When a change was asked for and the model never
+  attempted one, the turn ends with a warning instead of a dim "no files changed", suggesting
+  to ask again or switch to a model that handles tools better.
+- **Old requests aren't redone.** When long history is compacted, earlier requests are kept
+  verbatim; they're now marked as already handled, so the model works on the newest request
+  instead of re-planning old ones.
+
 ## [1.1.2] — 2026-10-29
 
 ### Fixed

@@ -865,6 +865,7 @@ async def test_a_snippet_in_a_reply_is_never_written_over_the_whole_file(tmp_pat
             tool_call("r", "read_file", {"path": "src/styles.css"}),
             final_text(f"Change these rules:\n```css\n{_NEW_CSS}```\n"),
             final_text("Please update src/styles.css with the rules above."),
+            final_text("I cannot apply it."),
         ]
     )
     await run_agent(
@@ -881,6 +882,7 @@ async def test_code_with_rest_unchanged_placeholders_is_not_applied(tmp_path):
             tool_call("r", "read_file", {"path": "src/styles.css"}),
             final_text(f"```css\n{elided}```"),
             final_text("Please paste that into src/styles.css."),
+            final_text("I cannot apply it."),
         ]
     )
     await run_agent(
@@ -898,6 +900,7 @@ async def test_code_is_not_applied_when_it_could_belong_to_several_files(tmp_pat
             tool_call("r2", "read_file", {"path": "src/extra.css"}),
             final_text(f"```css\n{_NEW_CSS}```"),
             final_text("Please update the stylesheet yourself."),
+            final_text("I cannot apply it."),
         ]
     )
     await run_agent(
@@ -909,3 +912,46 @@ async def test_code_is_not_applied_when_it_could_belong_to_several_files(tmp_pat
 
 def test_the_system_prompt_forbids_handing_edits_to_the_user():
     assert "Never ask the user to edit a file" in SYSTEM_PROMPT
+
+
+async def test_a_plan_repeated_after_the_nudge_gets_one_firmer_push(project):
+    plan = "I will make the following changes: 1. restyle the page 2. add a navbar"
+    backend = ScriptedBackend(
+        [
+            tool_call("read", "read_file", {"path": "app.py"}),
+            final_text(plan),
+            final_text(plan),
+            tool_call("w", "write_file", {"path": "app.py", "content": "new content\n"}),
+            final_text("done"),
+        ]
+    )
+    result = await run_agent(
+        backend,
+        "scripted-model",
+        project,
+        "please enhance the theme",
+        confirm_write=lambda *_: True,
+    )
+    assert result == "done"
+    assert (project / "app.py").read_text() == "new content\n"
+    push = backend.requests[3]["messages"][-1]["content"]
+    assert "tool call only" in push and "edit_file on app.py" in push
+
+
+async def test_a_model_that_only_ever_plans_ends_marked_as_unchanged(project):
+    plan = "I will make the following changes: restyle the page."
+    backend = ScriptedBackend(
+        [tool_call("read", "read_file", {"path": "app.py"})] + [final_text(plan)] * 3
+    )
+    session = AgentSession(backend, "scripted-model", project, confirm_write=lambda *_: True)
+    assert await session.send("please enhance the theme") == plan
+    assert session.described_without_changing
+    assert (project / "app.py").read_text() == "old content\n"
+
+
+async def test_a_question_is_not_marked_as_an_unmade_change(project):
+    session = AgentSession(
+        ScriptedBackend([final_text("It is a Flask app.")]), "scripted-model", project
+    )
+    await session.send("what does this project do?")
+    assert not session.described_without_changing
