@@ -375,7 +375,8 @@ class ContextManager:
                 merged.append(
                     {
                         "role": "user",
-                        "content": "Earlier requests in this session (verbatim):\n"
+                        "content": "Earlier requests in this session, already handled — "
+                        "do not redo them; work only on the newest request (verbatim):\n"
                         + "\n---\n".join(m["content"] for m in kept_users),
                     }
                 )
