@@ -36,7 +36,7 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
-from localgate import __version__, paths
+from localgate import __version__, gateway_client, paths
 from localgate.agent import gitutil
 from localgate.agent import theme as theme_mod
 from localgate.agent.commands import command_dirs, load_commands
@@ -76,6 +76,7 @@ from localgate.agent.tools import (
 )
 from localgate.agent.userconfig import UserConfig
 from localgate.agent.websearch import SearchFn
+from localgate.backends import get_backend
 from localgate.core.token_counter import count_message_tokens, count_tokens
 from localgate.integrations.caniollama import (
     CaniollamaClient,
@@ -104,6 +105,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/config [key value]", "View, or set and persist, a preference."),
     ("/resume", "Pick a past session for this project to resume."),
     ("/last", "Show the last reply in full, including code hidden from the chat."),
+    ("/connect [address]", "Use a shared gateway's models (asks for its address and API key)."),
+    ("/disconnect", "Stop using the gateway; go back to this machine's models."),
     ("/undo", "Revert the most recent write."),
     ("/rewind [n]", "Step back through the last n writes (default 1)."),
     ("/mcp", "List connected MCP servers and their tools."),
@@ -752,6 +755,9 @@ def _render_startup_banner(
     grid.add_column()
     grid.add_row("project", f"[bold]{escape(str(root))}[/bold]")
     grid.add_row("model", f"[cyan]{escape(model)}[/cyan]")
+    if session.backend.name == "localgate":
+        url = getattr(session.backend, "base_url", "")
+        grid.add_row("gateway", f"{escape(url)} [dim](/disconnect to use this machine)[/dim]")
     if not session.native_tools:
         grid.add_row(
             "",
@@ -918,6 +924,89 @@ async def _run_user_shell(console: Console, root: Path, command: str) -> str | N
     color = "green" if code == 0 else "red"
     console.print(f"[{color}]exit code {code}[/{color}] [dim]· the agent sees this next turn[/dim]")
     return shell_note(command, code, output)
+
+
+async def _connect_command(
+    console: Console, session: AgentSession, address: str, settings: Any | None
+) -> None:
+    """`/connect`: move this session onto a shared gateway's models."""
+    address = address or console.input(
+        "[bold]Gateway address[/bold] [dim](e.g. 192.168.1.20)[/dim] "
+    )
+    api_key = console.input("[bold]API key[/bold] ", password=True)
+    try:
+        url = gateway_client.normalize_url(address)
+        gateway = await gateway_client.verify(url, api_key)
+    except gateway_client.GatewayError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        return
+    gateway_client.save_creds(gateway.url, gateway.api_key)
+    timeout = getattr(settings, "backend_timeout", 120.0)
+    previous = session.backend
+    session.backend = get_backend(
+        "localgate", gateway.url, api_key=gateway.api_key, timeout=timeout
+    )
+    with contextlib.suppress(Exception):
+        await previous.aclose()
+    model = await _usable_model(session.backend, session.model)
+    supports = await _tool_support(session.backend, model)
+    session.switch_model(model, native_tools=supports is not False)
+    who = f" as {gateway.key_name}" if gateway.key_name else ""
+    console.print(
+        f"[green]Connected to {escape(gateway.url)}{escape(who)} — using {escape(model)}.[/green] "
+        "[dim]Saved for next time; /model lists the gateway's models.[/dim]"
+    )
+
+
+async def _disconnect_command(
+    console: Console, session: AgentSession, settings: Any | None
+) -> None:
+    """`/disconnect`: forget the gateway and use this machine's model server."""
+    gateway_client.forget_creds()
+    if session.backend.name != "localgate":
+        console.print("[dim]Not connected to a gateway.[/dim]")
+        return
+    backend_type = getattr(settings, "backend_type", "ollama")
+    previous = session.backend
+    session.backend = get_backend(
+        backend_type,
+        getattr(settings, "backend_url", None),
+        timeout=getattr(settings, "backend_timeout", 120.0),
+        api_key=getattr(settings, "backend_api_key", None),
+    )
+    with contextlib.suppress(Exception):
+        await previous.aclose()
+    model = await _usable_model(session.backend, session.model)
+    supports = await _tool_support(session.backend, model)
+    session.switch_model(
+        model, native_tools=supports is not False or not session.backend.accepts_options
+    )
+    console.print(f"[green]Disconnected — using {escape(model)} on this machine.[/green]")
+
+
+async def _tool_support(backend: Any, model: str) -> bool | None:
+    try:
+        return await backend.check_tool_support(model)  # type: ignore[no-any-return]
+    except Exception:  # noqa: BLE001 — unknown; assume native tools, as at startup
+        return None
+
+
+async def _usable_model(backend: Any, wanted: str) -> str:
+    """``wanted`` if the backend offers it, else its first model that can call tools."""
+    try:
+        available = await backend.list_models()
+    except Exception:  # noqa: BLE001 — keep the current name; /model can fix it later
+        return wanted
+    if not available:
+        return wanted
+    matched = gateway_client.match_model(wanted, available)
+    if matched is not None:
+        return matched
+    for model in available:
+        with contextlib.suppress(Exception):
+            if await backend.check_tool_support(model):
+                return str(model)
+    return str(available[0])
 
 
 async def _resume_command(
@@ -1600,6 +1689,12 @@ async def run_repl(
                     continue
                 steps = int(parts[1].strip())
             console.print(f"[yellow]{gate.rewind(steps)}[/yellow]")
+            continue
+        if line.startswith("/connect"):
+            await _connect_command(console, session, line[len("/connect") :].strip(), settings)
+            continue
+        if line == "/disconnect":
+            await _disconnect_command(console, session, settings)
             continue
         if line == "/last":
             if last_reply:

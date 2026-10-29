@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-10-29 — share with one command, from anywhere
+
+`localgate serve` now shares with your network by default, the dashboard can give the gateway
+an internet address with one switch, each key chooses local network, internet or both, and a
+device connects by running `localgate code` and answering two questions.
+
+**Upgrading:** migration `0010` runs automatically. `localgate serve` now listens on your network
+by default — use `--local` (or set `LOCALGATE_HOST=127.0.0.1`) to keep the old behaviour.
+
+### Added
+
+- **Sharing needs no flag:** `localgate serve` shares with your network by default;
+  `--local` keeps it to this machine (an explicit `LOCALGATE_HOST` is still respected).
+- **Internet access, built in:** `localgate serve --public`, or the **Internet access**
+  switch on Dashboard → Share, opens a free Cloudflare quick tunnel — an
+  `https://….trycloudflare.com` address that works from any network, no account or router
+  setup. `cloudflared` is used if installed, otherwise downloaded once from Cloudflare's
+  release and checked against its published SHA-256. Behind the tunnel the real visitor
+  address (`CF-Connecting-IP`) is used for every trust decision.
+- **Per-key network access** (migration `0010`): a key works on the **local network**,
+  over the **internet**, or **both** — `403 network_not_allowed` elsewhere. Set it on the
+  Share page, the key editor, `--network local|internet|both`, or the API; the Share page
+  hands an internet-only key the internet address.
+- **Pick a key's models with checkboxes** on the Share page and in the key editor.
+- LAN discovery is built in (zeroconf is now a regular dependency).
+
+- **Connecting a device takes one command.** `localgate code` on a machine without a model
+  server asks where models should run; choosing a shared gateway asks for its address
+  (`192.168.1.20` is enough — gateways announced on the network are offered by number) and
+  the API key, checks them, saves them, and starts the session on the gateway. Inside a
+  session, `/connect` moves to a gateway and `/disconnect` back to this machine; the banner
+  shows which gateway is in use. `localgate logout` forgets it.
+- Connection errors say what to do — e.g. "refused to connect" now explains that the GPU
+  machine must run `localgate serve --share`.
+
+### Changed
+
+- `localgate login --url` accepts a bare address (`192.168.1.20`, `gpu-box:9000`).
+- On a gateway, `localgate code` keeps your default model when the gateway has it (`llama3`
+  matches `llama3:latest`), else picks one your key may use, preferring tool-capable models.
+
 ## [1.0.0] — 2026-10-29 — share your GPU
 
 localgate was built for one idea: a machine with a good GPU runs the models, and every

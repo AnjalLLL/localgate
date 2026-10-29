@@ -639,3 +639,14 @@ td.num { white-space: nowrap; }
   .share-urls li { grid-template-columns: minmax(0, 1fr) auto; }
   .share-label { grid-column: 1 / -1; }
 }
+
+/* Key limits: model checkboxes and the network choice. */
+.model-picks { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.pick { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 12.5px; color: var(--text); cursor: pointer; background: var(--surface); }
+.pick:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; width: fit-content; }
+.seg { display: inline-flex; align-items: center; padding: 7px 14px; font-size: 13px; color: var(--text-2); cursor: pointer; border-right: 1px solid var(--border); }
+.seg:last-child { border-right: 0; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg:has(input:checked) { background: var(--accent); color: var(--accent-fg); }
+.seg:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
