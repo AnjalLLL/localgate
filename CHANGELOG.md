@@ -4,7 +4,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] — 2026-10-29 — share with one command, from anywhere
+
+`localgate serve` now shares with your network by default, the dashboard can give the gateway
+an internet address with one switch, each key chooses local network, internet or both, and a
+device connects by running `localgate code` and answering two questions.
+
+**Upgrading:** migration `0010` runs automatically. `localgate serve` now listens on your network
+by default — use `--local` (or set `LOCALGATE_HOST=127.0.0.1`) to keep the old behaviour.
 
 ### Added
 
