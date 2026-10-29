@@ -14,6 +14,7 @@ import contextlib
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Coroutine
@@ -35,7 +36,7 @@ from localgate.core.db_config_store import (
     redact_database_url,
     save_database_url,
 )
-from localgate.core.key_policy import QUOTA_PERIODS, as_utc, is_expired
+from localgate.core.key_policy import NETWORK_ACCESS, QUOTA_PERIODS, as_utc, is_expired
 from localgate.core.netinfo import is_loopback_host, share_urls
 from localgate.core.passwords import password_problem
 from localgate.db.engine import current_revision, init_models, make_engine, make_session_factory
@@ -219,19 +220,30 @@ def serve(
             "Requires --proxy-headers. Defaults to FORWARDED_ALLOW_IPS env var."
         ),
     ),
-    share: bool = typer.Option(
-        False,
-        "--share",
+    share: bool | None = typer.Option(
+        None,
+        "--share/--local",
         help=(
-            "Let other devices use this machine's models: listen on the network and "
-            "print the addresses to give them. The dashboard stays on trusted networks."
+            "Share with other devices on this network (the default) or keep the gateway "
+            "to this machine (--local). The dashboard stays on trusted networks either way."
+        ),
+    ),
+    public: bool = typer.Option(
+        False,
+        "--public",
+        help=(
+            "Also give the gateway an internet address (a free Cloudflare tunnel, set up "
+            "automatically) so devices on other networks can connect."
         ),
     ),
 ) -> None:
-    """Start the gateway."""
+    """Start the gateway — shared with the other devices on your network."""
     new_admin_key = _ensure_admin_key()
     settings = _settings()
-    bind_host = "0.0.0.0" if share else (host or settings.host)  # noqa: S104
+    # Sharing is the point of a gateway, so it's the default — unless the address
+    # was chosen explicitly (--host, LOCALGATE_HOST) or --local asks for this machine only.
+    sharing = share if share is not None else "host" not in settings.model_fields_set
+    bind_host = host or ("0.0.0.0" if sharing else settings.host)  # noqa: S104
     bind_port = port or settings.port
     if not is_loopback_host(bind_host) and settings.uses_insecure_admin_key:
         typer.secho(
@@ -261,8 +273,10 @@ def serve(
         typer.echo(f"  sign in at  {dashboard}   (show the key again: localgate admin-key)")
         typer.echo("  Or create an email/password login: localgate users create")
         typer.echo()
-    if not is_loopback_host(bind_host):
-        _print_share_box(bind_port, settings)
+    tunnel = _start_tunnel(bind_port) if public else None
+    public_url = tunnel.url if tunnel is not None else settings.public_url
+    if not is_loopback_host(bind_host) or tunnel is not None:
+        _print_share_box(bind_port, settings, public_url, lan=not is_loopback_host(bind_host))
     common: dict = {
         "host": bind_host,
         "port": bind_port,
@@ -278,35 +292,83 @@ def serve(
         # rather than forking a supervisor that exits immediately after handing off.
         from localgate.app import create_app  # noqa: PLC0415
 
-        # The app needs the port it's actually on (for the LAN announcement), and
-        # --share turns that announcement on.
+        # The app needs the port it's actually on (for the LAN announcement), whether
+        # it's shared (announce it), and the tunnel's address (for the Share page).
         app_settings = settings.model_copy(
-            update={"port": bind_port, "discovery_enabled": settings.discovery_enabled or share}
+            update={
+                "port": bind_port,
+                "discovery_enabled": settings.discovery_enabled or not is_loopback_host(bind_host),
+                "public_url": public_url,
+                "behind_tunnel": tunnel is not None,
+            }
         )
-        uvicorn.run(create_app(app_settings), reload=reload, **common)
+        application = create_app(app_settings)
+        if tunnel is not None:
+            application.state.initial_tunnel = tunnel  # the dashboard can switch it off
+        try:
+            uvicorn.run(application, reload=reload, **common)
+        finally:
+            if tunnel is not None:
+                tunnel.stop()
     else:
         # Multi-worker: must use a string import path + factory so each worker
-        # forks and calls create_app() independently.
-        uvicorn.run("localgate.app:create_app", factory=True, workers=workers, **common)
+        # forks and calls create_app() independently — settings travel as env vars.
+        if tunnel is not None:
+            os.environ["LOCALGATE_PUBLIC_URL"] = tunnel.url
+            os.environ["LOCALGATE_BEHIND_TUNNEL"] = "true"
+        try:
+            uvicorn.run("localgate.app:create_app", factory=True, workers=workers, **common)
+        finally:
+            if tunnel is not None:
+                tunnel.stop()
 
 
-def _print_share_box(port: int, settings: Settings) -> None:
+def _start_tunnel(port: int) -> Any:
+    """`--public`: a Cloudflare quick tunnel, or None (with the reason) if it fails."""
+    from localgate.core.tunnel import (  # noqa: PLC0415
+        TunnelError,
+        ensure_cloudflared,
+        start_quick_tunnel,
+    )
+
+    try:
+        if shutil.which("cloudflared") is None:
+            typer.echo("Getting cloudflared from Cloudflare (once, ~40 MB)…")
+        binary = ensure_cloudflared()
+        typer.echo("Opening an internet address for this gateway…")
+        return start_quick_tunnel(port, binary)
+    except TunnelError as exc:
+        typer.secho(f"No internet address: {exc}", fg=typer.colors.YELLOW, err=True)
+        return None
+
+
+def _print_share_box(
+    port: int, settings: Settings, public_url: str | None = None, lan: bool = True
+) -> None:
     """Where other devices reach this gateway, and how to hand them access."""
-    urls = share_urls(port, settings.public_url)
+    urls = share_urls(port, public_url) if lan else []
+    if not lan and public_url:
+        urls = [{"label": "Public", "url": public_url}]
     typer.secho("Sharing this machine's models", fg=typer.colors.GREEN, bold=True)
     if not urls:
         typer.echo("  No network address found — is this machine on a network?")
     for entry in urls:
-        typer.echo(f"  {entry['label']:<14} {entry['url']}/v1")
+        label = "Internet" if entry["label"] == "Public" else entry["label"]
+        typer.echo(f"  {label:<14} {entry['url']}/v1")
     typer.echo(
         f"  Give each device its own key: http://127.0.0.1:{port}/dashboard/#/share "
         "(or `localgate keys create --name <device>`)."
     )
-    if not settings.public_url:
+    if public_url and public_url.endswith("trycloudflare.com"):
         typer.secho(
-            "  This is plain HTTP — fine on your own network or Tailscale. For the internet, "
-            "put HTTPS in front (docs/sharing.md: Tailscale, Cloudflare Tunnel, Caddy).",
-            fg=typer.colors.YELLOW,
+            "  The internet address works from any network (HTTPS) and changes each time "
+            "the gateway restarts — the Share page always shows the current one.",
+            fg=typer.colors.CYAN,
+        )
+    elif not public_url:
+        typer.echo(
+            "  Devices on other networks: `localgate serve --public` (or Tailscale; "
+            "see docs/sharing.md). `--local` keeps the gateway to this machine."
         )
     typer.echo()
 
@@ -710,16 +772,18 @@ def _run_steps(steps: list[list[str]], *, check: bool = True) -> bool:
 
 @service_app.command("install")
 def service_install(
-    share: bool = typer.Option(
-        False, "--share", help="Serve other devices too (see `serve --share`)."
+    share: bool | None = typer.Option(
+        None, "--share/--local", help="Share on the network (default) or this machine only."
     ),
+    public: bool = typer.Option(False, "--public", help="Also an internet address (see serve)."),
     host: str | None = typer.Option(None, "--host", help="Interface to bind."),
     port: int | None = typer.Option(None, "--port", help="Port to bind."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be installed."),
 ) -> None:
     """Start `localgate serve` at login and keep it running."""
     serve_args = (
-        (["--share"] if share else [])
+        (["--local"] if share is False else [])
+        + (["--public"] if public else [])
         + (["--host", host] if host else [])
         + (["--port", str(port)] if port else [])
     )
@@ -875,7 +939,10 @@ def doctor() -> None:
 
     typer.secho("\n--- network exposure ---", bold=True)
     if is_loopback_host(settings.host):
-        _check("listens on", f"{settings.host} (this machine only; `serve --share` to share)")
+        _check(
+            "listens on",
+            f"{settings.host} (this machine only — `localgate serve` without --local shares it)",
+        )
     else:
         _check("listens on", f"{settings.host} (reachable from the network)", warn=True)
     everyone = "0.0.0.0/0" in settings.admin_allowed_networks
@@ -987,7 +1054,7 @@ def login(
 def discover(
     timeout: float = typer.Option(3.0, "--timeout", help="Seconds to listen for gateways."),
 ) -> None:
-    """List localgate gateways on this network (ones started with `serve --share`)."""
+    """List localgate gateways announced on this network."""
     from localgate.core.discovery import DiscoveryUnavailable, discover  # noqa: PLC0415
 
     try:
@@ -996,7 +1063,7 @@ def discover(
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
         raise typer.Exit(code=2) from exc
     if not found:
-        typer.echo("No gateways found. On the GPU machine, run: localgate serve --share")
+        typer.echo("No gateways found. On the GPU machine, run: localgate serve")
         raise typer.Exit(code=1)
     for gateway in found:
         typer.echo(f"  {gateway.name:<24} {gateway.url:<28} v{gateway.version}")
@@ -1780,6 +1847,7 @@ def _limit_columns(
     expires: str | None,
     max_concurrent: int | None,
     store_conversations: bool | None,
+    network: str | None = None,
 ) -> dict[str, Any]:
     """Only the limits that were given. For numbers, 0 removes the limit."""
     columns: dict[str, Any] = {}
@@ -1800,6 +1868,10 @@ def _limit_columns(
         columns["expires_at"] = _parse_expires(expires)
     if store_conversations is not None:
         columns["store_conversations"] = store_conversations
+    if network is not None:
+        if network not in NETWORK_ACCESS:
+            raise typer.BadParameter("--network must be 'local', 'internet' or 'both'")
+        columns["network_access"] = network
     return columns
 
 
@@ -1817,6 +1889,8 @@ def _describe_limits(key: Any) -> list[str]:
         parts.append(f"{key.max_concurrent} at once")
     if key.store_conversations is False:
         parts.append("conversations not stored")
+    if (key.network_access or "both") != "both":
+        parts.append(f"{key.network_access} only")
     return parts
 
 
@@ -1845,6 +1919,9 @@ def keys_create(
         "--store-conversations/--no-store-conversations",
         help="Keep this key's conversations for memory (the owner can read them).",
     ),
+    network: str | None = typer.Option(
+        None, "--network", help="Where the key works: local, internet or both (default)."
+    ),
 ) -> None:
     """Create an API key and print it. This is the only time it is ever shown."""
     settings = _settings()
@@ -1857,6 +1934,7 @@ def keys_create(
         expires=expires,
         max_concurrent=max_concurrent,
         store_conversations=None if store_conversations else False,
+        network=network,
     )
 
     async def create(session: Any) -> tuple[Any, str]:
@@ -1969,6 +2047,9 @@ def keys_update(
     store_conversations: bool | None = typer.Option(
         None, "--store-conversations/--no-store-conversations", help="Keep conversations."
     ),
+    network: str | None = typer.Option(
+        None, "--network", help="Where the key works: local, internet or both (default)."
+    ),
 ) -> None:
     """Change a key's rate limit or other limits without reissuing it."""
     settings = _settings()
@@ -1980,6 +2061,7 @@ def keys_update(
         expires=expires,
         max_concurrent=max_concurrent,
         store_conversations=store_conversations,
+        network=network,
     )
     if rate_limit is not None:
         columns["rate_limit_per_min"] = rate_limit

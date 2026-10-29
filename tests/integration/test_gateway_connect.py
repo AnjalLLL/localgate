@@ -46,7 +46,7 @@ async def test_nothing_listening_points_at_serve_share():
     with socket.socket() as probe:  # a port nothing is listening on
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    with pytest.raises(gateway_client.GatewayError, match="serve --share"):
+    with pytest.raises(gateway_client.GatewayError, match="localgate serve"):
         await gateway_client.verify(f"http://127.0.0.1:{port}", "lg_x", timeout=3)
 
 

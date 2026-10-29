@@ -60,7 +60,7 @@ def test_db_upgrade_then_current(env):
 
     current = runner.invoke(app, ["db", "current"])
     assert current.exit_code == 0
-    assert "0009" in current.stdout
+    assert "0010" in current.stdout
 
 
 def test_db_current_on_an_unmigrated_database_says_what_to_do(env):
@@ -368,3 +368,54 @@ def test_account_changes_from_the_cli_are_audited(env):
     lines = result.stdout.splitlines()
     assert "user.deleted ana@example.com" in lines[0] and "cli" in lines[0]
     assert "user.created ana@example.com" in lines[1]
+
+
+def test_serve_shares_by_default_and_local_keeps_it_here(fresh, monkeypatch):
+    started: list[dict] = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: started.append(kwargs))
+    monkeypatch.setattr("localgate.cli.share_urls", lambda port, public_url=None: [])
+    assert runner.invoke(app, ["serve"]).exit_code == 0
+    assert runner.invoke(app, ["serve", "--local"]).exit_code == 0
+    assert [s["host"] for s in started] == ["0.0.0.0", "127.0.0.1"]
+
+
+def test_an_explicit_host_setting_is_respected(fresh, monkeypatch):
+    started: list[dict] = []
+    monkeypatch.setenv("LOCALGATE_HOST", "127.0.0.1")
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: started.append(kwargs))
+    assert runner.invoke(app, ["serve"]).exit_code == 0
+    assert started[0]["host"] == "127.0.0.1"
+
+
+def test_serve_public_opens_a_tunnel_and_tells_the_app(fresh, monkeypatch):
+    from localgate import cli
+
+    stopped: list[bool] = []
+
+    class FakeTunnel:
+        url = "https://quiet-forest.trycloudflare.com"
+
+        def stop(self):
+            stopped.append(True)
+
+    seen: list = []
+    monkeypatch.setattr(cli, "_start_tunnel", lambda port: FakeTunnel())
+    monkeypatch.setattr(
+        "localgate.cli.share_urls",
+        lambda port, public_url=None: [{"label": "Public", "url": public_url}],
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: seen.append(app.state.settings))
+    result = runner.invoke(app, ["serve", "--public"])
+    assert result.exit_code == 0, result.output
+    assert "https://quiet-forest.trycloudflare.com/v1" in result.stdout
+    assert seen[0].public_url == "https://quiet-forest.trycloudflare.com"
+    assert seen[0].behind_tunnel is True
+    assert stopped == [True]  # the tunnel closes with the server
+
+
+def test_keys_can_be_limited_to_a_network(env):
+    created = runner.invoke(app, ["keys", "create", "--name", "phone", "--network", "local"])
+    assert created.exit_code == 0, created.output
+    assert "local only" in created.stdout
+    bad = runner.invoke(app, ["keys", "create", "--name", "x", "--network", "moon"])
+    assert bad.exit_code != 0

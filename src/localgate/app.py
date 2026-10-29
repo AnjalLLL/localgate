@@ -30,8 +30,9 @@ from localgate.core.db_config_store import (
 from localgate.core.errors import ConfigurationError, error_body, install_exception_handlers
 from localgate.core.logging import configure_logging, get_logger
 from localgate.core.model_info import ModelInfoCache
-from localgate.core.netinfo import is_loopback_host
+from localgate.core.netinfo import client_address, is_loopback_host
 from localgate.core.rate_limiter import RateLimiter
+from localgate.core.tunnel import TunnelManager
 from localgate.db.engine import init_models, make_engine, make_session_factory
 from localgate.middleware import RequestContextMiddleware
 
@@ -193,6 +194,12 @@ def create_app(
                 member.scheduler.remote = leases
             shared = [app.state.rate_limiter, leases]
         app.state.model_info = ModelInfoCache()
+        # The internet address (Cloudflare quick tunnel), switchable from the dashboard;
+        # `serve --public` hands over the tunnel it already opened.
+        app.state.tunnel = TunnelManager(settings.port)
+        initial_tunnel = getattr(app.state, "initial_tunnel", None)
+        if initial_tunnel is not None:
+            app.state.tunnel.adopt(initial_tunnel)
         app.state.cache = PromptCache(
             max_entries=settings.cache_max_entries, ttl_seconds=settings.cache_ttl_seconds
         )
@@ -226,6 +233,7 @@ def create_app(
         # makes SIGTERM graceful rather than abrupt.
         if advertisement is not None:
             await advertisement.close()
+        app.state.tunnel.stop()
         await app.state.pool.aclose()
         for client in shared:
             await client.aclose()
@@ -266,7 +274,7 @@ def create_app(
         /v1 API — what other devices are given keys for — is unaffected."""
         path = request.url.path
         if _is_admin_surface(path):
-            client = request.client.host if request.client else None
+            client = client_address(request)
             if not settings.is_trusted_address(client):
                 return _untrusted_response(path)
         return await call_next(request)
