@@ -7,6 +7,8 @@ that makes a small model remember far more than its context window holds.**
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
+Website: <https://localgate.ghimireanjal.com.np>
+
 ![localgate in 90 seconds: localgate code fixes failing tests in a real session, then the dashboard shows the chat, that agent run step by step, its memory ledger, and the themes](docs/images/localgate-demo.gif)
 
 <sub>A real session: <code>localgate code</code> with <b>qwen2.5-coder:7b</b> on Ollama runs
