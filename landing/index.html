@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>localgate — turn any local LLM into a managed API</title>
+<meta name="description" content="Open-source, OpenAI-compatible gateway for local LLMs: API keys, token accounting, RAG memory past the context window, a dashboard and a built-in coding agent. MIT licensed.">
+<link rel="canonical" href="https://localgate.ghimireanjal.com.np/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="localgate — turn any local LLM into a managed API">
+<meta property="og:description" content="API keys, token accounting and RAG memory for Ollama, vLLM, llama.cpp or any OpenAI-compatible server. Open source, MIT.">
+<meta property="og:url" content="https://localgate.ghimireanjal.com.np/">
+<meta property="og:image" content="https://localgate.ghimireanjal.com.np/img/overview.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#020617">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23FFB454' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 17l6-5-6-5M12 19h8'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#020617; --surface:#0F172A; --card:#0E1223; --muted:#1E293B; --border:#334155;
+  --fg:#F8FAFC; --fg-2:#CBD5E1; --fg-3:#94A3B8;
+  --accent:#FFB454; --on-accent:#020617; --ring:#FFC477;
+  --sans:"IBM Plex Sans",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,monospace;
+  --max:1120px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 var(--sans);overflow-x:hidden}
+img{max-width:100%;height:auto;display:block}
+a{color:var(--accent)}
+code,pre,.mono{font-family:var(--mono)}
+:focus-visible{outline:2px solid var(--ring);outline-offset:3px;border-radius:6px}
+.wrap{max-width:var(--max);margin:0 auto;padding:0 16px}
+@media(min-width:768px){.wrap{padding:0 32px}}
+.skip{position:absolute;left:-999px;top:8px;background:var(--accent);color:var(--on-accent);padding:10px 14px;z-index:99}
+.skip:focus{left:8px}
+.sprite{position:absolute}.sr-live{position:absolute;left:-9999px}.fig{margin:0}
+svg.i{width:20px;height:20px;flex:none;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* nav */
+header{position:sticky;top:0;z-index:10;background:rgba(2,6,23,.88);backdrop-filter:blur(8px);border-bottom:1px solid var(--muted)}
+.nav{display:flex;align-items:center;gap:8px;height:64px}
+.brand{display:flex;align-items:center;gap:8px;color:var(--fg);text-decoration:none;font:600 17px var(--mono);min-height:44px;margin-right:auto}
+.brand svg{color:var(--accent)}
+.nav .links{display:none;gap:4px}
+@media(min-width:768px){.nav .links{display:flex}}
+.nav .links a{color:var(--fg-2);text-decoration:none;padding:10px 12px;min-height:44px;display:inline-flex;align-items:center;transition:color .2s}
+.nav .links a:hover{color:var(--fg)}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:10px 18px;border-radius:8px;font:600 15px var(--sans);text-decoration:none;cursor:pointer;border:1px solid transparent;transition:background .2s,border-color .2s}
+.btn-primary{background:var(--accent);color:var(--on-accent)}
+.btn-primary:hover{background:#FFC477}
+.btn-ghost{border-color:var(--border);color:var(--fg)}
+.btn-ghost:hover{border-color:var(--fg-3);background:var(--surface)}
+
+/* hero */
+.hero{padding:64px 0 40px;text-align:center}
+.badge{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--border);border-radius:999px;color:var(--fg-2);font:500 13px var(--mono)}
+.badge svg{color:var(--accent);width:16px;height:16px}
+h1{font-size:clamp(32px,6vw,56px);line-height:1.1;letter-spacing:-.02em;margin:20px auto 16px;max-width:16ch}
+h1 em{font-style:normal;color:var(--accent)}
+.lead{color:var(--fg-2);font-size:clamp(17px,2.2vw,19px);max-width:62ch;margin:0 auto 28px}
+.ctas{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-bottom:24px}
+.copy{display:inline-flex;align-items:center;gap:10px;max-width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px 4px 4px 16px;font:14px var(--mono)}
+.copy code{white-space:nowrap;overflow-x:auto;color:var(--fg)}
+.copy code::before{content:"$ ";color:var(--fg-3)}
+.copy button{min-width:44px;min-height:44px;background:none;border:0;color:var(--fg-2);border-radius:6px;cursor:pointer;display:grid;place-items:center}
+.copy button:hover{background:var(--muted);color:var(--fg)}
+
+/* shot */
+.shot{margin:32px auto 0;max-width:960px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--surface);box-shadow:0 12px 32px -12px rgba(0,0,0,.6)}
+.shot .bar{display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid var(--muted)}
+.shot .bar span{width:10px;height:10px;border-radius:50%;background:var(--border)}
+figcaption{color:var(--fg-3);font-size:14px;margin-top:12px;text-align:center}
+
+/* sections */
+section{padding:72px 0;border-top:1px solid var(--muted)}
+h2{font-size:clamp(26px,4vw,36px);line-height:1.2;margin:0 0 12px;letter-spacing:-.01em}
+.sub{color:var(--fg-2);max-width:64ch;margin:0 0 40px}
+.grid{display:grid;gap:16px;grid-template-columns:1fr}
+@media(min-width:768px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(min-width:1024px){.grid{grid-template-columns:repeat(3,1fr)}}
+.card{background:var(--card);border:1px solid var(--muted);border-radius:12px;padding:22px;transition:border-color .2s}
+.card:hover{border-color:var(--border)}
+.card h3{display:flex;align-items:center;gap:10px;font-size:17px;margin:0 0 8px}
+.card h3 svg{color:var(--accent)}
+.card p{margin:0;color:var(--fg-2);font-size:15px}
+
+/* flow */
+.flow{display:grid;gap:12px;grid-template-columns:1fr;align-items:stretch}
+@media(min-width:1024px){.flow{grid-template-columns:1fr auto 1.4fr auto 1fr}}
+.node{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.node.main{border-color:var(--accent)}
+.node h3{margin:0 0 6px;font:600 16px var(--mono)}
+.node ul{margin:8px 0 0;padding-left:18px;color:var(--fg-2);font-size:15px}
+.node p{margin:0;color:var(--fg-2);font-size:15px}
+.arrow{display:grid;place-items:center;color:var(--fg-3)}
+.arrow svg{transform:rotate(90deg)}
+@media(min-width:1024px){.arrow svg{transform:none}}
+
+/* quick start */
+.steps{display:grid;gap:20px;grid-template-columns:1fr}
+@media(min-width:1024px){.steps{grid-template-columns:1fr 1fr}}
+.step h3{font-size:17px;margin:0 0 10px}
+pre{margin:0;background:var(--surface);border:1px solid var(--muted);border-radius:10px;padding:16px;overflow-x:auto;font-size:14px;line-height:1.7;color:var(--fg)}
+pre .c{color:var(--fg-3)}
+.live{margin-top:32px;padding:20px;border:1px dashed var(--border);border-radius:12px;color:var(--fg-2)}
+.live strong{color:var(--fg)}
+
+footer{border-top:1px solid var(--muted);padding:32px 0;color:var(--fg-3);font-size:14px}
+footer .wrap{display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between}
+footer a{color:var(--fg-2);display:inline-flex;align-items:center;gap:8px;min-height:44px}
+
+@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<svg class="sprite" width="0" height="0" aria-hidden="true">
+  <symbol id="gh" viewBox="0 0 24 24"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></symbol>
+  <symbol id="term" viewBox="0 0 24 24"><path d="M4 17l6-5-6-5M12 19h8"/></symbol>
+  <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+</svg>
+
+<header>
+  <nav class="wrap nav" aria-label="Main">
+    <a class="brand" href="#top"><svg class="i" aria-hidden="true"><use href="#term"/></svg>localgate</a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#quickstart">Quick start</a>
+    </div>
+    <a class="btn btn-ghost js-repo" href="https://github.com/AnjalLLL/localgate"><svg class="i" aria-hidden="true"><use href="#gh"/></svg>GitHub</a>
+  </nav>
+</header>
+
+<main id="main">
+  <div class="wrap hero" id="top">
+    <span class="badge"><svg class="i" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM9 12l2 2 4-4"/></svg>Open source · MIT · Python 3.10+</span>
+    <h1>Turn any local LLM into a <em>managed API</em></h1>
+    <p class="lead">Real API keys, token accounting, and RAG memory that makes a small model remember far more than its context window holds. It sits between your app and Ollama, vLLM or llama.cpp, without touching how you serve models.</p>
+    <div class="ctas">
+      <a class="btn btn-primary" href="#quickstart">Get started<svg class="i" aria-hidden="true"><use href="#arrow"/></svg></a>
+      <a class="btn btn-ghost js-repo" href="https://github.com/AnjalLLL/localgate"><svg class="i" aria-hidden="true"><use href="#gh"/></svg>View on GitHub</a>
+    </div>
+    <div class="copy">
+      <code id="install">pip install localgate</code>
+      <button type="button" data-copy="install" aria-label="Copy install command">
+        <svg class="i" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+      </button>
+    </div>
+    <span class="sr-live" aria-live="polite"></span>
+
+    <figure class="fig">
+      <div class="shot">
+        <div class="bar" aria-hidden="true"><span></span><span></span><span></span></div>
+        <img src="img/overview.png" width="2160" height="1350" alt="localgate dashboard Overview in the Sunrise theme: requests, total tokens, prompt and completion tokens, active keys, agent tool-call success, backend health, tokens per day and usage by model">
+      </div>
+      <figcaption>The built-in dashboard, Sunrise theme. Real data from a local install.</figcaption>
+    </figure>
+  </div>
+
+  <section id="features">
+    <div class="wrap">
+      <h2>What Ollama doesn't do for you</h2>
+      <p class="sub">Model servers solve serving. localgate is the management layer around it.</p>
+      <div class="grid">
+        <article class="card"><h3><svg class="i" aria-hidden="true"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg>OpenAI-compatible</h3><p>Works with any OpenAI SDK, LangChain or curl. Unknown fields are forwarded to the backend.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>API key management</h3><p>Create, revoke and rate-limit per key. Keys are hashed, never stored raw.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><path d="M12 3C7 3 4 4.5 4 6v12c0 1.5 3 3 8 3s8-1.5 8-3V6c0-1.5-3-3-8-3z"/><path d="M4 6c0 1.5 3 3 8 3s8-1.5 8-3M4 12c0 1.5 3 3 8 3s8-1.5 8-3"/></svg>RAG memory</h3><p>Send an <code>X-Session-ID</code>: turns are chunked, embedded, retrieved and folded into a rolling summary.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><path d="M3 3v18h18M7 15l4-4 3 3 5-6"/></svg>Token accounting</h3><p>Prompt and completion tokens per key, per model, over time.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 20V9"/></svg>Dashboard</h3><p>Chat, agent runs, memory, keys and usage at <code>/dashboard/</code>. No build step, works offline.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><path d="M4 17l6-5-6-5M12 19h8"/></svg>Built-in coding agent</h3><p><code>localgate code</code> reads, edits and tests your project, with diffs, sandboxed commands and a session ledger.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>Share your GPU</h3><p>Per-device keys with model, quota and expiry limits, a fair queue, and QR-code setup.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01"/></svg>Any backend, any DB</h3><p>Ollama, vLLM, llama.cpp or any OpenAI-compatible server. SQLite by default, Postgres with one env var.</p></article>
+        <article class="card"><h3><svg class="i" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Production-ready</h3><p>JSON logs with correlation IDs, Prometheus metrics, liveness/readiness split, graceful shutdown.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <p class="sub">Your app talks to localgate exactly as it would talk to OpenAI. localgate checks the key, adds memory, forwards to your inference server and records usage.</p>
+      <div class="flow">
+        <div class="node"><h3>Your app</h3><p>OpenAI SDK, LangChain, curl, or <code>localgate code</code>, pointed at <code>localhost:8000/v1</code>.</p></div>
+        <div class="arrow" aria-hidden="true"><svg class="i"><use href="#arrow"/></svg></div>
+        <div class="node main"><h3>localgate</h3>
+          <ul><li>Auth &amp; per-key rate limits</li><li>RAG memory + rolling summary</li><li>Model aliasing, optional prompt cache</li><li>Token accounting in SQLite or Postgres</li></ul></div>
+        <div class="arrow" aria-hidden="true"><svg class="i"><use href="#arrow"/></svg></div>
+        <div class="node"><h3>Inference</h3><p>Ollama, vLLM, llama.cpp or any OpenAI-compatible server, on this machine or another.</p></div>
+      </div>
+      <figure class="fig">
+        <div class="shot">
+          <div class="bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <img src="img/agent-runs.png" width="2160" height="1350" loading="lazy" alt="Agent runs page in the Sunrise theme: run count, tool success rate, reliability by model and by tool, and a recent run's tool calls step by step">
+        </div>
+        <figcaption>Agent runs: every <code>localgate code</code> task as a timeline, with reliability per model and per tool.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="quickstart">
+    <div class="wrap">
+      <h2>Quick start</h2>
+      <p class="sub">Straight from the README. Also available as <code>uv tool install localgate</code>, <code>pipx install localgate</code> or the image <code>ghcr.io/anjalllll/localgate</code>.</p>
+      <div class="steps">
+        <div class="step"><h3>1. Run a backend and the gateway</h3>
+<pre><code>pip install localgate
+ollama serve                 <span class="c"># your inference backend</span>
+ollama pull llama3
+ollama pull nomic-embed-text <span class="c"># enables RAG memory</span>
+
+localgate serve              <span class="c"># first run: create your dashboard login</span>
+localgate keys create --name my-app</code></pre></div>
+        <div class="step"><h3>2. Use it like OpenAI</h3>
+<pre><code>from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1",
+                api_key="lg_9f3a...")
+
+client.chat.completions.create(
+    model="llama3",
+    messages=[{"role": "user", "content": "Hello!"}],
+)</code></pre></div>
+      </div>
+      <div class="live" id="live" role="status">
+        <strong>Dashboard:</strong> once <code>localgate serve</code> is running, open <a href="http://localhost:8000">http://localhost:8000</a> for the getting-started page and dashboard. It runs on your machine, so there is no hosted demo.
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>localgate · MIT License</span>
+    <a class="js-repo" href="https://github.com/AnjalLLL/localgate"><svg class="i" aria-hidden="true"><use href="#gh"/></svg>AnjalLLL/localgate</a>
+  </div>
+</footer>
+
+<script src="config.js"></script>
+<script>
+(function () {
+  var cfg = window.LOCALGATE_CONFIG || {};
+  if (cfg.repoUrl) document.querySelectorAll(".js-repo").forEach(function (a) { a.href = cfg.repoUrl; });
+
+  var live = document.querySelector(".sr-live");
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = document.getElementById(b.dataset.copy).textContent;
+      navigator.clipboard.writeText(text).then(function () { live.textContent = "Copied"; },
+        function () { live.textContent = "Copy failed, select the command manually"; });
+    });
+  });
+
+  // Live check only makes sense when this page is opened on the same machine as the gateway.
+  if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) || !cfg.backendUrl) return;
+  var box = document.getElementById("live"), base = cfg.backendUrl.replace(/\/$/, "");
+  fetch(base + "/health/live").then(function (r) { return r.json(); }).then(function (d) {
+    box.innerHTML = "<strong>Gateway detected</strong> (v" + String(d.version).replace(/[^\w.+-]/g, "") +
+      ") at <a></a>. Open it for the dashboard.";
+    var a = box.querySelector("a"); a.href = base + "/"; a.textContent = base;
+  }).catch(function () {
+    box.innerHTML = "<strong>No gateway at <code></code>.</strong> Run <code>localgate serve</code> using the steps above.";
+    box.querySelector("code").textContent = base;
+  });
+})();
+</script>
+</body>
+</html>
