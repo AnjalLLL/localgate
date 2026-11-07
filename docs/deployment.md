@@ -127,7 +127,7 @@ localgate db current    # prints the current revision
 ```
 
 Upgrading from localgate 0.1–0.2 is handled automatically — see
-[Database Setup](database-setup.md#upgrading-from-localgate-01-02).
+[Database Setup](database-setup.md#upgrading-from-localgate-0102).
 
 ## Monitoring
 
