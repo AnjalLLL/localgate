@@ -88,7 +88,7 @@ localgate = "localgate.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/AnjalLLL/localgate"
-Documentation = "https://github.com/AnjalLLL/localgate/tree/main/docs"
+Documentation = "https://anjallll.github.io/localgate/"
 Repository = "https://github.com/AnjalLLL/localgate"
 Issues = "https://github.com/AnjalLLL/localgate/issues"
 Changelog = "https://github.com/AnjalLLL/localgate/blob/main/CHANGELOG.md"

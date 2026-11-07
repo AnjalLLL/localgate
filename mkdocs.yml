@@ -1,0 +1,24 @@
+site_name: localgate
+site_url: https://anjallll.github.io/localgate/
+repo_url: https://github.com/AnjalLLL/localgate
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle: { icon: material/brightness-7, name: Dark mode }
+    - scheme: slate
+      toggle: { icon: material/brightness-4, name: Light mode }
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - API reference: api-reference.md
+  - Architecture: architecture.md
+  - Database setup: database-setup.md
+  - Deployment: deployment.md
+  - RAG memory: rag-memory.md
+  - Sharing: sharing.md
+  - Decisions:
+      - Dependencies over middleware: decisions/0001-dependencies-over-middleware.md
+      - JSON embeddings over pgvector: decisions/0002-json-embeddings-over-pgvector.md
+      - SHA-256 for API keys: decisions/0003-sha256-for-api-keys.md
