@@ -1,6 +1,6 @@
 # Multi-stage: the build stage carries uv and the lockfile; the runtime stage carries
 # neither. What ships is the interpreter, the venv, and the source — nothing else.
-FROM python:3.12-slim AS builder
+FROM python:3.15-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
@@ -21,7 +21,7 @@ COPY README.md ./
 RUN uv sync --frozen --no-dev --extra postgres
 
 
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 # Don't run as root. A gateway is network-facing by definition.
 RUN useradd --create-home --uid 1000 localgate
